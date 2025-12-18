@@ -76,39 +76,9 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    export SMART_QUERY_MAX_RPS=3
    ```
 
-3. **直接执行示例脚本**：在 VPS 终端用“内联脚本”即可跑通一轮抓取与落盘，所有文件会写到当前目录的 `data/` 下：
+3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，直接运行即可抓取 leaderboard 用户、获取 30 天成交并将结果写入当前目录的 `data/` 下：
    ```bash
-   python - <<'PY'
-   import datetime as dt
-   from pathlib import Path
-
-   from poly_martmoney_query.api_client import DataApiClient
-   from poly_martmoney_query.processors import aggregate_markets
-   from poly_martmoney_query.storage import append_trades_csv, write_market_stats_csv
-
-   client = DataApiClient()
-
-   leaderboard_users = []
-   for item in client.iter_leaderboard(period="ALL", order_by="vol", page_size=100, max_pages=2):
-       addr = item.get("proxyWallet") or item.get("address")
-       if addr:
-           leaderboard_users.append(addr)
-
-   if not leaderboard_users:
-       raise SystemExit("未获取到 leaderboard 用户")
-
-   user = leaderboard_users[0]
-   start = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=30)
-   trades = client.fetch_trades(user=user, start_time=start)
-
-   stats = aggregate_markets(trades, user=user, start_time=start, end_time=None, resolutions={})
-
-   data_dir = Path("data")
-   data_dir.mkdir(exist_ok=True)
-   append_trades_csv(data_dir / "trades_raw.csv", trades)
-   write_market_stats_csv(data_dir / "market_stats.csv", stats)
-   print("完成：成交明细与市场统计已落盘到 data/ 目录")
-   PY
+   python poly_martmoney_query_run.py
    ```
 
 4. **查看输出**：
@@ -117,7 +87,7 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    head -n 5 data/market_stats_summary.csv
    ```
 
-上述流程适合在 VPS 里开一个临时 `tmux`/`screen` 会话直接执行，无需额外脚本文件；若要定时运行，可将第 3 步的代码保存为 `.py` 文件并配合 `cron` 或 `systemd` 定时。
+上述流程适合在 VPS 里开一个临时 `tmux`/`screen` 会话直接执行；若要定时运行，可直接调用 `python poly_martmoney_query_run.py` 并配合 `cron` 或 `systemd` 定时。
 
 ## 与参考材料的衔接
 仓库中的《POLYMARKET_MAKER_REVERSE-原版代码参考材料》提供了构建连接、成交查询、条件筛选等已验证逻辑。本套脚本在请求节奏控制与数据解析上延续了原版做法，可直接替换或嵌入到原有自动化流程中，仅需按上述示例导入对应函数即可。
