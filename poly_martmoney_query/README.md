@@ -60,6 +60,65 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
   - `append_trades_csv` 以 `tx_hash` 去重写入标准字段，便于后续增量同步。
   - `write_market_stats_csv` 生成市场级明细与 `_summary` 汇总两份文件，便于排名或看板展示。
 
+## VPS 场景下的运行步骤（直接执行脚本）
+若需要在没有 IDE 的 VPS 上直接运行，可按以下顺序在仓库根目录操作：
+
+1. **准备虚拟环境与依赖**（推荐隔离）：
+   ```bash
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install --upgrade pip requests
+   ```
+
+2. **设置环境变量（可选）**：根据带宽与 API 限流情况调整节奏，示例为将最大回退 30 秒、限速 3 RPS：
+   ```bash
+   export SMART_QUERY_MAX_BACKOFF=30
+   export SMART_QUERY_MAX_RPS=3
+   ```
+
+3. **直接执行示例脚本**：在 VPS 终端用“内联脚本”即可跑通一轮抓取与落盘，所有文件会写到当前目录的 `data/` 下：
+   ```bash
+   python - <<'PY'
+   import datetime as dt
+   from pathlib import Path
+
+   from poly_martmoney_query.api_client import DataApiClient
+   from poly_martmoney_query.processors import aggregate_markets
+   from poly_martmoney_query.storage import append_trades_csv, write_market_stats_csv
+
+   client = DataApiClient()
+
+   leaderboard_users = []
+   for item in client.iter_leaderboard(period="ALL", order_by="vol", page_size=100, max_pages=2):
+       addr = item.get("proxyWallet") or item.get("address")
+       if addr:
+           leaderboard_users.append(addr)
+
+   if not leaderboard_users:
+       raise SystemExit("未获取到 leaderboard 用户")
+
+   user = leaderboard_users[0]
+   start = dt.datetime.now(tz=dt.timezone.utc) - dt.timedelta(days=30)
+   trades = client.fetch_trades(user=user, start_time=start)
+
+   stats = aggregate_markets(trades, user=user, start_time=start, end_time=None, resolutions={})
+
+   data_dir = Path("data")
+   data_dir.mkdir(exist_ok=True)
+   append_trades_csv(data_dir / "trades_raw.csv", trades)
+   write_market_stats_csv(data_dir / "market_stats.csv", stats)
+   print("完成：成交明细与市场统计已落盘到 data/ 目录")
+   PY
+   ```
+
+4. **查看输出**：
+   ```bash
+   ls -lh data
+   head -n 5 data/market_stats_summary.csv
+   ```
+
+上述流程适合在 VPS 里开一个临时 `tmux`/`screen` 会话直接执行，无需额外脚本文件；若要定时运行，可将第 3 步的代码保存为 `.py` 文件并配合 `cron` 或 `systemd` 定时。
+
 ## 与参考材料的衔接
 仓库中的《POLYMARKET_MAKER_REVERSE-原版代码参考材料》提供了构建连接、成交查询、条件筛选等已验证逻辑。本套脚本在请求节奏控制与数据解析上延续了原版做法，可直接替换或嵌入到原有自动化流程中，仅需按上述示例导入对应函数即可。
 
