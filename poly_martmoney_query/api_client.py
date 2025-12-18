@@ -106,8 +106,8 @@ class DataApiClient:
     ) -> List[Dict[str, Any]]:
         url = f"{self.host}/v1/leaderboard"
         params = {
-            "period": period.upper(),
-            "orderBy": order_by,
+            "timePeriod": period.upper(),
+            "orderBy": order_by.upper(),
             "limit": limit,
             "offset": offset,
         }
@@ -160,6 +160,7 @@ class DataApiClient:
         end_time: Optional[dt.datetime] = None,
         page_size: int = 100,
         max_pages: Optional[int] = 200,
+        taker_only: bool = False,
     ) -> List[Trade]:
         url = f"{self.host}/trades"
         offset = 0
@@ -169,7 +170,12 @@ class DataApiClient:
         end_ts = end_time.timestamp() if end_time else None
 
         while True:
-            params = {"user": user, "limit": page_size, "offset": offset}
+            params = {
+                "user": user,
+                "limit": page_size,
+                "offset": offset,
+                "takerOnly": taker_only,
+            }
             resp = _request_with_backoff(url, params=params)
             if resp is None:
                 break

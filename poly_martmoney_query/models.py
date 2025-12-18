@@ -29,7 +29,13 @@ class Trade:
         """从 `/trades` 返回的原始字典构建 Trade，兼容常见字段。"""
 
         tx_hash = str(raw.get("tx_hash") or raw.get("txHash") or raw.get("transactionHash") or "").strip()
-        market_id = str(raw.get("market") or raw.get("marketId") or raw.get("market_id") or "").strip()
+        market_id = str(
+            raw.get("conditionId")
+            or raw.get("market")
+            or raw.get("marketId")
+            or raw.get("market_id")
+            or ""
+        ).strip()
         outcome = raw.get("outcome") or raw.get("tokenName") or raw.get("outcome_name")
         side = (raw.get("type") or raw.get("side") or "").upper()
         price = _coerce_float(raw.get("price") or raw.get("avgPrice") or raw.get("fillPrice"))
