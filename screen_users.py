@@ -46,10 +46,15 @@ def _parse_datetime(value: str) -> Optional[dt.datetime]:
     text = str(value).strip()
     if text == "":
         return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
     try:
-        return dt.datetime.fromisoformat(text)
+        parsed = dt.datetime.fromisoformat(text)
     except ValueError:
         return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
 
 
 def _read_csv(path: Path) -> List[Dict[str, str]]:
@@ -333,7 +338,8 @@ def _build_features(
         current_value = _parse_float(row.get("current_value", ""))
         if end_date is None or current_value is None:
             continue
-        if (end_date - asof_time).total_seconds() <= near_expiry_days * 86400:
+        seconds_to_expiry = (end_date - asof_time).total_seconds()
+        if 0 <= seconds_to_expiry <= near_expiry_days * 86400:
             near_expiry_value += current_value
 
     near_expiry_ratio = (
