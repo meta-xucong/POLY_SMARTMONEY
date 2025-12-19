@@ -4,7 +4,14 @@ import csv
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from .models import AggregatedStats, MarketAggregation, Trade
+from .models import (
+    AggregatedStats,
+    ClosedPosition,
+    MarketAggregation,
+    Position,
+    Trade,
+    UserSummary,
+)
 
 
 def append_trades_csv(path: Path, trades: Iterable[Trade]) -> None:
@@ -123,6 +130,172 @@ def write_market_stats_csv(path: Path, stats: AggregatedStats) -> None:
                 "unresolved_markets": stats.unresolved_markets,
             }
         )
+
+
+def write_closed_positions_csv(path: Path, closed_positions: Iterable[ClosedPosition]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "user",
+        "condition_id",
+        "outcome",
+        "outcome_index",
+        "title",
+        "slug",
+        "avg_price",
+        "total_bought",
+        "realized_pnl",
+        "cur_price",
+        "timestamp",
+    ]
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in closed_positions:
+            writer.writerow(
+                {
+                    "user": item.user,
+                    "condition_id": item.condition_id,
+                    "outcome": item.outcome or "",
+                    "outcome_index": item.outcome_index if item.outcome_index is not None else "",
+                    "title": item.title or "",
+                    "slug": item.slug or "",
+                    "avg_price": f"{item.avg_price:.6f}",
+                    "total_bought": f"{item.total_bought:.6f}",
+                    "realized_pnl": f"{item.realized_pnl:.6f}",
+                    "cur_price": f"{item.cur_price:.6f}" if item.cur_price is not None else "",
+                    "timestamp": item.timestamp.isoformat(),
+                }
+            )
+
+
+def write_positions_csv(path: Path, positions: Iterable[Position]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "user",
+        "condition_id",
+        "outcome",
+        "outcome_index",
+        "title",
+        "slug",
+        "size",
+        "avg_price",
+        "initial_value",
+        "current_value",
+        "cash_pnl",
+        "realized_pnl",
+        "cur_price",
+        "end_date",
+    ]
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for item in positions:
+            writer.writerow(
+                {
+                    "user": item.user,
+                    "condition_id": item.condition_id,
+                    "outcome": item.outcome or "",
+                    "outcome_index": item.outcome_index if item.outcome_index is not None else "",
+                    "title": item.title or "",
+                    "slug": item.slug or "",
+                    "size": f"{item.size:.6f}",
+                    "avg_price": f"{item.avg_price:.6f}",
+                    "initial_value": f"{item.initial_value:.6f}",
+                    "current_value": f"{item.current_value:.6f}",
+                    "cash_pnl": f"{item.cash_pnl:.6f}",
+                    "realized_pnl": f"{item.realized_pnl:.6f}",
+                    "cur_price": f"{item.cur_price:.6f}" if item.cur_price is not None else "",
+                    "end_date": item.end_date.isoformat() if item.end_date else "",
+                }
+            )
+
+
+def write_user_summary_csv(path: Path, summary: UserSummary) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "user",
+        "start_time",
+        "end_time",
+        "closed_count",
+        "closed_realized_pnl_sum",
+        "win_count",
+        "loss_count",
+        "flat_count",
+        "win_rate_all",
+        "win_rate_no_flat",
+        "open_count",
+        "open_cash_pnl_sum",
+        "open_realized_pnl_sum",
+        "open_mtm_pnl_sum",
+        "total_mtm_pnl",
+        "asof_time",
+    ]
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerow(_summary_row(summary))
+
+
+def write_user_summaries_csv(path: Path, summaries: Iterable[UserSummary]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "user",
+        "start_time",
+        "end_time",
+        "closed_count",
+        "closed_realized_pnl_sum",
+        "win_count",
+        "loss_count",
+        "flat_count",
+        "win_rate_all",
+        "win_rate_no_flat",
+        "open_count",
+        "open_cash_pnl_sum",
+        "open_realized_pnl_sum",
+        "open_mtm_pnl_sum",
+        "total_mtm_pnl",
+        "asof_time",
+    ]
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for summary in summaries:
+            writer.writerow(_summary_row(summary))
+
+
+def _summary_row(summary: UserSummary) -> Dict[str, object]:
+    return {
+        "user": summary.user,
+        "start_time": summary.start_time.isoformat() if summary.start_time else "",
+        "end_time": summary.end_time.isoformat() if summary.end_time else "",
+        "closed_count": summary.closed_count,
+        "closed_realized_pnl_sum": f"{summary.closed_realized_pnl_sum:.6f}",
+        "win_count": summary.win_count,
+        "loss_count": summary.loss_count,
+        "flat_count": summary.flat_count,
+        "win_rate_all": f"{summary.win_rate_all:.6f}" if summary.win_rate_all is not None else "",
+        "win_rate_no_flat": f"{summary.win_rate_no_flat:.6f}"
+        if summary.win_rate_no_flat is not None
+        else "",
+        "open_count": summary.open_count,
+        "open_cash_pnl_sum": f"{summary.open_cash_pnl_sum:.6f}",
+        "open_realized_pnl_sum": f"{summary.open_realized_pnl_sum:.6f}",
+        "open_mtm_pnl_sum": f"{summary.open_mtm_pnl_sum:.6f}",
+        "total_mtm_pnl": f"{summary.total_mtm_pnl:.6f}",
+        "asof_time": summary.asof_time.isoformat(),
+    }
 
 
 def _format_positions(positions: Dict[str, float]) -> str:

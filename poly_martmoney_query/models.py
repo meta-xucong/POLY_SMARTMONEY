@@ -64,6 +64,111 @@ class Trade:
         )
 
 
+@dataclass
+class Position:
+    """标准化的持仓记录，来源于 Polymarket `/positions` 接口。"""
+
+    user: str
+    condition_id: str
+    outcome: Optional[str]
+    outcome_index: Optional[int]
+    title: Optional[str]
+    slug: Optional[str]
+    size: float
+    avg_price: float
+    initial_value: float
+    current_value: float
+    cash_pnl: float
+    realized_pnl: float
+    cur_price: Optional[float]
+    end_date: Optional[dt.datetime]
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, raw: Dict[str, Any], *, user: str) -> Optional["Position"]:
+        condition_id = str(raw.get("conditionId") or raw.get("condition_id") or "").strip()
+        if not condition_id:
+            return None
+        outcome = raw.get("outcome") or raw.get("outcomeName") or raw.get("tokenName")
+        outcome_index = _coerce_int(raw.get("outcomeIndex") or raw.get("outcome_index"))
+        title = raw.get("title")
+        slug = raw.get("slug") or raw.get("marketSlug")
+        size = _coerce_float(raw.get("size")) or 0.0
+        avg_price = _coerce_float(raw.get("avgPrice") or raw.get("avg_price")) or 0.0
+        initial_value = _coerce_float(raw.get("initialValue") or raw.get("initial_value")) or 0.0
+        current_value = _coerce_float(raw.get("currentValue") or raw.get("current_value")) or 0.0
+        cash_pnl = _coerce_float(raw.get("cashPnl") or raw.get("cash_pnl")) or 0.0
+        realized_pnl = _coerce_float(raw.get("realizedPnl") or raw.get("realized_pnl")) or 0.0
+        cur_price = _coerce_float(raw.get("curPrice") or raw.get("cur_price"))
+        end_date = _parse_timestamp(raw.get("endDate") or raw.get("end_date"))
+
+        return cls(
+            user=user,
+            condition_id=condition_id,
+            outcome=str(outcome) if outcome is not None else None,
+            outcome_index=outcome_index,
+            title=str(title) if title is not None else None,
+            slug=str(slug) if slug is not None else None,
+            size=size,
+            avg_price=avg_price,
+            initial_value=initial_value,
+            current_value=current_value,
+            cash_pnl=cash_pnl,
+            realized_pnl=realized_pnl,
+            cur_price=cur_price,
+            end_date=end_date,
+            raw=raw,
+        )
+
+
+@dataclass
+class ClosedPosition:
+    """标准化的已平仓记录，来源于 Polymarket `/closed-positions` 接口。"""
+
+    user: str
+    condition_id: str
+    outcome: Optional[str]
+    outcome_index: Optional[int]
+    title: Optional[str]
+    slug: Optional[str]
+    avg_price: float
+    total_bought: float
+    realized_pnl: float
+    cur_price: Optional[float]
+    timestamp: dt.datetime
+    raw: Dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def from_api(cls, raw: Dict[str, Any], *, user: str) -> Optional["ClosedPosition"]:
+        condition_id = str(raw.get("conditionId") or raw.get("condition_id") or "").strip()
+        timestamp = _parse_timestamp(raw.get("timestamp") or raw.get("time"))
+        if not condition_id or timestamp is None:
+            return None
+        outcome = raw.get("outcome") or raw.get("outcomeName") or raw.get("tokenName")
+        outcome_index = _coerce_int(raw.get("outcomeIndex") or raw.get("outcome_index"))
+        title = raw.get("title")
+        slug = raw.get("slug") or raw.get("marketSlug")
+        avg_price = _coerce_float(raw.get("avgPrice") or raw.get("avg_price")) or 0.0
+        total_bought = _coerce_float(raw.get("totalBought") or raw.get("total_bought")) or 0.0
+        realized_pnl = _coerce_float(raw.get("realizedPnl") or raw.get("realized_pnl")) or 0.0
+        cur_price = _coerce_float(raw.get("curPrice") or raw.get("cur_price"))
+
+        return cls(
+            user=user,
+            condition_id=condition_id,
+            outcome=str(outcome) if outcome is not None else None,
+            outcome_index=outcome_index,
+            title=str(title) if title is not None else None,
+            slug=str(slug) if slug is not None else None,
+            avg_price=avg_price,
+            total_bought=total_bought,
+            realized_pnl=realized_pnl,
+            cur_price=cur_price,
+            timestamp=timestamp,
+            raw=raw,
+        )
+
+
 def _parse_timestamp(value: Any) -> Optional[dt.datetime]:
     if value is None:
         return None
@@ -101,6 +206,26 @@ def _coerce_float(value: Any) -> Optional[float]:
     return None
 
 
+def _coerce_int(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            cleaned = value.replace(",", "").strip()
+            if cleaned == "":
+                return None
+            return int(float(cleaned))
+    except Exception:
+        return None
+    return None
+
+
 @dataclass
 class MarketAggregation:
     market_id: str
@@ -128,3 +253,23 @@ class AggregatedStats:
     resolved_markets: int
     unresolved_markets: int
     markets: List[MarketAggregation]
+
+
+@dataclass
+class UserSummary:
+    user: str
+    start_time: Optional[dt.datetime]
+    end_time: Optional[dt.datetime]
+    closed_count: int
+    closed_realized_pnl_sum: float
+    win_count: int
+    loss_count: int
+    flat_count: int
+    win_rate_all: Optional[float]
+    win_rate_no_flat: Optional[float]
+    open_count: int
+    open_cash_pnl_sum: float
+    open_realized_pnl_sum: float
+    open_mtm_pnl_sum: float
+    total_mtm_pnl: float
+    asof_time: dt.datetime
