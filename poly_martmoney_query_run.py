@@ -22,8 +22,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--user", help="单地址模式，指定要查询的钱包地址")
     parser.add_argument("--days", type=int, default=30, help="统计区间天数（默认 30）")
     parser.add_argument("--top", type=int, default=50, help="批量模式取 leaderboard 前 N 名")
-    parser.add_argument("--period", default="ALL", help="leaderboard 时间维度（默认 ALL）")
-    parser.add_argument("--order-by", default="vol", help="leaderboard 排序字段（默认 vol）")
+    parser.add_argument("--period", default="MONTH", help="leaderboard 时间维度（默认 MONTH）")
+    parser.add_argument("--order-by", default="profit", help="leaderboard 排序字段（默认 profit）")
     parser.add_argument(
         "--size-threshold",
         type=float,
@@ -105,6 +105,8 @@ def main() -> None:
         print(
             f"[INFO] 地址 {addr}：已平仓={summary.closed_count}，"
             f"已实现盈亏={summary.closed_realized_pnl_sum:.4f}，"
+            f"持仓已实现={summary.open_realized_pnl_sum:.4f}，"
+            f"持仓浮盈浮亏={summary.open_unrealized_pnl_sum:.4f}，"
             f"胜率={win_rate_text}",
             flush=True,
         )
