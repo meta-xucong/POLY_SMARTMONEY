@@ -1,0 +1,42 @@
+{
+  "data_dir": "data",
+  "users_dir": "data/users",
+  "output_dir": "data",
+  "features_filename": "users_features.csv",
+  "candidates_filename": "candidates.csv",
+  "metadata_filename": "screening_metadata.json",
+  "window_days_default": 30,
+  "min_cost_for_roi": 1.0,
+  "flat_pnl_epsilon": 1e-09,
+  "near_expiry_days": 3,
+  "bayes_alpha": 2.0,
+  "bayes_beta": 2.0,
+  "filters": {
+    "min_closed_count": 20,
+    "max_trades_per_day": 10,
+    "max_daily_trades": 30,
+    "max_p90_cost": 2000,
+    "max_cost": 5000,
+    "max_loss": -1000,
+    "max_open_exposure": 5000
+  },
+  "score_weights": {
+    "bayes_win_rate": 0.4,
+    "profit_factor": 0.2,
+    "median_roi": 0.2,
+    "trades_per_day": -0.1,
+    "burstiness": -0.05,
+    "p90_cost": -0.05,
+    "open_exposure": -0.1,
+    "near_expiry_ratio": -0.05
+  },
+  "score_clamps": {
+    "profit_factor": 5,
+    "median_roi": 0.5,
+    "trades_per_day": 20,
+    "burstiness": 5,
+    "p90_cost": 5000,
+    "open_exposure": 10000,
+    "near_expiry_ratio": 1
+  }
+}
