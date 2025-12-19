@@ -76,7 +76,7 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    export SMART_QUERY_MAX_RPS=3
    ```
 
-3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，默认抓取「盈利榜（MONTHLY）」前 50 名并统计近 30 天数据，结果写入当前目录的 `data/` 下：
+3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，默认抓取「盈利榜（MONTH）」前 50 名并统计近 30 天数据，结果写入当前目录的 `data/` 下：
    ```bash
    python poly_martmoney_query_run.py
    ```
@@ -108,7 +108,7 @@ python -m compileall -q poly_martmoney_query
   ```bash
   python poly_martmoney_query_run.py --order-by vol
   ```
-- **调整 leaderboard 周期**：将 `--period` 改成你需要的口径（例如 `ALL` / `MONTHLY` 等）。
+- **调整 leaderboard 周期**：将 `--period` 改成你需要的口径（例如 `ALL` / `MONTH` 等）。
   ```bash
   python poly_martmoney_query_run.py --period ALL
   ```

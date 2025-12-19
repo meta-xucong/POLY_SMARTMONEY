@@ -105,8 +105,14 @@ class DataApiClient:
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         url = f"{self.host}/v1/leaderboard"
+        period_key = period.upper()
+        period_aliases = {
+            "MONTHLY": "MONTH",
+            "WEEKLY": "WEEK",
+            "DAILY": "DAY",
+        }
         params = {
-            "timePeriod": period.upper(),
+            "timePeriod": period_aliases.get(period_key, period_key),
             "orderBy": order_by.upper(),
             "limit": limit,
             "offset": offset,

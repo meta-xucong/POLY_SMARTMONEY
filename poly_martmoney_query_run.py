@@ -22,7 +22,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--user", help="单地址模式，指定要查询的钱包地址")
     parser.add_argument("--days", type=int, default=30, help="统计区间天数（默认 30）")
     parser.add_argument("--top", type=int, default=50, help="批量模式取 leaderboard 前 N 名")
-    parser.add_argument("--period", default="MONTHLY", help="leaderboard 时间维度（默认 MONTHLY）")
+    parser.add_argument("--period", default="MONTH", help="leaderboard 时间维度（默认 MONTH）")
     parser.add_argument("--order-by", default="profit", help="leaderboard 排序字段（默认 profit）")
     parser.add_argument(
         "--size-threshold",
