@@ -105,9 +105,23 @@ class DataApiClient:
         offset: int = 0,
     ) -> List[Dict[str, Any]]:
         url = f"{self.host}/v1/leaderboard"
+        period_key = period.upper()
+        period_aliases = {
+            "MONTHLY": "MONTH",
+            "WEEKLY": "WEEK",
+            "DAILY": "DAY",
+        }
+        order_key = order_by.strip().lower()
+        order_aliases = {
+            "profit": "PNL",
+            "pnl": "PNL",
+            "vol": "VOL",
+            "volume": "VOL",
+        }
+        limit = max(1, min(limit, 50))
         params = {
-            "timePeriod": period.upper(),
-            "orderBy": order_by.upper(),
+            "timePeriod": period_aliases.get(period_key, period_key),
+            "orderBy": order_aliases.get(order_key, order_by.strip().upper()),
             "limit": limit,
             "offset": offset,
         }
@@ -137,6 +151,7 @@ class DataApiClient:
     ) -> Iterable[Dict[str, Any]]:
         page = 0
         offset = 0
+        page_size = max(1, min(page_size, 50))
         while True:
             batch = self.fetch_leaderboard(
                 period=period, order_by=order_by, limit=page_size, offset=offset

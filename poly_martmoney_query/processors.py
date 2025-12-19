@@ -165,10 +165,8 @@ def summarize_user(
 
     open_positions_list = list(open_positions)
     open_count = len(open_positions_list)
-    open_cash_pnl_sum = sum(pos.cash_pnl for pos in open_positions_list)
+    open_unrealized_pnl_sum = sum(pos.cash_pnl for pos in open_positions_list)
     open_realized_pnl_sum = sum(pos.realized_pnl for pos in open_positions_list)
-    open_mtm_pnl_sum = open_cash_pnl_sum + open_realized_pnl_sum
-    total_mtm_pnl = closed_realized_pnl_sum + open_mtm_pnl_sum
 
     if asof_time is None:
         asof_time = dt.datetime.now(tz=dt.timezone.utc)
@@ -185,9 +183,7 @@ def summarize_user(
         win_rate_all=win_rate_all,
         win_rate_no_flat=win_rate_no_flat,
         open_count=open_count,
-        open_cash_pnl_sum=open_cash_pnl_sum,
+        open_unrealized_pnl_sum=open_unrealized_pnl_sum,
         open_realized_pnl_sum=open_realized_pnl_sum,
-        open_mtm_pnl_sum=open_mtm_pnl_sum,
-        total_mtm_pnl=total_mtm_pnl,
         asof_time=asof_time,
     )

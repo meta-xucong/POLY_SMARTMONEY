@@ -232,10 +232,8 @@ def write_user_summary_csv(path: Path, summary: UserSummary) -> None:
         "win_rate_all",
         "win_rate_no_flat",
         "open_count",
-        "open_cash_pnl_sum",
+        "open_unrealized_pnl_sum",
         "open_realized_pnl_sum",
-        "open_mtm_pnl_sum",
-        "total_mtm_pnl",
         "asof_time",
     ]
 
@@ -261,10 +259,8 @@ def write_user_summaries_csv(path: Path, summaries: Iterable[UserSummary]) -> No
         "win_rate_all",
         "win_rate_no_flat",
         "open_count",
-        "open_cash_pnl_sum",
+        "open_unrealized_pnl_sum",
         "open_realized_pnl_sum",
-        "open_mtm_pnl_sum",
-        "total_mtm_pnl",
         "asof_time",
     ]
 
@@ -290,10 +286,8 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         if summary.win_rate_no_flat is not None
         else "",
         "open_count": summary.open_count,
-        "open_cash_pnl_sum": f"{summary.open_cash_pnl_sum:.6f}",
+        "open_unrealized_pnl_sum": f"{summary.open_unrealized_pnl_sum:.6f}",
         "open_realized_pnl_sum": f"{summary.open_realized_pnl_sum:.6f}",
-        "open_mtm_pnl_sum": f"{summary.open_mtm_pnl_sum:.6f}",
-        "total_mtm_pnl": f"{summary.total_mtm_pnl:.6f}",
         "asof_time": summary.asof_time.isoformat(),
     }
 
