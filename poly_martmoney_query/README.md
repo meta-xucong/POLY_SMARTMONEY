@@ -76,7 +76,7 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    export SMART_QUERY_MAX_RPS=3
    ```
 
-3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，直接运行即可抓取 leaderboard 用户、获取 30 天成交并将结果写入当前目录的 `data/` 下：
+3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，默认抓取「盈利榜（MONTHLY）」前 50 名并统计近 30 天数据，结果写入当前目录的 `data/` 下：
    ```bash
    python poly_martmoney_query_run.py
    ```
@@ -100,3 +100,28 @@ python -m compileall -q poly_martmoney_query
 ```
 
 若命令通过则表示当前 Python 环境能成功解析本目录脚本。
+
+## 常用统计口径调整
+`poly_martmoney_query_run.py` 支持通过参数切换排行榜口径与统计窗口，常见需求如下：
+
+- **从盈利榜改为成交量榜**：将 `--order-by` 改成 `vol`（或你们 Data API 支持的字段）。
+  ```bash
+  python poly_martmoney_query_run.py --order-by vol
+  ```
+- **调整 leaderboard 周期**：将 `--period` 改成你需要的口径（例如 `ALL` / `MONTHLY` 等）。
+  ```bash
+  python poly_martmoney_query_run.py --period ALL
+  ```
+- **调整统计窗口天数**：`--days` 控制 summary 的统计区间，默认 30 天。
+  ```bash
+  python poly_martmoney_query_run.py --days 7
+  ```
+- **只统计单地址**：传入 `--user` 会跳过 leaderboard，直接查询该地址。
+  ```bash
+  python poly_martmoney_query_run.py --user 0x1234...
+  ```
+
+输出的 `users_summary.csv`/`summary.csv` 已拆分为：
+- `closed_realized_pnl_sum`：已平仓已实现盈亏。
+- `open_realized_pnl_sum`：当前持仓内已实现盈亏。
+- `open_unrealized_pnl_sum`：当前持仓未实现浮盈浮亏。

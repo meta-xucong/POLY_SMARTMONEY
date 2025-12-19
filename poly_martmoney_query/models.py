@@ -268,8 +268,6 @@ class UserSummary:
     win_rate_all: Optional[float]
     win_rate_no_flat: Optional[float]
     open_count: int
-    open_cash_pnl_sum: float
+    open_unrealized_pnl_sum: float
     open_realized_pnl_sum: float
-    open_mtm_pnl_sum: float
-    total_mtm_pnl: float
     asof_time: dt.datetime
