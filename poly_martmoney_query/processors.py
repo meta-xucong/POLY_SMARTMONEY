@@ -5,7 +5,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
-from .models import AggregatedStats, MarketAggregation, Trade
+from .models import AggregatedStats, ClosedPosition, MarketAggregation, Position, Trade, UserSummary
 
 
 @dataclass
@@ -125,4 +125,69 @@ def aggregate_markets(
         resolved_markets=resolved_markets,
         unresolved_markets=len(market_positions) - resolved_markets,
         markets=sorted(market_results, key=lambda m: m.volume, reverse=True),
+    )
+
+
+def summarize_user(
+    closed_positions: Iterable[ClosedPosition],
+    open_positions: Iterable[Position],
+    *,
+    user: str,
+    start_time: Optional[dt.datetime] = None,
+    end_time: Optional[dt.datetime] = None,
+    asof_time: Optional[dt.datetime] = None,
+) -> UserSummary:
+    closed_count = 0
+    closed_realized_pnl_sum = 0.0
+    win_count = 0
+    loss_count = 0
+    flat_count = 0
+
+    for position in closed_positions:
+        ts = position.timestamp
+        if start_time and ts < start_time:
+            continue
+        if end_time and ts > end_time:
+            continue
+        closed_count += 1
+        closed_realized_pnl_sum += position.realized_pnl
+        if position.realized_pnl > 0:
+            win_count += 1
+        elif position.realized_pnl < 0:
+            loss_count += 1
+        else:
+            flat_count += 1
+
+    win_rate_all = win_count / closed_count if closed_count else None
+    win_rate_no_flat = (
+        win_count / (win_count + loss_count) if (win_count + loss_count) else None
+    )
+
+    open_positions_list = list(open_positions)
+    open_count = len(open_positions_list)
+    open_cash_pnl_sum = sum(pos.cash_pnl for pos in open_positions_list)
+    open_realized_pnl_sum = sum(pos.realized_pnl for pos in open_positions_list)
+    open_mtm_pnl_sum = open_cash_pnl_sum + open_realized_pnl_sum
+    total_mtm_pnl = closed_realized_pnl_sum + open_mtm_pnl_sum
+
+    if asof_time is None:
+        asof_time = dt.datetime.now(tz=dt.timezone.utc)
+
+    return UserSummary(
+        user=user,
+        start_time=start_time,
+        end_time=end_time,
+        closed_count=closed_count,
+        closed_realized_pnl_sum=closed_realized_pnl_sum,
+        win_count=win_count,
+        loss_count=loss_count,
+        flat_count=flat_count,
+        win_rate_all=win_rate_all,
+        win_rate_no_flat=win_rate_no_flat,
+        open_count=open_count,
+        open_cash_pnl_sum=open_cash_pnl_sum,
+        open_realized_pnl_sum=open_realized_pnl_sum,
+        open_mtm_pnl_sum=open_mtm_pnl_sum,
+        total_mtm_pnl=total_mtm_pnl,
+        asof_time=asof_time,
     )

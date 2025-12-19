@@ -8,7 +8,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-from .models import Trade
+from .models import ClosedPosition, Position, Trade
 
 MAX_BACKOFF_SECONDS = float(os.environ.get("SMART_QUERY_MAX_BACKOFF", "60"))
 MAX_REQUESTS_PER_SECOND = float(os.environ.get("SMART_QUERY_MAX_RPS", "2"))
@@ -218,4 +218,128 @@ class DataApiClient:
                 break
 
         results.sort(key=lambda t: t.timestamp)
+        return results
+
+    def fetch_positions(
+        self,
+        user: str,
+        *,
+        size_threshold: float = 0.0,
+        page_size: int = 500,
+        max_pages: Optional[int] = 50,
+        sort_by: str = "TOKENS",
+        sort_dir: str = "DESC",
+    ) -> List[Position]:
+        url = f"{self.host}/positions"
+        offset = 0
+        page = 0
+        results: List[Position] = []
+
+        while True:
+            params = {
+                "user": user,
+                "limit": page_size,
+                "offset": offset,
+                "sizeThreshold": size_threshold,
+                "sortBy": sort_by,
+                "sortDirection": sort_dir,
+            }
+            resp = _request_with_backoff(url, params=params)
+            if resp is None:
+                break
+
+            try:
+                payload = resp.json()
+            except Exception:
+                break
+
+            raw_positions = []
+            if isinstance(payload, list):
+                raw_positions = payload
+            elif isinstance(payload, dict):
+                raw_positions = payload.get("data") or payload.get("positions") or []
+            if not isinstance(raw_positions, list):
+                break
+
+            for item in raw_positions:
+                position = Position.from_api(item, user=user)
+                if position is None:
+                    continue
+                results.append(position)
+
+            if len(raw_positions) < page_size:
+                break
+
+            offset += page_size
+            page += 1
+            if max_pages is not None and page >= max_pages:
+                break
+
+        return results
+
+    def fetch_closed_positions(
+        self,
+        user: str,
+        *,
+        start_time: Optional[dt.datetime] = None,
+        end_time: Optional[dt.datetime] = None,
+        page_size: int = 50,
+        max_pages: Optional[int] = 2000,
+        sort_by: str = "TIMESTAMP",
+        sort_dir: str = "DESC",
+    ) -> List[ClosedPosition]:
+        url = f"{self.host}/closed-positions"
+        offset = 0
+        page = 0
+        results: List[ClosedPosition] = []
+        start_ts = start_time.timestamp() if start_time else None
+        end_ts = end_time.timestamp() if end_time else None
+
+        while True:
+            params = {
+                "user": user,
+                "limit": page_size,
+                "offset": offset,
+                "sortBy": sort_by,
+                "sortDirection": sort_dir,
+            }
+            resp = _request_with_backoff(url, params=params)
+            if resp is None:
+                break
+
+            try:
+                payload = resp.json()
+            except Exception:
+                break
+
+            raw_positions = []
+            if isinstance(payload, list):
+                raw_positions = payload
+            elif isinstance(payload, dict):
+                raw_positions = payload.get("data") or payload.get("positions") or []
+            if not isinstance(raw_positions, list):
+                break
+
+            reached_earliest = False
+            for item in raw_positions:
+                position = ClosedPosition.from_api(item, user=user)
+                if position is None:
+                    continue
+                ts = position.timestamp.timestamp()
+                if end_ts is not None and ts > end_ts:
+                    continue
+                if start_ts is not None and ts < start_ts:
+                    reached_earliest = True
+                    continue
+                results.append(position)
+
+            if reached_earliest or len(raw_positions) < page_size:
+                break
+
+            offset += page_size
+            page += 1
+            if max_pages is not None and page >= max_pages:
+                break
+
+        results.sort(key=lambda p: p.timestamp)
         return results
