@@ -104,7 +104,7 @@ python -m compileall -q poly_martmoney_query
 ## 常用统计口径调整
 `poly_martmoney_query_run.py` 支持通过参数切换排行榜口径与统计窗口，常见需求如下：
 
-- **从盈利榜改为成交量榜**：将 `--order-by` 改成 `vol`（或你们 Data API 支持的字段）。
+- **从盈利榜改为成交量榜**：将 `--order-by` 改成 `vol`（Data API 识别为 `VOL`）。
   ```bash
   python poly_martmoney_query_run.py --order-by vol
   ```
