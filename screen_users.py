@@ -183,9 +183,14 @@ def _compute_copy_score(metrics: Dict[str, Optional[float]], config: Dict[str, A
     return score
 
 
-def _apply_filters(metrics: Dict[str, Optional[float]], config: Dict[str, Any]) -> Tuple[bool, List[str]]:
+def _apply_filters(
+    metrics: Dict[str, Optional[float]], config: Dict[str, Any]
+) -> Tuple[bool, List[str], List[str]]:
     filters = config.get("filters", {})
+    label_rules = config.get("label_rules", {})
+    copy_rules = label_rules.get("copy_style", {})
     failures = []
+    warnings = []
 
     def _check_min(key: str, label: str) -> None:
         threshold = filters.get(key)
@@ -215,7 +220,19 @@ def _apply_filters(metrics: Dict[str, Optional[float]], config: Dict[str, Any]) 
     _check_max("max_open_exposure", "open_exposure")
     _check_max("max_tail_high_ratio", "tail_high_ratio")
     _check_max("max_tail_low_ratio", "tail_low_ratio")
-    _check_max("max_minute_burst_ratio", "minute_burst_ratio")
+
+    max_minute_burst_ratio = filters.get("max_minute_burst_ratio")
+    if max_minute_burst_ratio is not None:
+        minute_burst_ratio = metrics.get("minute_burst_ratio")
+        near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
+        near_expiry_high = float(copy_rules.get("near_expiry_ratio_high", 0.3))
+        if minute_burst_ratio is None:
+            failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
+        elif minute_burst_ratio > max_minute_burst_ratio:
+            if near_expiry_ratio >= near_expiry_high:
+                warnings.append("minute_burst_ratio_high_but_near_expiry")
+            else:
+                failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
 
     max_loss_threshold = filters.get("max_loss")
     max_loss = metrics.get("max_loss")
@@ -225,7 +242,7 @@ def _apply_filters(metrics: Dict[str, Optional[float]], config: Dict[str, Any]) 
         elif max_loss < max_loss_threshold:
             failures.append(f"max_loss<{max_loss_threshold}")
 
-    return (len(failures) == 0), failures
+    return (len(failures) == 0), failures, warnings
 
 
 def _build_features(
@@ -567,9 +584,10 @@ def main() -> None:
         row.update(metrics)
         row["copy_score"] = _compute_copy_score(row, config)
 
-        passed, failures = _apply_filters(row, config)
+        passed, failures, warnings = _apply_filters(row, config)
         row["passed_filter"] = passed
         row["filter_failures"] = ";".join(failures)
+        row["filter_warnings"] = ";".join(warnings)
 
         features_rows.append(row)
         if passed:
