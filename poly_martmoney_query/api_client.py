@@ -59,7 +59,8 @@ def _request_with_backoff(
             except Exception:
                 pass
 
-            if status is not None and 400 <= status < 500 and status != 429:
+            retryable_statuses = {408, 429}
+            if status is not None and 400 <= status < 500 and status not in retryable_statuses:
                 extra = f" | body={body[:200]}" if body else ""
                 print(
                     f"[WARN] 请求失败（{attempt}/{retries}）：{url} params={params} -> {exc}{extra}",
@@ -240,7 +241,7 @@ class DataApiClient:
         user: str,
         *,
         size_threshold: float = 0.0,
-        page_size: int = 500,
+        page_size: int = 200,
         max_pages: Optional[int] = 50,
         sort_by: str = "TOKENS",
         sort_dir: str = "DESC",
@@ -298,7 +299,7 @@ class DataApiClient:
         *,
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
-        page_size: int = 50,
+        page_size: int = 25,
         max_pages: Optional[int] = 2000,
         sort_by: str = "TIMESTAMP",
         sort_dir: str = "DESC",
