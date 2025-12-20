@@ -339,6 +339,8 @@ def _build_features(
     profit_factor = None
     if loss_pnl_sum < 0:
         profit_factor = win_pnl_sum / abs(loss_pnl_sum)
+    elif win_pnl_sum > 0:
+        profit_factor = float("inf")
 
     open_values: List[float] = []
     open_end_dates: List[dt.datetime] = []
@@ -465,12 +467,16 @@ def _build_copy_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]
     interval_median = metrics.get("interval_median_minutes") or 0.0
     trades_per_day = metrics.get("trades_per_day") or 0.0
     burstiness = metrics.get("burstiness") or 0.0
+    near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
 
     minute_burst_threshold = float(rules.get("minute_burst_ratio_high", 0.25))
     interval_fast = float(rules.get("interval_median_minutes_fast", 2))
     trades_per_day_high = float(rules.get("trades_per_day_high", 25))
     burstiness_high = float(rules.get("burstiness_high", 4))
+    near_expiry_high = float(rules.get("near_expiry_ratio_high", 0.3))
 
+    if minute_burst_ratio >= minute_burst_threshold and near_expiry_ratio >= near_expiry_high:
+        return "结算爆发(临近到期)"
     if minute_burst_ratio >= minute_burst_threshold:
         return "结算爆发"
     if (
@@ -491,6 +497,7 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
     interval_median = metrics.get("interval_median_minutes") or 0.0
     trades_per_day = metrics.get("trades_per_day") or 0.0
     burstiness = metrics.get("burstiness") or 0.0
+    near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
 
     tail_high_threshold = float(rules.get("tail_high_ratio_tail", 0.6))
     tail_low_threshold = float(rules.get("tail_low_ratio_longshot", 0.25))
@@ -499,6 +506,7 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
     interval_fast = float(rules.get("interval_median_minutes_fast", 2))
     trades_per_day_high = float(rules.get("trades_per_day_high", 25))
     burstiness_high = float(rules.get("burstiness_high", 4))
+    near_expiry_high = float(rules.get("near_expiry_ratio_high", 0.3))
 
     if tail_high_ratio >= tail_high_threshold:
         notes.append("尾单占比高")
@@ -508,6 +516,8 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
         notes.append("均衡占比偏低")
     if minute_burst_ratio >= minute_burst_threshold:
         notes.append("分钟爆发高")
+        if near_expiry_ratio >= near_expiry_high:
+            notes.append("可能到期结算集中")
     if interval_median <= interval_fast:
         notes.append("平仓间隔偏快")
     if trades_per_day >= trades_per_day_high:

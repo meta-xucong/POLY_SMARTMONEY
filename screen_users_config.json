@@ -95,7 +95,8 @@
       "minute_burst_ratio_high": 0.25,
       "interval_median_minutes_fast": 2,
       "trades_per_day_high": 25,
-      "burstiness_high": 4
+      "burstiness_high": 4,
+      "near_expiry_ratio_high": 0.3
     }
   },
 
