@@ -559,6 +559,9 @@ def main() -> None:
     candidates_filename = config.get("candidates_filename", "candidates.csv")
     final_filename = config.get("final_filename", "final_candidates.csv")
     metadata_filename = config.get("metadata_filename", "screening_metadata.json")
+    metadata_path = Path(metadata_filename)
+    if not metadata_path.is_absolute():
+        metadata_path = (base_dir / metadata_path).resolve()
 
     summary_map = _load_user_summary_map(data_dir / "users_summary.csv")
 
@@ -646,7 +649,7 @@ def main() -> None:
         "users_count": len(features_rows),
         "candidates_count": len(candidate_rows),
     }
-    with (output_dir / metadata_filename).open("w", encoding="utf-8") as f:
+    with metadata_path.open("w", encoding="utf-8") as f:
         json.dump(metadata, f, ensure_ascii=False, indent=2)
 
     print(
