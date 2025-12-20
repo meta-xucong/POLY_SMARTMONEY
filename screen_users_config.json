@@ -2,8 +2,10 @@
   "data_dir": "data",
   "users_dir": "data/users",
   "output_dir": "data",
+
   "features_filename": "users_features.csv",
   "candidates_filename": "candidates.csv",
+  "final_filename": "final_candidates.csv",
   "metadata_filename": "screening_metadata.json",
 
   "window_days_default": 30,
@@ -14,39 +16,148 @@
   "bayes_alpha": 2.0,
   "bayes_beta": 2.0,
 
+  "price_bands": {
+    "tail_high": 0.90,
+    "tail_low": 0.10,
+    "mid_low": 0.20,
+    "mid_high": 0.80
+  },
+
   "filters": {
-    "min_closed_count": 8,
-    "max_trades_per_day": 60,
-    "max_daily_trades": 180,
+    "min_closed_count": 20,
 
-    "max_p90_cost": 30000,
-    "max_cost": 150000,
+    "max_trades_per_day": 40,
+    "max_daily_trades": 150,
 
-    "max_loss": -50000,
-    "max_open_exposure": 300000
+    "max_p90_cost": null,
+    "max_cost": null,
+    "max_open_exposure": null,
+    "max_loss": null,
+
+    "min_bayes_win_rate": 0.60,
+    "min_median_roi": 0.08,
+
+    "max_tail_high_ratio": 0.65,
+    "max_tail_low_ratio": 0.30,
+    "min_mid_ratio": 0.25,
+
+    "max_minute_burst_ratio": 0.25,
+    "min_interval_median_minutes": 2
   },
 
   "score_weights": {
-    "bayes_win_rate": 0.4,
-    "profit_factor": 0.2,
-    "median_roi": 0.2,
+    "bayes_win_rate": 0.30,
+    "median_roi": 0.22,
+    "profit_factor": 0.12,
 
-    "trades_per_day": -0.08,
+    "mid_ratio": 0.12,
+    "interval_median_minutes": 0.10,
+
+    "minute_burst_ratio": -0.15,
+    "tail_high_ratio": -0.10,
+    "tail_low_ratio": -0.08,
+
+    "trades_per_day": -0.06,
     "burstiness": -0.05,
-    "p90_cost": -0.04,
-    "open_exposure": -0.08,
-    "near_expiry_ratio": -0.05
+    "near_expiry_ratio": -0.04,
+
+    "p90_cost": 0.0,
+    "open_exposure": 0.0
   },
 
   "score_clamps": {
-    "profit_factor": 8,
-    "median_roi": 0.5,
+    "bayes_win_rate": 1,
+    "median_roi": 1.2,
+    "profit_factor": 10,
 
-    "trades_per_day": 80,
+    "mid_ratio": 1,
+    "tail_high_ratio": 1,
+    "tail_low_ratio": 1,
+
+    "minute_burst_ratio": 1,
+    "interval_median_minutes": 60,
+
+    "trades_per_day": 40,
     "burstiness": 10,
+    "near_expiry_ratio": 1,
 
     "p90_cost": 50000,
-    "open_exposure": 300000,
-    "near_expiry_ratio": 1
+    "open_exposure": 300000
+  },
+
+  "label_rules": {
+    "price_style": {
+      "tail_high_ratio_tail": 0.60,
+      "tail_low_ratio_longshot": 0.25,
+      "mid_ratio_balanced": 0.40
+    },
+    "copy_style": {
+      "minute_burst_ratio_high": 0.25,
+      "interval_median_minutes_fast": 2,
+      "trades_per_day_high": 25,
+      "burstiness_high": 4,
+      "near_expiry_ratio_high": 0.3
+    }
+  },
+
+  "final_output": {
+    "sort_by": "copy_score",
+    "descending": true,
+
+    "columns": [
+      "user",
+      "copy_score",
+      "price_style",
+      "copy_style",
+      "notes",
+
+      "bayes_win_rate",
+      "win_rate_no_flat",
+      "closed_count",
+      "median_roi",
+      "profit_factor",
+
+      "tail_high_ratio",
+      "tail_low_ratio",
+      "mid_ratio",
+      "price_median",
+
+      "trades_per_day",
+      "interval_median_minutes",
+      "minute_burst_ratio",
+      "burstiness",
+
+      "max_loss",
+      "p95_loss",
+      "near_expiry_ratio"
+    ],
+
+    "rename": {
+      "user": "地址",
+      "copy_score": "跟单评分",
+      "price_style": "价格风格",
+      "copy_style": "可复制性",
+      "notes": "备注",
+
+      "bayes_win_rate": "Bayes胜率",
+      "win_rate_no_flat": "胜率(剔除flat)",
+      "closed_count": "平仓样本数",
+      "median_roi": "中位ROI",
+      "profit_factor": "盈利因子",
+
+      "tail_high_ratio": "尾单占比(>=0.90)",
+      "tail_low_ratio": "长shot占比(<=0.10)",
+      "mid_ratio": "均衡占比(0.20-0.80)",
+      "price_median": "价格中位数",
+
+      "trades_per_day": "日均平仓数",
+      "interval_median_minutes": "平仓间隔中位(分钟)",
+      "minute_burst_ratio": "分钟爆发占比",
+      "burstiness": "日爆发度",
+
+      "max_loss": "最差单笔PnL",
+      "p95_loss": "亏损单P95",
+      "near_expiry_ratio": "近到期占比"
+    }
   }
 }
