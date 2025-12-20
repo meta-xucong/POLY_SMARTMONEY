@@ -4,8 +4,9 @@
 """
 import argparse
 import datetime as dt
+import math
 from pathlib import Path
-from typing import List
+from typing import Iterable, List, Optional
 
 from poly_martmoney_query.api_client import DataApiClient
 from poly_martmoney_query.processors import summarize_user
@@ -30,7 +31,37 @@ def _parse_args() -> argparse.Namespace:
         default=0.0,
         help="positions 的 sizeThreshold（默认 0）",
     )
+    parser.add_argument(
+        "--min-leaderboard-pnl",
+        type=float,
+        default=None,
+        help="仅保留 leaderboard 已实现盈亏 >= 阈值的地址（默认不过滤）",
+    )
+    parser.add_argument(
+        "--min-leaderboard-vol",
+        type=float,
+        default=None,
+        help="仅保留 leaderboard 成交量 >= 阈值的地址（默认不过滤）",
+    )
     return parser.parse_args()
+
+
+def _to_float(value: object) -> Optional[float]:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_metric(item: dict, keys: Iterable[str]) -> Optional[float]:
+    for key in keys:
+        if key in item:
+            parsed = _to_float(item.get(key))
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _collect_users(client: DataApiClient, args: argparse.Namespace) -> List[str]:
@@ -39,12 +70,25 @@ def _collect_users(client: DataApiClient, args: argparse.Namespace) -> List[str]
 
     leaderboard_users = []
     print(f"[INFO] 获取 leaderboard（{args.period}，按 {args.order_by}）……", flush=True)
+    page_size = 50
+    target = max(1, args.top)
+    max_pages = math.ceil(target / page_size) + 2
     for item in client.iter_leaderboard(
         period=args.period,
         order_by=args.order_by,
-        page_size=min(50, max(1, args.top)),
-        max_pages=20,
+        page_size=page_size,
+        max_pages=max_pages,
     ):
+        min_pnl = args.min_leaderboard_pnl
+        if min_pnl is not None:
+            pnl_value = _extract_metric(item, ("pnl", "profit", "PNL"))
+            if pnl_value is not None and pnl_value < min_pnl:
+                continue
+        min_vol = args.min_leaderboard_vol
+        if min_vol is not None:
+            vol_value = _extract_metric(item, ("volume", "vol", "VOL"))
+            if vol_value is not None and vol_value < min_vol:
+                continue
         addr = item.get("proxyWallet") or item.get("address")
         if addr:
             leaderboard_users.append(addr)
