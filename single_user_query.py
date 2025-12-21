@@ -247,21 +247,17 @@ def main() -> None:
         trade_info.get("actions_count") or trade_info.get("unique_tx") or 0
     )
 
-    suspected_hft = bool(trade_info.get("suspected_hft")) or (
-        trade_actions_cnt >= args.hft_unique_tx_threshold
-    )
+    suspected_hft = trade_actions_cnt >= args.hft_unique_tx_threshold
 
-    hft_reason = ""
     if suspected_hft:
-        if trade_actions_cnt >= args.hft_unique_tx_threshold:
-            hft_reason = (
-                f"unique_tx/actions_count>={args.hft_unique_tx_threshold} "
-                f"(actions={trade_actions_cnt}, records={trade_records}, pages={trade_pages})"
-            )
-        else:
-            hft_reason = cap_reason or "suspected_hft=true"
+        hft_reason = (
+            f"unique_tx/actions_count>={args.hft_unique_tx_threshold} "
+            f"(actions={trade_actions_cnt}, records={trade_records}, pages={trade_pages})"
+        )
     elif hit_cap and cap_reason:
         hft_reason = f"cap_hit_only: {cap_reason}"
+    else:
+        hft_reason = ""
 
     summary = None
     closed_positions = []

@@ -496,14 +496,24 @@ class DataApiClient:
                     flush=True,
                 )
 
-            if (
-                activity_records_fetched >= HFT_MAX_ACTIVITY_RECORDS
-                or len(actions) >= HFT_MAX_UNIQUE_TX
-            ):
+            if activity_records_fetched >= HFT_MAX_ACTIVITY_RECORDS:
+                hit_cap = True
+                suspected_hft = False
+                cap_reason = (
+                    f"cap_records records>={HFT_MAX_ACTIVITY_RECORDS} "
+                    f"(records={activity_records_fetched}, unique_tx={len(actions)}, "
+                    f"pages={pages_fetched})"
+                )
+                ok = True
+                incomplete = True
+                last_error = _combine_error(last_error, cap_reason)
+                break
+
+            if len(actions) >= HFT_MAX_UNIQUE_TX:
                 hit_cap = True
                 suspected_hft = True
                 cap_reason = (
-                    f"hft_cap records>={HFT_MAX_ACTIVITY_RECORDS} or unique_tx>={HFT_MAX_UNIQUE_TX} "
+                    f"hft_unique_tx unique_tx>={HFT_MAX_UNIQUE_TX} "
                     f"(records={activity_records_fetched}, unique_tx={len(actions)}, "
                     f"pages={pages_fetched})"
                 )
