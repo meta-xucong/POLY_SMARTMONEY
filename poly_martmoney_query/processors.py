@@ -136,6 +136,8 @@ def summarize_user(
     start_time: Optional[dt.datetime] = None,
     end_time: Optional[dt.datetime] = None,
     asof_time: Optional[dt.datetime] = None,
+    account_start_time: Optional[dt.datetime] = None,
+    lifetime_realized_pnl_sum: Optional[float] = None,
 ) -> UserSummary:
     closed_count = 0
     closed_realized_pnl_sum = 0.0
@@ -171,10 +173,20 @@ def summarize_user(
     if asof_time is None:
         asof_time = dt.datetime.now(tz=dt.timezone.utc)
 
+    account_age_days = None
+    if account_start_time is not None:
+        account_age_days = max((asof_time - account_start_time).total_seconds() / 86400, 0.0)
+
+    if lifetime_realized_pnl_sum is None:
+        lifetime_realized_pnl_sum = 0.0
+
     return UserSummary(
         user=user,
         start_time=start_time,
         end_time=end_time,
+        account_start_time=account_start_time,
+        account_age_days=account_age_days,
+        lifetime_realized_pnl_sum=lifetime_realized_pnl_sum,
         closed_count=closed_count,
         closed_realized_pnl_sum=closed_realized_pnl_sum,
         win_count=win_count,

@@ -155,6 +155,11 @@ def _load_existing_summary(path: Path) -> Optional[UserSummary]:
                 user=row.get("user", ""),
                 start_time=_parse_datetime(row.get("start_time", "")),
                 end_time=_parse_datetime(row.get("end_time", "")),
+                account_start_time=_parse_datetime(row.get("account_start_time", "")),
+                account_age_days=_to_float(row.get("account_age_days")),
+                lifetime_realized_pnl_sum=_parse_float(
+                    row.get("lifetime_realized_pnl_sum", "0")
+                ),
                 closed_count=_parse_int(row.get("closed_count", "0")),
                 closed_realized_pnl_sum=_parse_float(row.get("closed_realized_pnl_sum", "0")),
                 win_count=_parse_int(row.get("win_count", "0")),
@@ -227,10 +232,22 @@ def main() -> None:
                 end_time=end,
                 return_info=True,
             )
+            lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
+                user=addr,
+                return_info=True,
+            )
             open_positions, open_info = client.fetch_positions(
                 user=addr,
                 size_threshold=args.size_threshold,
                 return_info=True,
+            )
+            account_start_time = (
+                min((pos.timestamp for pos in lifetime_closed_positions), default=None)
+                if lifetime_closed_positions
+                else None
+            )
+            lifetime_realized_pnl_sum = sum(
+                pos.realized_pnl for pos in lifetime_closed_positions
             )
             summary = summarize_user(
                 closed_positions,
@@ -239,6 +256,8 @@ def main() -> None:
                 start_time=start,
                 end_time=end,
                 asof_time=now,
+                account_start_time=account_start_time,
+                lifetime_realized_pnl_sum=lifetime_realized_pnl_sum,
             )
             summaries.append(summary)
 
@@ -246,9 +265,19 @@ def main() -> None:
             write_positions_csv(user_dir / "positions.csv", open_positions)
             write_user_summary_csv(summary_path, summary)
 
-            incomplete = bool(closed_info["incomplete"]) or bool(open_info["incomplete"])
+            incomplete = (
+                bool(closed_info["incomplete"])
+                or bool(open_info["incomplete"])
+                or bool(lifetime_info["incomplete"])
+            )
             error_msg = "; ".join(
-                msg for msg in [closed_info.get("error_msg"), open_info.get("error_msg")] if msg
+                msg
+                for msg in [
+                    closed_info.get("error_msg"),
+                    open_info.get("error_msg"),
+                    lifetime_info.get("error_msg"),
+                ]
+                if msg
             )
             status = "ok" if not incomplete else "incomplete"
             report_rows.append(
@@ -270,12 +299,19 @@ def main() -> None:
             win_rate_text = (
                 f"{summary.win_rate_all:.2%}" if summary.win_rate_all is not None else "N/A"
             )
+            account_days_text = (
+                f"{summary.account_age_days:.1f}天"
+                if summary.account_age_days is not None
+                else "N/A"
+            )
             print(
                 f"[INFO] 地址 {addr}：已平仓={summary.closed_count}，"
                 f"已实现盈亏={summary.closed_realized_pnl_sum:.4f}，"
                 f"持仓已实现={summary.open_realized_pnl_sum:.4f}，"
                 f"持仓浮盈浮亏={summary.open_unrealized_pnl_sum:.4f}，"
-                f"胜率={win_rate_text}",
+                f"胜率={win_rate_text}，"
+                f"账号年龄={account_days_text}，"
+                f"历史总收益={summary.lifetime_realized_pnl_sum:.4f}",
                 flush=True,
             )
             if incomplete:
