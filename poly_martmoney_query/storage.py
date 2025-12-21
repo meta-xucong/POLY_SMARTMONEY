@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Dict, Iterable, List
+from typing import Dict, Iterable, List, Optional
 
 from .models import (
     AggregatedStats,
@@ -238,33 +238,37 @@ def write_positions_csv(path: Path, positions: Iterable[Position]) -> None:
             )
 
 
+SUMMARY_FIELDNAMES = [
+    "user",
+    "start_time",
+    "end_time",
+    "account_start_time",
+    "account_age_days",
+    "lifetime_realized_pnl_sum",
+    "lifetime_closed_count",
+    "lifetime_incomplete",
+    "lifetime_status",
+    "closed_count",
+    "closed_realized_pnl_sum",
+    "win_count",
+    "loss_count",
+    "flat_count",
+    "win_rate_all",
+    "win_rate_no_flat",
+    "open_count",
+    "open_unrealized_pnl_sum",
+    "open_realized_pnl_sum",
+    "asof_time",
+    "status",
+]
+
+
 def write_user_summary_csv(path: Path, summary: UserSummary) -> None:
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = [
-        "user",
-        "start_time",
-        "end_time",
-        "account_start_time",
-        "account_age_days",
-        "lifetime_realized_pnl_sum",
-        "closed_count",
-        "closed_realized_pnl_sum",
-        "win_count",
-        "loss_count",
-        "flat_count",
-        "win_rate_all",
-        "win_rate_no_flat",
-        "open_count",
-        "open_unrealized_pnl_sum",
-        "open_realized_pnl_sum",
-        "asof_time",
-        "status",
-    ]
-
     with path.open("w", encoding="utf-8", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDNAMES)
         writer.writeheader()
         writer.writerow(_summary_row(summary))
 
@@ -273,32 +277,41 @@ def write_user_summaries_csv(path: Path, summaries: Iterable[UserSummary]) -> No
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fieldnames = [
-        "user",
-        "start_time",
-        "end_time",
-        "account_start_time",
-        "account_age_days",
-        "lifetime_realized_pnl_sum",
-        "closed_count",
-        "closed_realized_pnl_sum",
-        "win_count",
-        "loss_count",
-        "flat_count",
-        "win_rate_all",
-        "win_rate_no_flat",
-        "open_count",
-        "open_unrealized_pnl_sum",
-        "open_realized_pnl_sum",
-        "asof_time",
-        "status",
-    ]
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_FIELDNAMES)
+        writer.writeheader()
+        for summary in summaries:
+            writer.writerow(_summary_row(summary))
+
+
+def update_user_summary(path: Path, user: Optional[str], patch: Dict[str, object]) -> bool:
+    path = Path(path)
+    if not path.exists():
+        return False
+    with path.open("r", encoding="utf-8", newline="") as f:
+        reader = csv.DictReader(f)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or SUMMARY_FIELDNAMES
+
+    updated = False
+    for row in rows:
+        if user is None or row.get("user") == user:
+            for key, value in patch.items():
+                if key not in fieldnames:
+                    fieldnames.append(key)
+                row[key] = _serialize_summary_value(key, value)
+            updated = True
+            if user is not None:
+                break
+
+    if not updated:
+        return False
 
     with path.open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for summary in summaries:
-            writer.writerow(_summary_row(summary))
+        writer.writerows(rows)
+    return True
 
 
 def _summary_row(summary: UserSummary) -> Dict[str, object]:
@@ -312,7 +325,16 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         "account_age_days": f"{summary.account_age_days:.2f}"
         if summary.account_age_days is not None
         else "",
-        "lifetime_realized_pnl_sum": f"{summary.lifetime_realized_pnl_sum:.6f}",
+        "lifetime_realized_pnl_sum": _serialize_summary_value(
+            "lifetime_realized_pnl_sum", summary.lifetime_realized_pnl_sum
+        ),
+        "lifetime_closed_count": _serialize_summary_value(
+            "lifetime_closed_count", summary.lifetime_closed_count
+        ),
+        "lifetime_incomplete": _serialize_summary_value(
+            "lifetime_incomplete", summary.lifetime_incomplete
+        ),
+        "lifetime_status": summary.lifetime_status or "",
         "closed_count": summary.closed_count,
         "closed_realized_pnl_sum": f"{summary.closed_realized_pnl_sum:.6f}",
         "win_count": summary.win_count,
@@ -328,6 +350,21 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         "asof_time": summary.asof_time.isoformat(),
         "status": summary.status or "",
     }
+
+
+def _serialize_summary_value(key: str, value: object) -> str:
+    if value is None:
+        return ""
+    if key in {"lifetime_realized_pnl_sum"}:
+        return f"{float(value):.6f}"
+    if key in {"lifetime_closed_count", "closed_count", "win_count", "loss_count", "flat_count", "open_count"}:
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            return ""
+    if key in {"lifetime_incomplete"}:
+        return "true" if bool(value) else "false"
+    return str(value)
 
 
 def _format_positions(positions: Dict[str, float]) -> str:
