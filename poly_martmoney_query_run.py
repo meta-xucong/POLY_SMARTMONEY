@@ -6,6 +6,8 @@ import argparse
 import csv
 import datetime as dt
 import math
+import subprocess
+import sys
 from pathlib import Path
 from typing import Iterable, List, Optional
 
@@ -57,6 +59,12 @@ def _parse_args() -> argparse.Namespace:
         choices=("all", "candidates", "none"),
         default="candidates",
         help="历史收益拉取模式：all=全量，candidates=仅候选补齐，none=跳过",
+    )
+    parser.add_argument(
+        "--auto-screen",
+        default=True,
+        action=argparse.BooleanOptionalAction,
+        help="candidates 模式下若缺少 users_features.csv 则自动运行 screen_users.py（默认启用）",
     )
     return parser.parse_args()
 
@@ -320,6 +328,7 @@ def main() -> None:
                 user=addr,
                 start_time=start,
                 end_time=end,
+                progress_every=20,
                 return_info=True,
             )
             open_positions, open_info = client.fetch_positions(
@@ -419,7 +428,7 @@ def main() -> None:
             lifetime_text = (
                 f"{summary.lifetime_realized_pnl_sum:.4f}"
                 if summary.lifetime_realized_pnl_sum is not None
-                else "N/A"
+                else (summary.lifetime_status or "pending").upper()
             )
             print(
                 f"[INFO] 地址 {addr}：已平仓={summary.closed_count}，"
@@ -459,6 +468,18 @@ def main() -> None:
     write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
     if lifetime_mode == "candidates":
         candidates_path = data_dir / "users_features.csv"
+        if not candidates_path.exists() and args.auto_screen:
+            print(
+                "[INFO] 未找到候选名单，自动运行 screen_users.py 生成 users_features.csv……",
+                flush=True,
+            )
+            try:
+                subprocess.run(
+                    [sys.executable, str(base_dir / "screen_users.py")],
+                    check=False,
+                )
+            except Exception as exc:
+                print(f"[WARN] 自动运行 screen_users.py 失败：{exc}", flush=True)
         candidate_users = _load_candidate_users(candidates_path)
         if not candidate_users:
             print(
@@ -468,6 +489,9 @@ def main() -> None:
         else:
             summary_map = {summary.user.lower(): summary for summary in summaries}
             report_map = {row.get("user", "").lower(): row for row in report_rows}
+            lifetime_start = dt.datetime.now(tz=dt.timezone.utc)
+            success_count = 0
+            failed_count = 0
             for idx, addr in enumerate(candidate_users, start=1):
                 print(
                     f"[INFO] (候选{idx}/{len(candidate_users)}) 补抓历史收益：{addr}",
@@ -479,17 +503,30 @@ def main() -> None:
                         f"[WARN] 候选地址 {addr} 未找到用户目录，跳过。",
                         flush=True,
                     )
+                    failed_count += 1
                     continue
-                lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
-                    user=addr,
-                    return_info=True,
-                )
-                lifetime_realized_pnl_sum = sum(
-                    pos.realized_pnl for pos in lifetime_closed_positions
-                )
-                lifetime_closed_count = len(lifetime_closed_positions)
-                lifetime_incomplete = bool(lifetime_info["incomplete"])
-                lifetime_status = "ok" if not lifetime_incomplete else "incomplete"
+                try:
+                    lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
+                        user=addr,
+                        return_info=True,
+                    )
+                    lifetime_realized_pnl_sum = sum(
+                        pos.realized_pnl for pos in lifetime_closed_positions
+                    )
+                    lifetime_closed_count = len(lifetime_closed_positions)
+                    lifetime_incomplete = bool(lifetime_info["incomplete"])
+                    lifetime_status = "ok" if not lifetime_incomplete else "incomplete"
+                except Exception as exc:
+                    print(f"[WARN] 候选地址 {addr} 补抓失败：{exc}", flush=True)
+                    lifetime_realized_pnl_sum = None
+                    lifetime_closed_count = None
+                    lifetime_incomplete = True
+                    lifetime_status = "error"
+
+                if lifetime_status == "ok":
+                    success_count += 1
+                else:
+                    failed_count += 1
 
                 summary = summary_map.get(addr.lower())
                 if summary is not None:
@@ -512,6 +549,11 @@ def main() -> None:
                 update_user_summary(user_dir / "summary.csv", addr, patch)
 
             write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
+            elapsed = dt.datetime.now(tz=dt.timezone.utc) - lifetime_start
+            print(
+                f"[INFO] 历史收益补齐完成：成功 {success_count}，失败 {failed_count}，耗时 {elapsed}.",
+                flush=True,
+            )
     report_path = data_dir / "run_report.csv"
     with report_path.open("w", encoding="utf-8", newline="") as f:
         fieldnames = [
