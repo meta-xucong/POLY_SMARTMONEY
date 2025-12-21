@@ -368,9 +368,13 @@ def main() -> None:
     row["copy_score"] = _compute_copy_score(row, config)
 
     passed, failures, warnings = _apply_filters(row, config)
-    row["passed_filter"] = passed
-    row["filter_failures"] = ";".join(failures)
-    row["filter_warnings"] = ";".join(warnings)
+    row["passed_filter"] = bool(passed)
+    row["filter_failures"] = ";".join(failures) if failures else ""
+    row["filter_warnings"] = ";".join(warnings) if warnings else ""
+
+    print(f"[DEBUG] passed_filter={row['passed_filter']}", flush=True)
+    print(f"[DEBUG] filter_failures={row['filter_failures']}", flush=True)
+    print(f"[DEBUG] filter_warnings={row['filter_warnings']}", flush=True)
 
     label_rules = config.get("label_rules", {})
     price_rules = label_rules.get("price_style", {})
@@ -399,7 +403,9 @@ def main() -> None:
 
     if not passed:
         print(
-            "[WARN] 未通过筛选条件，最终表在 screen_users.py 中可能为空。",
+            "[WARN] 未通过筛选条件: "
+            f"failures={row['filter_failures']} "
+            f"warnings={row['filter_warnings']}",
             flush=True,
         )
 
