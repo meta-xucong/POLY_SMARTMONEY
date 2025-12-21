@@ -25,6 +25,8 @@
 
   "filters": {
     "min_closed_count": 20,
+    "min_account_age_days": 180,
+    "min_lifetime_realized_pnl": 0,
 
     "max_trades_per_day": 40,
     "max_daily_trades": 150,
@@ -116,6 +118,8 @@
       "closed_count",
       "median_roi",
       "profit_factor",
+      "account_age_days",
+      "lifetime_realized_pnl_sum",
 
       "tail_high_ratio",
       "tail_low_ratio",
@@ -144,6 +148,8 @@
       "closed_count": "平仓样本数",
       "median_roi": "中位ROI",
       "profit_factor": "盈利因子",
+      "account_age_days": "账号年龄(天)",
+      "lifetime_realized_pnl_sum": "历史总收益",
 
       "tail_high_ratio": "尾单占比(>=0.90)",
       "tail_low_ratio": "长shot占比(<=0.10)",
