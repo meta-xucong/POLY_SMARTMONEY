@@ -317,6 +317,20 @@ def _run_screen_users(base_dir: Path, config_path: Path) -> bool:
     return True
 
 
+def _load_screening_filenames(config_path: Path) -> tuple[str, str]:
+    default_features = "users_features.csv"
+    default_candidates = "candidates.csv"
+    if not config_path.exists():
+        return default_features, default_candidates
+    try:
+        cfg = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        return default_features, default_candidates
+    features = cfg.get("features_filename") or default_features
+    candidates = cfg.get("candidates_filename") or default_candidates
+    return str(features), str(candidates)
+
+
 def main() -> None:
     args = _parse_args()
     client = DataApiClient()
@@ -344,7 +358,9 @@ def main() -> None:
         summary_path = user_dir / "summary.csv"
         if args.resume and summary_path.exists():
             existing_summary = _load_existing_summary(summary_path)
-            if existing_summary is not None and existing_summary.status == "ok":
+            if existing_summary is not None and (
+                existing_summary.status == "ok" or bool(existing_summary.suspected_hft)
+            ):
                 summaries.append(existing_summary)
                 report_rows.append(
                     {
@@ -538,8 +554,6 @@ def main() -> None:
             summary.trade_actions_actions = trade_actions_cnt
 
             trade_incomplete = bool(trade_info.get("incomplete"))
-            if suspected_hft and bool(trade_info.get("hit_cap")):
-                trade_incomplete = False
             incomplete = (
                 bool(closed_info["incomplete"]) or bool(open_info["incomplete"]) or trade_incomplete
             )
@@ -657,17 +671,22 @@ def main() -> None:
 
     write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
     if lifetime_mode == "candidates":
-        candidates_path = data_dir / "users_features.csv"
+        features_filename, candidates_filename = _load_screening_filenames(screen_config)
+        candidates_path = data_dir / candidates_filename
         if auto_screen:
             _write_prescreen_config(screen_config, prescreen_config)
             _run_screen_users(base_dir, prescreen_config)
             if args.keep_prescreen_output:
-                f1 = data_dir / "users_features.csv"
-                f2 = data_dir / "candidates.csv"
+                f1 = data_dir / features_filename
+                f2 = data_dir / candidates_filename
                 if f1.exists():
-                    shutil.copyfile(f1, data_dir / "users_features_prescreen.csv")
+                    shutil.copyfile(
+                        f1, data_dir / f"{Path(features_filename).stem}_prescreen.csv"
+                    )
                 if f2.exists():
-                    shutil.copyfile(f2, data_dir / "candidates_prescreen.csv")
+                    shutil.copyfile(
+                        f2, data_dir / f"{Path(candidates_filename).stem}_prescreen.csv"
+                    )
         candidate_users = _load_candidate_users(candidates_path)
         if not candidate_users:
             print(
