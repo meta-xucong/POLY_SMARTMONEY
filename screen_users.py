@@ -177,6 +177,8 @@ def _compute_copy_score(metrics: Dict[str, Optional[float]], config: Dict[str, A
     clamps = config.get("score_clamps", {})
     score = 0.0
     for key, weight in weights.items():
+        if not isinstance(weight, (int, float)):
+            continue
         value = metrics.get(key)
         norm_value = _normalize(value, clamps.get(key))
         score += weight * norm_value
