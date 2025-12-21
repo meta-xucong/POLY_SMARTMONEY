@@ -447,15 +447,20 @@ def main() -> None:
             window_days = max(1, args.days)
             unique_tx_per_day = trade_actions_cnt / window_days
 
-            suspected_hft = unique_tx_per_day >= args.hft_unique_tx_threshold
+            suspected_hft = bool(trade_info.get("suspected_hft")) or (
+                unique_tx_per_day >= args.hft_unique_tx_threshold
+            )
 
             if suspected_hft:
-                hft_reason = (
-                    f"unique_tx_per_day>={args.hft_unique_tx_threshold} "
-                    f"(unique_tx={trade_actions_cnt}, days={window_days}, "
-                    f"per_day={unique_tx_per_day:.2f}, records={trade_records}, "
-                    f"pages={trade_pages})"
-                )
+                if trade_info.get("suspected_hft") and cap_reason:
+                    hft_reason = f"{cap_reason}"
+                else:
+                    hft_reason = (
+                        f"unique_tx_per_day>={args.hft_unique_tx_threshold} "
+                        f"(unique_tx={trade_actions_cnt}, days={window_days}, "
+                        f"per_day={unique_tx_per_day:.2f}, records={trade_records}, "
+                        f"pages={trade_pages})"
+                    )
             elif hit_cap and cap_reason:
                 hft_reason = f"cap_hit_only: {cap_reason}"
             else:

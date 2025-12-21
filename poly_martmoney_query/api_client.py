@@ -16,7 +16,7 @@ MAX_BACKOFF_SECONDS = float(os.environ.get("SMART_QUERY_MAX_BACKOFF", "60"))
 MAX_REQUESTS_PER_SECOND = float(os.environ.get("SMART_QUERY_MAX_RPS", "2"))
 MIN_REQUEST_INTERVAL = 1.0 / MAX_REQUESTS_PER_SECOND if MAX_REQUESTS_PER_SECOND > 0 else 0.0
 BASE_PAGE_SLEEP = float(os.environ.get("SMART_QUERY_BASE_SLEEP", "0.3"))
-HFT_MAX_ACTIVITY_RECORDS = int(os.environ.get("SMART_HFT_MAX_ACTIVITY_RECORDS", "10000"))
+HFT_MAX_ACTIVITY_RECORDS = int(os.environ.get("SMART_HFT_MAX_ACTIVITY_RECORDS", "50000"))
 HFT_MAX_UNIQUE_TX = int(os.environ.get("SMART_HFT_MAX_UNIQUE_TX", "20000"))
 
 
@@ -498,9 +498,9 @@ class DataApiClient:
 
             if activity_records_fetched >= HFT_MAX_ACTIVITY_RECORDS:
                 hit_cap = True
-                suspected_hft = False
+                suspected_hft = True
                 cap_reason = (
-                    f"cap_records records>={HFT_MAX_ACTIVITY_RECORDS} "
+                    f"hft_records records>={HFT_MAX_ACTIVITY_RECORDS} "
                     f"(records={activity_records_fetched}, unique_tx={len(actions)}, "
                     f"pages={pages_fetched})"
                 )
