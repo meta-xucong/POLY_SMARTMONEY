@@ -371,109 +371,10 @@ class DataApiClient:
         taker_only: bool = False,
         return_info: bool = False,
     ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
-        url = f"{self.host}/trades"
-        start_ts = _to_timestamp(start_time)
-        end_ts = _to_timestamp(end_time)
-        cursor_end = end_time
-        actions: Dict[str, dt.datetime] = {}
-        ok = True
-        incomplete = False
-        hit_max_pages = False
-        last_error: Optional[str] = None
-        pages_fetched = 0
-
-        while True:
-            params = {
-                "user": user,
-                "limit": page_size,
-                "offset": 0,
-                "takerOnly": taker_only,
-            }
-            if start_ts is not None:
-                params["start"] = start_ts
-            if cursor_end is not None:
-                params["end"] = _to_timestamp(cursor_end)
-
-            resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
-            if resp is None:
-                error_msg = error_msg or "request_failed"
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, error_msg)
-                break
-
-            try:
-                payload = resp.json()
-            except Exception:
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, "invalid_json")
-                break
-
-            raw_trades = []
-            if isinstance(payload, list):
-                raw_trades = payload
-            elif isinstance(payload, dict):
-                raw_trades = payload.get("data") or payload.get("trades") or []
-            if not isinstance(raw_trades, list):
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, "invalid_payload")
-                break
-
-            if not raw_trades:
-                break
-
-            reached_earliest = False
-            min_ts: Optional[dt.datetime] = None
-            for item in raw_trades:
-                trade = Trade.from_api(item)
-                if trade is None:
-                    continue
-                ts = trade.timestamp
-                if end_ts is not None and ts.timestamp() > end_ts:
-                    continue
-                if start_ts is not None and ts.timestamp() < start_ts:
-                    reached_earliest = True
-                    min_ts = ts if min_ts is None else min(min_ts, ts)
-                    continue
-                existing = actions.get(trade.tx_hash)
-                if existing is None or ts < existing:
-                    actions[trade.tx_hash] = ts
-                min_ts = ts if min_ts is None else min(min_ts, ts)
-
-            pages_fetched += 1
-            if reached_earliest or min_ts is None:
-                break
-
-            cursor_end = _shift_before(min_ts)
-            if max_pages is not None and pages_fetched >= max_pages:
-                hit_max_pages = True
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, f"hit_max_pages={max_pages}")
-                print(
-                    f"[WARN] trades 分页被截断：user={user} hit max_pages={max_pages}",
-                    flush=True,
-                )
-                break
-
-            _sleep_with_jitter(BASE_PAGE_SLEEP)
-
-        action_list = [
-            TradeAction(tx_hash=tx_hash, timestamp=timestamp)
-            for tx_hash, timestamp in actions.items()
-        ]
-        action_list.sort(key=lambda t: t.timestamp)
-        info = {
-            "ok": ok,
-            "incomplete": incomplete,
-            "error_msg": last_error,
-            "hit_max_pages": hit_max_pages,
-            "pages_fetched": pages_fetched,
-        }
-
-        return (action_list, info) if return_info else action_list
+        raise NotImplementedError(
+            "fetch_trade_actions_window() 已禁用：/trades 的 start/end 不可靠。"
+            "请使用 fetch_trade_actions_window_from_activity()。"
+        )
 
     def fetch_trade_actions_window_from_activity(
         self,
@@ -828,7 +729,7 @@ class DataApiClient:
             if reached_earliest or len(raw_positions) < page_size:
                 break
 
-            offset += page_size
+            offset += len(raw_positions)
             page += 1
             if max_pages is not None and page >= max_pages:
                 hit_max_pages = True
