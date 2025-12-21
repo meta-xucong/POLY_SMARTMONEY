@@ -10,6 +10,7 @@ from .models import (
     MarketAggregation,
     Position,
     Trade,
+    TradeAction,
     UserSummary,
 )
 
@@ -167,6 +168,27 @@ def write_closed_positions_csv(path: Path, closed_positions: Iterable[ClosedPosi
                     "realized_pnl": f"{item.realized_pnl:.6f}",
                     "cur_price": f"{item.cur_price:.6f}" if item.cur_price is not None else "",
                     "timestamp": item.timestamp.isoformat(),
+                }
+            )
+
+
+def write_trade_actions_csv(path: Path, actions: Iterable[TradeAction]) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fieldnames = [
+        "timestamp",
+        "tx_hash",
+    ]
+
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for action in actions:
+            writer.writerow(
+                {
+                    "timestamp": action.timestamp.isoformat(),
+                    "tx_hash": action.tx_hash,
                 }
             )
 

@@ -15,6 +15,7 @@ from poly_martmoney_query.processors import summarize_user
 from poly_martmoney_query.storage import (
     write_closed_positions_csv,
     write_positions_csv,
+    write_trade_actions_csv,
     write_user_summaries_csv,
     write_user_summary_csv,
 )
@@ -226,13 +227,19 @@ def main() -> None:
             )
 
         try:
-            closed_positions, closed_info = client.fetch_closed_positions(
+            closed_positions, closed_info = client.fetch_closed_positions_window(
                 user=addr,
                 start_time=start,
                 end_time=end,
                 return_info=True,
             )
-            lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
+            trade_actions, trade_info = client.fetch_trade_actions_window(
+                user=addr,
+                start_time=start,
+                end_time=end,
+                return_info=True,
+            )
+            lifetime_closed_positions, lifetime_info = client.fetch_closed_positions_window(
                 user=addr,
                 return_info=True,
             )
@@ -262,6 +269,7 @@ def main() -> None:
             summaries.append(summary)
 
             write_closed_positions_csv(user_dir / "closed_positions.csv", closed_positions)
+            write_trade_actions_csv(user_dir / "trade_actions.csv", trade_actions)
             write_positions_csv(user_dir / "positions.csv", open_positions)
             write_user_summary_csv(summary_path, summary)
 
@@ -269,11 +277,13 @@ def main() -> None:
                 bool(closed_info["incomplete"])
                 or bool(open_info["incomplete"])
                 or bool(lifetime_info["incomplete"])
+                or bool(trade_info["incomplete"])
             )
             error_msg = "; ".join(
                 msg
                 for msg in [
                     closed_info.get("error_msg"),
+                    trade_info.get("error_msg"),
                     open_info.get("error_msg"),
                     lifetime_info.get("error_msg"),
                 ]

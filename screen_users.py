@@ -259,6 +259,7 @@ def _build_features(
     closed_rows: List[Dict[str, str]],
     open_rows: List[Dict[str, str]],
     summary_row: Optional[Dict[str, str]],
+    trade_action_rows: List[Dict[str, str]],
     config: Dict[str, Any],
 ) -> Dict[str, Optional[float]]:
     flat_eps = float(config.get("flat_pnl_epsilon", 1e-9))
@@ -307,6 +308,15 @@ def _build_features(
         if ts is not None:
             timestamps.append(ts)
 
+    action_timestamps: List[dt.datetime] = []
+    for row in trade_action_rows:
+        ts = _parse_datetime(row.get("timestamp", ""))
+        if ts is not None:
+            action_timestamps.append(ts)
+
+    timing_timestamps = action_timestamps if action_timestamps else timestamps
+    timing_count = len(timing_timestamps)
+
     closed_count = len(closed_rows)
     win_rate_no_flat = None
     if win_count + loss_count > 0:
@@ -335,20 +345,20 @@ def _build_features(
 
     trades_per_day = None
     if window_days > 0:
-        trades_per_day = closed_count / window_days
+        trades_per_day = timing_count / window_days
 
-    daily_counts = _collect_daily_counts(timestamps)
+    daily_counts = _collect_daily_counts(timing_timestamps)
     max_trades_per_day = max(daily_counts.values()) if daily_counts else None
     p95_trades_per_day = _percentile(list(daily_counts.values()), 0.95)
     burstiness = _compute_burstiness(daily_counts)
 
-    minute_counts = _collect_minute_counts(timestamps)
+    minute_counts = _collect_minute_counts(timing_timestamps)
     max_minute_trades = max(minute_counts.values()) if minute_counts else None
     minute_burst_ratio = (
-        max_minute_trades / closed_count if closed_count > 0 and max_minute_trades else None
+        max_minute_trades / timing_count if timing_count > 0 and max_minute_trades else None
     )
 
-    intervals_minutes = _compute_intervals_minutes(timestamps)
+    intervals_minutes = _compute_intervals_minutes(timing_timestamps)
     interval_p10 = _percentile(intervals_minutes, 0.1)
     interval_median = _median(intervals_minutes)
 
@@ -512,9 +522,9 @@ def _build_copy_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]
     near_expiry_high = float(rules.get("near_expiry_ratio_high", 0.3))
 
     if minute_burst_ratio >= minute_burst_threshold and near_expiry_ratio >= near_expiry_high:
-        return "结算爆发(临近到期)"
+        return "成交爆发(临近到期)"
     if minute_burst_ratio >= minute_burst_threshold:
-        return "结算爆发"
+        return "成交爆发"
     if (
         interval_median <= interval_fast
         or trades_per_day >= trades_per_day_high
@@ -553,9 +563,9 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
     if minute_burst_ratio >= minute_burst_threshold:
         notes.append("分钟爆发高")
         if near_expiry_ratio >= near_expiry_high:
-            notes.append("可能到期结算集中")
+            notes.append("可能到期成交集中")
     if interval_median <= interval_fast:
-        notes.append("平仓间隔偏快")
+        notes.append("成交间隔偏快")
     if trades_per_day >= trades_per_day_high:
         notes.append("日均交易偏多")
     if burstiness >= burstiness_high:
@@ -593,6 +603,7 @@ def main() -> None:
         user = user_dir.name
         closed_rows = _read_csv(user_dir / "closed_positions.csv")
         open_rows = _read_csv(user_dir / "positions.csv")
+        trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
         summary_row = None
         if (user_dir / "summary.csv").exists():
             summary_rows = _read_csv(user_dir / "summary.csv")
@@ -601,7 +612,14 @@ def main() -> None:
         elif user in summary_map:
             summary_row = summary_map[user]
 
-        metrics = _build_features(user, closed_rows, open_rows, summary_row, config)
+        metrics = _build_features(
+            user,
+            closed_rows,
+            open_rows,
+            summary_row,
+            trade_action_rows,
+            config,
+        )
         row: Dict[str, Any] = {"user": user}
         row.update(metrics)
         row["copy_score"] = _compute_copy_score(row, config)
