@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 import email.utils
+import math
 import os
 import random
 import time
@@ -60,6 +61,37 @@ def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
     return max(parsed.timestamp() - dt.datetime.now(tz=dt.timezone.utc).timestamp(), 0.0)
 
 
+def _coerce_int(value: Any) -> Any:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, dt.datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=dt.timezone.utc)
+        return int(value.timestamp())
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float):
+        return int(value)
+    try:
+        if isinstance(value, str) and value.strip().isdigit():
+            return int(value.strip())
+    except Exception:
+        pass
+    return value
+
+
+def _sanitize_query_params(params: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not params:
+        return params
+    sanitized = dict(params)
+    for key in ("start", "end", "limit", "offset"):
+        if key in sanitized:
+            sanitized[key] = _coerce_int(sanitized[key])
+    return sanitized
+
+
 def _request_with_backoff(
     url: str,
     *,
@@ -79,6 +111,7 @@ def _request_with_backoff(
     while True:
         try:
             limiter.wait()
+            params = _sanitize_query_params(params)
             resp = client.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp, None
@@ -140,6 +173,11 @@ def _to_timestamp(value: Optional[dt.datetime]) -> Optional[float]:
     if value.tzinfo is None:
         value = value.replace(tzinfo=dt.timezone.utc)
     return value.timestamp()
+
+
+def _to_timestamp_int(value: Optional[dt.datetime]) -> Optional[int]:
+    ts = _to_timestamp(value)
+    return None if ts is None else int(ts)
 
 
 def _shift_before(timestamp: dt.datetime) -> dt.datetime:
@@ -262,6 +300,7 @@ class DataApiClient:
         taker_only: bool = False,
     ) -> List[Trade]:
         url = f"{self.host}/trades"
+        page_size = max(1, min(int(page_size), 10000))
         offset = 0
         page = 0
         results: List[Trade] = []
@@ -269,6 +308,8 @@ class DataApiClient:
         end_ts = end_time.timestamp() if end_time else None
 
         while True:
+            if offset >= 10000:
+                break
             params = {
                 "user": user,
                 "limit": page_size,
@@ -311,7 +352,7 @@ class DataApiClient:
             if reached_earliest or len(raw_trades) < page_size:
                 break
 
-            offset += page_size
+            offset += len(raw_trades)
             page += 1
             if max_pages is not None and page >= max_pages:
                 break
@@ -330,109 +371,10 @@ class DataApiClient:
         taker_only: bool = False,
         return_info: bool = False,
     ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
-        url = f"{self.host}/trades"
-        start_ts = _to_timestamp(start_time)
-        end_ts = _to_timestamp(end_time)
-        cursor_end = end_time
-        actions: Dict[str, dt.datetime] = {}
-        ok = True
-        incomplete = False
-        hit_max_pages = False
-        last_error: Optional[str] = None
-        pages_fetched = 0
-
-        while True:
-            params = {
-                "user": user,
-                "limit": page_size,
-                "offset": 0,
-                "takerOnly": taker_only,
-            }
-            if start_ts is not None:
-                params["start"] = start_ts
-            if cursor_end is not None:
-                params["end"] = _to_timestamp(cursor_end)
-
-            resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
-            if resp is None:
-                error_msg = error_msg or "request_failed"
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, error_msg)
-                break
-
-            try:
-                payload = resp.json()
-            except Exception:
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, "invalid_json")
-                break
-
-            raw_trades = []
-            if isinstance(payload, list):
-                raw_trades = payload
-            elif isinstance(payload, dict):
-                raw_trades = payload.get("data") or payload.get("trades") or []
-            if not isinstance(raw_trades, list):
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, "invalid_payload")
-                break
-
-            if not raw_trades:
-                break
-
-            reached_earliest = False
-            min_ts: Optional[dt.datetime] = None
-            for item in raw_trades:
-                trade = Trade.from_api(item)
-                if trade is None:
-                    continue
-                ts = trade.timestamp
-                if end_ts is not None and ts.timestamp() > end_ts:
-                    continue
-                if start_ts is not None and ts.timestamp() < start_ts:
-                    reached_earliest = True
-                    min_ts = ts if min_ts is None else min(min_ts, ts)
-                    continue
-                existing = actions.get(trade.tx_hash)
-                if existing is None or ts < existing:
-                    actions[trade.tx_hash] = ts
-                min_ts = ts if min_ts is None else min(min_ts, ts)
-
-            pages_fetched += 1
-            if reached_earliest or min_ts is None:
-                break
-
-            cursor_end = _shift_before(min_ts)
-            if max_pages is not None and pages_fetched >= max_pages:
-                hit_max_pages = True
-                incomplete = True
-                ok = False
-                last_error = _combine_error(last_error, f"hit_max_pages={max_pages}")
-                print(
-                    f"[WARN] trades 分页被截断：user={user} hit max_pages={max_pages}",
-                    flush=True,
-                )
-                break
-
-            _sleep_with_jitter(BASE_PAGE_SLEEP)
-
-        action_list = [
-            TradeAction(tx_hash=tx_hash, timestamp=timestamp)
-            for tx_hash, timestamp in actions.items()
-        ]
-        action_list.sort(key=lambda t: t.timestamp)
-        info = {
-            "ok": ok,
-            "incomplete": incomplete,
-            "error_msg": last_error,
-            "hit_max_pages": hit_max_pages,
-            "pages_fetched": pages_fetched,
-        }
-
-        return (action_list, info) if return_info else action_list
+        raise NotImplementedError(
+            "fetch_trade_actions_window() 已禁用：/trades 的 start/end 不可靠。"
+            "请使用 fetch_trade_actions_window_from_activity()。"
+        )
 
     def fetch_trade_actions_window_from_activity(
         self,
@@ -445,6 +387,8 @@ class DataApiClient:
         return_info: bool = False,
     ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
         url = f"{self.host}/activity"
+        page_size = max(1, min(int(page_size), 500))
+        max_offset = max(0, min(int(max_offset), 10000))
         start_ts = _to_timestamp(start_time)
         end_ts = _to_timestamp(end_time)
         actions: Dict[str, dt.datetime] = {}
@@ -469,9 +413,9 @@ class DataApiClient:
                     "sortDirection": "DESC",
                 }
                 if range_start is not None:
-                    params["start"] = _to_timestamp(range_start)
+                    params["start"] = _to_timestamp_int(range_start)
                 if range_end is not None:
-                    params["end"] = _to_timestamp(range_end)
+                    params["end"] = _to_timestamp_int(range_end)
 
                 resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
                 if resp is None:
@@ -610,6 +554,7 @@ class DataApiClient:
         return_info: bool = False,
     ) -> List[Position] | tuple[List[Position], Dict[str, object]]:
         url = f"{self.host}/positions"
+        page_size = max(1, min(int(page_size), 500))
         offset = 0
         page = 0
         results: List[Position] = []
@@ -620,6 +565,12 @@ class DataApiClient:
         pages_fetched = 0
 
         while True:
+            if offset >= 10000:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "offset_exceeded_10000")
+                break
             params = {
                 "user": user,
                 "limit": page_size,
@@ -665,7 +616,7 @@ class DataApiClient:
             if len(raw_positions) < page_size:
                 break
 
-            offset += page_size
+            offset += len(raw_positions)
             page += 1
             if max_pages is not None and page >= max_pages:
                 hit_max_pages = True
@@ -695,12 +646,20 @@ class DataApiClient:
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
         page_size: int = 100,
+        max_offset: int = 100000,
         max_pages: Optional[int] = 2000,
         sort_by: str = "TIMESTAMP",
         sort_dir: str = "DESC",
         return_info: bool = False,
     ) -> List[ClosedPosition] | tuple[List[ClosedPosition], Dict[str, object]]:
         url = f"{self.host}/closed-positions"
+        page_size = max(1, min(int(page_size), 50))
+        max_offset = max(0, int(max_offset))
+        max_pages_cap = math.ceil(max_offset / page_size) if max_offset > 0 else 0
+        if max_pages is None:
+            max_pages = max_pages_cap or None
+        elif max_pages_cap:
+            max_pages = min(max_pages, max_pages_cap)
         offset = 0
         page = 0
         results: List[ClosedPosition] = []
@@ -713,6 +672,12 @@ class DataApiClient:
         pages_fetched = 0
 
         while True:
+            if max_offset and offset >= max_offset:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, f"hit_max_offset={max_offset}")
+                break
             params = {
                 "user": user,
                 "limit": page_size,
@@ -764,7 +729,7 @@ class DataApiClient:
             if reached_earliest or len(raw_positions) < page_size:
                 break
 
-            offset += page_size
+            offset += len(raw_positions)
             page += 1
             if max_pages is not None and page >= max_pages:
                 hit_max_pages = True
