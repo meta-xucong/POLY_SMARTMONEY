@@ -83,6 +83,12 @@ def _parse_args() -> argparse.Namespace:
         default=300,
         help="trade_actions 拉取的分页大小（默认 300）",
     )
+    parser.add_argument(
+        "--hft-unique-tx-threshold",
+        type=int,
+        default=20000,
+        help="判定为高频并跳过深拉的阈值，使用 trade_actions 的 actions_count/unique_tx（默认 20000）",
+    )
     return parser.parse_args()
 
 
@@ -429,15 +435,29 @@ def main() -> None:
                 progress_every=20,
                 return_info=True,
             )
-            suspected_hft = bool(trade_info.get("suspected_hft")) or bool(
-                trade_info.get("hit_cap")
-            )
-            hft_reason = trade_info.get("cap_reason") or ""
+            hit_cap = bool(trade_info.get("hit_cap"))
+            cap_reason = trade_info.get("cap_reason") or ""
             trade_pages = int(trade_info.get("pages_fetched") or 0)
             trade_records = int(trade_info.get("activity_records_fetched") or 0)
             trade_actions_cnt = int(
                 trade_info.get("actions_count") or trade_info.get("unique_tx") or 0
             )
+
+            suspected_hft = bool(trade_info.get("suspected_hft")) or (
+                trade_actions_cnt >= args.hft_unique_tx_threshold
+            )
+
+            hft_reason = ""
+            if suspected_hft:
+                if trade_actions_cnt >= args.hft_unique_tx_threshold:
+                    hft_reason = (
+                        f"unique_tx/actions_count>={args.hft_unique_tx_threshold} "
+                        f"(actions={trade_actions_cnt}, records={trade_records}, pages={trade_pages})"
+                    )
+                else:
+                    hft_reason = cap_reason or "suspected_hft=true"
+            elif hit_cap and cap_reason:
+                hft_reason = f"cap_hit_only: {cap_reason}"
 
             if suspected_hft:
                 account_start_time = client.fetch_account_start_time_from_activity(
@@ -548,7 +568,7 @@ def main() -> None:
             )
             summary.leaderboard_month_pnl = lb_month_pnl
             summary.suspected_hft = False
-            summary.hft_reason = ""
+            summary.hft_reason = hft_reason
             summary.trade_actions_pages = trade_pages
             summary.trade_actions_records = trade_records
             summary.trade_actions_actions = trade_actions_cnt
@@ -602,7 +622,7 @@ def main() -> None:
                     if summary.account_age_days is not None
                     else "",
                     "suspected_hft": 0,
-                    "hft_reason": "",
+                    "hft_reason": hft_reason,
                     "trade_actions_pages": trade_pages,
                     "trade_actions_records": trade_records,
                     "trade_actions_actions": trade_actions_cnt,
