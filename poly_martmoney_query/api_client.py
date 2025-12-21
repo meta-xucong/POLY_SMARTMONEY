@@ -701,6 +701,7 @@ class DataApiClient:
         return_info: bool = False,
     ) -> List[ClosedPosition] | tuple[List[ClosedPosition], Dict[str, object]]:
         url = f"{self.host}/closed-positions"
+        page_size = max(1, min(int(page_size), 50))
         offset = 0
         page = 0
         results: List[ClosedPosition] = []
