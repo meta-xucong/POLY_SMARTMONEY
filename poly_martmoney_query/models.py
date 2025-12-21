@@ -285,4 +285,10 @@ class UserSummary:
     open_unrealized_pnl_sum: float
     open_realized_pnl_sum: float
     asof_time: dt.datetime
+    leaderboard_month_pnl: Optional[float] = None
+    suspected_hft: Optional[bool] = None
+    hft_reason: Optional[str] = None
+    trade_actions_pages: Optional[int] = None
+    trade_actions_records: Optional[int] = None
+    trade_actions_actions: Optional[int] = None
     status: Optional[str] = None

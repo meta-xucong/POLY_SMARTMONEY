@@ -16,6 +16,8 @@ MAX_BACKOFF_SECONDS = float(os.environ.get("SMART_QUERY_MAX_BACKOFF", "60"))
 MAX_REQUESTS_PER_SECOND = float(os.environ.get("SMART_QUERY_MAX_RPS", "2"))
 MIN_REQUEST_INTERVAL = 1.0 / MAX_REQUESTS_PER_SECOND if MAX_REQUESTS_PER_SECOND > 0 else 0.0
 BASE_PAGE_SLEEP = float(os.environ.get("SMART_QUERY_BASE_SLEEP", "0.3"))
+HFT_MAX_ACTIVITY_RECORDS = int(os.environ.get("SMART_HFT_MAX_ACTIVITY_RECORDS", "10000"))
+HFT_MAX_UNIQUE_TX = int(os.environ.get("SMART_HFT_MAX_UNIQUE_TX", "20000"))
 
 
 class RateLimiter:
@@ -398,6 +400,10 @@ class DataApiClient:
         hit_max_pages = False
         last_error: Optional[str] = None
         pages_fetched = 0
+        activity_records_fetched = 0
+        hit_cap = False
+        suspected_hft = False
+        cap_reason: Optional[str] = None
         cursor_end_sec = (
             end_ts_sec
             if end_ts_sec is not None
@@ -448,6 +454,7 @@ class DataApiClient:
 
             if not raw_items:
                 break
+            activity_records_fetched += len(raw_items)
 
             min_ts_sec = None
             for item in raw_items:
@@ -480,6 +487,22 @@ class DataApiClient:
                     f"actions={len(actions)} cursor_end={cursor_end_sec} offset={offset}",
                     flush=True,
                 )
+
+            if (
+                activity_records_fetched >= HFT_MAX_ACTIVITY_RECORDS
+                or len(actions) >= HFT_MAX_UNIQUE_TX
+            ):
+                hit_cap = True
+                suspected_hft = True
+                cap_reason = (
+                    f"hft_cap records>={HFT_MAX_ACTIVITY_RECORDS} or unique_tx>={HFT_MAX_UNIQUE_TX} "
+                    f"(records={activity_records_fetched}, unique_tx={len(actions)}, "
+                    f"pages={pages_fetched})"
+                )
+                ok = True
+                incomplete = True
+                last_error = _combine_error(last_error, cap_reason)
+                break
 
             if len(raw_items) < page_size:
                 break
@@ -523,6 +546,10 @@ class DataApiClient:
             "pages_fetched": pages_fetched,
             "cursor_end_sec": cursor_end_sec,
             "actions_count": len(actions),
+            "activity_records_fetched": activity_records_fetched,
+            "hit_cap": hit_cap,
+            "suspected_hft": suspected_hft,
+            "cap_reason": cap_reason,
         }
 
         return (action_list, info) if return_info else action_list
