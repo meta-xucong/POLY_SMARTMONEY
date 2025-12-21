@@ -1,5 +1,5 @@
 """
-交互式单地址查询脚本：输入账号 URL，直接输出数据到屏幕。
+交互式单地址查询脚本：输入账号地址，输出与 screen_users.py 最终表一致的格式。
 """
 from __future__ import annotations
 
@@ -8,12 +8,21 @@ import csv
 import datetime as dt
 import re
 import sys
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional
-from urllib.parse import urlparse
 
 from poly_martmoney_query.api_client import DataApiClient
 from poly_martmoney_query.processors import summarize_user
-from poly_martmoney_query.storage import SUMMARY_FIELDNAMES, _summary_row
+from poly_martmoney_query.storage import _summary_row
+from screen_users import (
+    _apply_filters,
+    _build_copy_style,
+    _build_features,
+    _build_notes,
+    _build_price_style,
+    _compute_copy_score,
+    _load_config,
+)
 
 
 REPORT_FIELDNAMES = [
@@ -67,30 +76,29 @@ def _parse_args() -> argparse.Namespace:
         default=300,
         help="trade_actions 拉取的分页大小（默认 300）",
     )
+    parser.add_argument(
+        "--screen-config",
+        default="screen_users_config.json",
+        help="筛选配置文件路径（默认 screen_users_config.json）",
+    )
     return parser.parse_args()
 
 
 def _extract_address(text: str) -> str:
     cleaned = text.strip()
     if not cleaned:
-        raise ValueError("输入为空，请提供目标账号的 URL")
+        raise ValueError("输入为空，请提供目标账号地址")
 
-    match = re.search(r"0x[a-fA-F0-9]{40}", cleaned)
+    match = re.fullmatch(r"0x[a-fA-F0-9]{40}", cleaned)
     if match:
-        return match.group(0)
+        return cleaned
 
-    parsed = urlparse(cleaned)
-    if parsed.scheme and parsed.netloc:
-        segments = [seg for seg in parsed.path.split("/") if seg]
-        if segments:
-            return segments[-1]
-
-    return cleaned
+    raise ValueError("地址格式不正确，请输入 0x 开头的 42 位地址")
 
 
-def _prompt_url() -> str:
+def _prompt_address() -> str:
     try:
-        return input("请输入目标账号的 URL：").strip()
+        return input("请输入目标账号地址（0x...）：").strip()
     except EOFError as exc:
         raise SystemExit("未获取到输入，已退出。") from exc
 
@@ -196,11 +204,17 @@ def _build_report_row(
 
 def main() -> None:
     args = _parse_args()
-    url_text = _prompt_url()
+    address_text = _prompt_address()
     try:
-        addr = _extract_address(url_text)
+        addr = _extract_address(address_text)
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
+
+    base_dir = Path(__file__).resolve().parent
+    config_path = Path(args.screen_config)
+    if not config_path.is_absolute():
+        config_path = (base_dir / config_path).resolve()
+    config = _load_config(config_path)
 
     client = DataApiClient()
     now = dt.datetime.now(tz=dt.timezone.utc)
@@ -313,66 +327,58 @@ def main() -> None:
         summary.status = "ok" if not incomplete else "incomplete"
         status = summary.status
 
-    _print_section("SUMMARY")
-    _write_rows(SUMMARY_FIELDNAMES, [_summary_row(summary)])
+    summary_row = _summary_row(summary)
+    closed_rows = [_closed_position_row(item) for item in closed_positions]
+    open_rows = [_open_position_row(item) for item in open_positions]
+    trade_rows = [_trade_action_row(item) for item in trade_actions]
 
-    _print_section("TRADE_ACTIONS")
-    _write_rows(["timestamp", "tx_hash"], [_trade_action_row(item) for item in trade_actions])
+    metrics = _build_features(
+        addr,
+        closed_rows,
+        open_rows,
+        summary_row,
+        trade_rows,
+        config,
+    )
+    row: Dict[str, object] = {"user": addr}
+    row.update(metrics)
+    row["copy_score"] = _compute_copy_score(row, config)
 
-    _print_section("CLOSED_POSITIONS")
-    _write_rows(
-        [
-            "user",
-            "condition_id",
-            "outcome",
-            "outcome_index",
-            "title",
-            "slug",
-            "avg_price",
-            "total_bought",
-            "realized_pnl",
-            "cur_price",
-            "timestamp",
-        ],
-        [_closed_position_row(item) for item in closed_positions],
+    passed, failures, warnings = _apply_filters(row, config)
+    row["passed_filter"] = passed
+    row["filter_failures"] = ";".join(failures)
+    row["filter_warnings"] = ";".join(warnings)
+
+    label_rules = config.get("label_rules", {})
+    price_rules = label_rules.get("price_style", {})
+    copy_rules = label_rules.get("copy_style", {})
+    final_output = config.get("final_output", {})
+    final_columns = final_output.get("columns")
+    final_rename = final_output.get("rename", {})
+
+    enriched = dict(row)
+    enriched["price_style"] = _build_price_style(enriched, price_rules)
+    enriched["copy_style"] = _build_copy_style(enriched, copy_rules)
+    enriched["notes"] = _build_notes(enriched, {**price_rules, **copy_rules})
+    enriched["profile_url"] = (
+        f"https://polymarket.com/profile/{str(row.get('user', '')).lower()}"
     )
 
-    _print_section("POSITIONS")
-    _write_rows(
-        [
-            "user",
-            "condition_id",
-            "outcome",
-            "outcome_index",
-            "title",
-            "slug",
-            "size",
-            "avg_price",
-            "initial_value",
-            "current_value",
-            "cash_pnl",
-            "realized_pnl",
-            "cur_price",
-            "end_date",
-        ],
-        [_open_position_row(item) for item in open_positions],
-    )
+    if final_columns:
+        filtered = {col: enriched.get(col) for col in final_columns}
+    else:
+        filtered = enriched
 
-    report_row = _build_report_row(
-        addr=addr,
-        status=status,
-        ok=not incomplete,
-        incomplete=incomplete,
-        summary=summary,
-        closed_info=closed_info,
-        open_info=open_info,
-        trade_info=trade_info,
-        lifetime_status=lifetime_status,
-        lifetime_incomplete=lifetime_incomplete,
-        error_msg=trade_info.get("error_msg") or "",
-    )
-    _print_section("RUN_REPORT")
-    _write_rows(REPORT_FIELDNAMES, [report_row])
+    renamed = {final_rename.get(key, key): value for key, value in filtered.items()}
+
+    _print_section("FINAL_OUTPUT")
+    _write_rows(list(renamed.keys()), [renamed])
+
+    if not passed:
+        print(
+            "[WARN] 未通过筛选条件，最终表在 screen_users.py 中可能为空。",
+            flush=True,
+        )
 
     print("\n[INFO] 完成", flush=True)
 
