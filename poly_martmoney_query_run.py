@@ -5,7 +5,9 @@
 import argparse
 import csv
 import datetime as dt
+import json
 import math
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -61,10 +63,19 @@ def _parse_args() -> argparse.Namespace:
         help="历史收益拉取模式：all=全量，candidates=仅候选补齐，none=跳过",
     )
     parser.add_argument(
-        "--auto-screen",
-        default=True,
-        action=argparse.BooleanOptionalAction,
-        help="candidates 模式下若缺少 users_features.csv 则自动运行 screen_users.py（默认启用）",
+        "--screen-config",
+        default="screen_users_config.json",
+        help="screen_users.py 使用的配置文件路径（默认 screen_users_config.json）",
+    )
+    parser.add_argument(
+        "--no-auto-screen",
+        action="store_true",
+        help="关闭自动运行 screen_users.py（默认开启）",
+    )
+    parser.add_argument(
+        "--keep-prescreen-output",
+        action="store_true",
+        help="保留预筛输出：users_features_prescreen.csv / candidates_prescreen.csv",
     )
     return parser.parse_args()
 
@@ -259,6 +270,29 @@ def _load_candidate_users(path: Path) -> List[str]:
     return users
 
 
+def _write_prescreen_config(src: Path, dst: Path) -> Path:
+    cfg = json.loads(src.read_text(encoding="utf-8"))
+    filters = cfg.get("filters") or {}
+    if "min_lifetime_realized_pnl" in filters:
+        filters["min_lifetime_realized_pnl"] = None
+    cfg["filters"] = filters
+    dst.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+    return dst
+
+
+def _run_screen_users(base_dir: Path, config_path: Path) -> bool:
+    cmd = [sys.executable, str(base_dir / "screen_users.py"), "--config", str(config_path)]
+    print(f"[INFO] 自动运行 screen_users.py：config={config_path}", flush=True)
+    proc = subprocess.run(cmd, cwd=str(base_dir))
+    if proc.returncode != 0:
+        print(
+            f"[WARN] screen_users.py 返回非 0：code={proc.returncode}，后续候选补齐可能跳过",
+            flush=True,
+        )
+        return False
+    return True
+
+
 def main() -> None:
     args = _parse_args()
     client = DataApiClient()
@@ -276,6 +310,9 @@ def main() -> None:
     summaries = []
     report_rows: List[dict] = []
     lifetime_mode = args.lifetime_mode
+    auto_screen = not args.no_auto_screen
+    screen_config = (base_dir / args.screen_config).resolve()
+    prescreen_config = (data_dir / "_screen_users_prescreen_config.json").resolve()
 
     for idx, addr in enumerate(users, start=1):
         print(f"[INFO] ({idx}/{len(users)}) 抓取地址 {addr} 的仓位数据……", flush=True)
@@ -425,11 +462,14 @@ def main() -> None:
                 if summary.account_age_days is not None
                 else "N/A"
             )
-            lifetime_text = (
-                f"{summary.lifetime_realized_pnl_sum:.4f}"
-                if summary.lifetime_realized_pnl_sum is not None
-                else (summary.lifetime_status or "pending").upper()
-            )
+            if summary.lifetime_realized_pnl_sum is not None:
+                lifetime_text = f"{summary.lifetime_realized_pnl_sum:.4f}"
+            elif lifetime_mode == "candidates":
+                lifetime_text = "PENDING(candidates)"
+            elif lifetime_mode == "none":
+                lifetime_text = "DISABLED"
+            else:
+                lifetime_text = (summary.lifetime_status or "pending").upper()
             print(
                 f"[INFO] 地址 {addr}：已平仓={summary.closed_count}，"
                 f"已实现盈亏={summary.closed_realized_pnl_sum:.4f}，"
@@ -468,18 +508,17 @@ def main() -> None:
     write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
     if lifetime_mode == "candidates":
         candidates_path = data_dir / "users_features.csv"
-        if not candidates_path.exists() and args.auto_screen:
-            print(
-                "[INFO] 未找到候选名单，自动运行 screen_users.py 生成 users_features.csv……",
-                flush=True,
-            )
-            try:
-                subprocess.run(
-                    [sys.executable, str(base_dir / "screen_users.py")],
-                    check=False,
-                )
-            except Exception as exc:
-                print(f"[WARN] 自动运行 screen_users.py 失败：{exc}", flush=True)
+        if auto_screen:
+            if not candidates_path.exists():
+                _write_prescreen_config(screen_config, prescreen_config)
+                _run_screen_users(base_dir, prescreen_config)
+                if args.keep_prescreen_output:
+                    f1 = data_dir / "users_features.csv"
+                    f2 = data_dir / "candidates.csv"
+                    if f1.exists():
+                        shutil.copyfile(f1, data_dir / "users_features_prescreen.csv")
+                    if f2.exists():
+                        shutil.copyfile(f2, data_dir / "candidates_prescreen.csv")
         candidate_users = _load_candidate_users(candidates_path)
         if not candidate_users:
             print(
@@ -552,6 +591,12 @@ def main() -> None:
             elapsed = dt.datetime.now(tz=dt.timezone.utc) - lifetime_start
             print(
                 f"[INFO] 历史收益补齐完成：成功 {success_count}，失败 {failed_count}，耗时 {elapsed}.",
+                flush=True,
+            )
+        if auto_screen:
+            _run_screen_users(base_dir, screen_config)
+            print(
+                "[INFO] 已输出最终表：data/users_features.csv & data/candidates.csv（已包含 lifetime 字段）",
                 flush=True,
             )
     report_path = data_dir / "run_report.csv"
