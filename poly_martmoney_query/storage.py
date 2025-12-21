@@ -259,6 +259,12 @@ SUMMARY_FIELDNAMES = [
     "open_unrealized_pnl_sum",
     "open_realized_pnl_sum",
     "asof_time",
+    "leaderboard_month_pnl",
+    "suspected_hft",
+    "hft_reason",
+    "trade_actions_pages",
+    "trade_actions_records",
+    "trade_actions_actions",
     "status",
 ]
 
@@ -348,6 +354,20 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         "open_unrealized_pnl_sum": f"{summary.open_unrealized_pnl_sum:.6f}",
         "open_realized_pnl_sum": f"{summary.open_realized_pnl_sum:.6f}",
         "asof_time": summary.asof_time.isoformat(),
+        "leaderboard_month_pnl": _serialize_summary_value(
+            "leaderboard_month_pnl", summary.leaderboard_month_pnl
+        ),
+        "suspected_hft": _serialize_summary_value("suspected_hft", summary.suspected_hft),
+        "hft_reason": summary.hft_reason or "",
+        "trade_actions_pages": _serialize_summary_value(
+            "trade_actions_pages", summary.trade_actions_pages
+        ),
+        "trade_actions_records": _serialize_summary_value(
+            "trade_actions_records", summary.trade_actions_records
+        ),
+        "trade_actions_actions": _serialize_summary_value(
+            "trade_actions_actions", summary.trade_actions_actions
+        ),
         "status": summary.status or "",
     }
 
@@ -355,9 +375,20 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
 def _serialize_summary_value(key: str, value: object) -> str:
     if value is None:
         return ""
-    if key in {"lifetime_realized_pnl_sum"}:
+    if key in {"lifetime_realized_pnl_sum", "leaderboard_month_pnl"}:
         return f"{float(value):.6f}"
-    if key in {"lifetime_closed_count", "closed_count", "win_count", "loss_count", "flat_count", "open_count"}:
+    if key in {
+        "lifetime_closed_count",
+        "closed_count",
+        "win_count",
+        "loss_count",
+        "flat_count",
+        "open_count",
+        "trade_actions_pages",
+        "trade_actions_records",
+        "trade_actions_actions",
+        "suspected_hft",
+    }:
         try:
             return str(int(value))
         except (TypeError, ValueError):

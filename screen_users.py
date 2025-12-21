@@ -194,6 +194,10 @@ def _apply_filters(
     failures = []
     warnings = []
 
+    if str(metrics.get("suspected_hft", "")).strip() in ("1", "true", "True"):
+        failures.append("suspected_hft_trade_actions_cap")
+        return False, failures, warnings
+
     def _check_min(key: str, label: str) -> None:
         threshold = filters.get(key)
         value = metrics.get(label)
@@ -349,12 +353,28 @@ def _build_features(
     account_age_days = None
     lifetime_realized_pnl_sum = None
     lifetime_status = None
+    suspected_hft = None
+    hft_reason = None
+    trade_actions_pages = None
+    trade_actions_records = None
+    trade_actions_actions = None
+    leaderboard_month_pnl = None
     if summary_row:
         account_age_days = _parse_float(summary_row.get("account_age_days", ""))
         lifetime_realized_pnl_sum = _parse_float(
             summary_row.get("lifetime_realized_pnl_sum", "")
         )
         lifetime_status = summary_row.get("lifetime_status") or None
+        suspected_hft = summary_row.get("suspected_hft")
+        hft_reason = summary_row.get("hft_reason") or None
+        trade_actions_pages = _parse_float(summary_row.get("trade_actions_pages", ""))
+        trade_actions_records = _parse_float(
+            summary_row.get("trade_actions_records", "")
+        )
+        trade_actions_actions = _parse_float(
+            summary_row.get("trade_actions_actions", "")
+        )
+        leaderboard_month_pnl = _parse_float(summary_row.get("leaderboard_month_pnl", ""))
 
     trades_per_day = None
     if window_days > 0:
@@ -485,6 +505,12 @@ def _build_features(
         "account_age_days": account_age_days,
         "lifetime_realized_pnl_sum": lifetime_realized_pnl_sum,
         "lifetime_status": lifetime_status,
+        "suspected_hft": suspected_hft,
+        "hft_reason": hft_reason,
+        "trade_actions_pages": trade_actions_pages,
+        "trade_actions_records": trade_actions_records,
+        "trade_actions_actions": trade_actions_actions,
+        "leaderboard_month_pnl": leaderboard_month_pnl,
     }
 
     return metrics

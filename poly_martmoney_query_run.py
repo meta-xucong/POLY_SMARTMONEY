@@ -98,11 +98,14 @@ def _extract_metric(item: dict, keys: Iterable[str]) -> Optional[float]:
     return None
 
 
-def _collect_users(client: DataApiClient, args: argparse.Namespace) -> List[str]:
+def _collect_users(
+    client: DataApiClient, args: argparse.Namespace
+) -> tuple[List[str], Dict[str, dict]]:
     if args.user:
-        return [args.user]
+        return [args.user], {}
 
     leaderboard_users = []
+    leaderboard_map: Dict[str, dict] = {}
     seen = set()
     print(f"[INFO] 获取 leaderboard（{args.period}，按 {args.order_by}）……", flush=True)
     page_size = 50
@@ -131,6 +134,7 @@ def _collect_users(client: DataApiClient, args: argparse.Namespace) -> List[str]
                 continue
             seen.add(normalized)
             leaderboard_users.append(addr)
+            leaderboard_map[normalized] = item
         if len(leaderboard_users) >= target:
             break
 
@@ -143,7 +147,7 @@ def _collect_users(client: DataApiClient, args: argparse.Namespace) -> List[str]
             flush=True,
         )
 
-    return leaderboard_users
+    return leaderboard_users, leaderboard_map
 
 
 def _parse_datetime(value: str) -> Optional[dt.datetime]:
@@ -223,6 +227,20 @@ def _load_existing_summary(path: Path) -> Optional[UserSummary]:
                 end_time=_parse_datetime(row.get("end_time", "")),
                 account_start_time=_parse_datetime(row.get("account_start_time", "")),
                 account_age_days=_to_float(row.get("account_age_days")),
+                leaderboard_month_pnl=_parse_optional_float(
+                    row.get("leaderboard_month_pnl", "")
+                ),
+                suspected_hft=_parse_optional_bool(row.get("suspected_hft", "")),
+                hft_reason=row.get("hft_reason") or None,
+                trade_actions_pages=_parse_optional_int(
+                    row.get("trade_actions_pages", "")
+                ),
+                trade_actions_records=_parse_optional_int(
+                    row.get("trade_actions_records", "")
+                ),
+                trade_actions_actions=_parse_optional_int(
+                    row.get("trade_actions_actions", "")
+                ),
                 lifetime_realized_pnl_sum=_parse_optional_float(
                     row.get("lifetime_realized_pnl_sum", "")
                 ),
@@ -306,7 +324,7 @@ def main() -> None:
     start = now - dt.timedelta(days=args.days) if args.days > 0 else None
     end = now
 
-    users = _collect_users(client, args)
+    users, leaderboard_map = _collect_users(client, args)
     summaries = []
     report_rows: List[dict] = []
     lifetime_mode = args.lifetime_mode
@@ -338,6 +356,24 @@ def main() -> None:
                         "lifetime_incomplete": existing_summary.lifetime_incomplete
                         if existing_summary.lifetime_incomplete is not None
                         else "",
+                        "leaderboard_month_pnl": existing_summary.leaderboard_month_pnl
+                        if existing_summary.leaderboard_month_pnl is not None
+                        else "",
+                        "suspected_hft": 1
+                        if existing_summary.suspected_hft
+                        else 0
+                        if existing_summary.suspected_hft is not None
+                        else "",
+                        "hft_reason": existing_summary.hft_reason or "",
+                        "trade_actions_pages": existing_summary.trade_actions_pages
+                        if existing_summary.trade_actions_pages is not None
+                        else "",
+                        "trade_actions_records": existing_summary.trade_actions_records
+                        if existing_summary.trade_actions_records is not None
+                        else "",
+                        "trade_actions_actions": existing_summary.trade_actions_actions
+                        if existing_summary.trade_actions_actions is not None
+                        else "",
                         "error_msg": "resume-skip",
                     }
                 )
@@ -355,17 +391,84 @@ def main() -> None:
                 )
 
         try:
-            closed_positions, closed_info = client.fetch_closed_positions_window(
-                user=addr,
-                start_time=start,
-                end_time=end,
-                return_info=True,
-            )
+            entry = leaderboard_map.get(addr.lower(), {})
+            lb_month_pnl = _extract_metric(entry, ("pnl", "realizedPnl", "profit"))
             trade_actions, trade_info = client.fetch_trade_actions_window_from_activity(
                 user=addr,
                 start_time=start,
                 end_time=end,
                 progress_every=20,
+                return_info=True,
+            )
+            suspected_hft = bool(trade_info.get("suspected_hft")) or bool(
+                trade_info.get("hit_cap")
+            )
+            hft_reason = trade_info.get("cap_reason") or ""
+            trade_pages = int(trade_info.get("pages_fetched") or 0)
+            trade_records = int(trade_info.get("activity_records_fetched") or 0)
+            trade_actions_cnt = int(
+                trade_info.get("actions_count") or trade_info.get("unique_tx") or 0
+            )
+
+            if suspected_hft:
+                account_start_time = client.fetch_account_start_time_from_activity(
+                    user=addr
+                )
+                summary = summarize_user(
+                    [],
+                    [],
+                    user=addr,
+                    start_time=start,
+                    end_time=end,
+                    asof_time=now,
+                    account_start_time=account_start_time,
+                    lifetime_status="skipped",
+                )
+                summary.status = "hft_skipped_deep_fetch"
+                summary.leaderboard_month_pnl = lb_month_pnl
+                summary.suspected_hft = True
+                summary.hft_reason = hft_reason
+                summary.trade_actions_pages = trade_pages
+                summary.trade_actions_records = trade_records
+                summary.trade_actions_actions = trade_actions_cnt
+                summaries.append(summary)
+
+                write_trade_actions_csv(user_dir / "trade_actions.csv", trade_actions)
+                write_user_summary_csv(summary_path, summary)
+
+                report_rows.append(
+                    {
+                        "user": addr,
+                        "status": "hft_skipped_deep_fetch",
+                        "ok": True,
+                        "incomplete": False,
+                        "closed_count": 0,
+                        "open_count": 0,
+                        "closed_incomplete": False,
+                        "open_incomplete": False,
+                        "closed_hit_max_pages": False,
+                        "open_hit_max_pages": False,
+                        "lifetime_status": "skipped",
+                        "lifetime_incomplete": "",
+                        "leaderboard_month_pnl": lb_month_pnl if lb_month_pnl is not None else "",
+                        "suspected_hft": 1,
+                        "hft_reason": hft_reason,
+                        "trade_actions_pages": trade_pages,
+                        "trade_actions_records": trade_records,
+                        "trade_actions_actions": trade_actions_cnt,
+                        "error_msg": "",
+                    }
+                )
+                print(
+                    f"[WARN] 地址 {addr} 命中高频阈值，已跳过深拉：{hft_reason}",
+                    flush=True,
+                )
+                continue
+
+            closed_positions, closed_info = client.fetch_closed_positions_window(
+                user=addr,
+                start_time=start,
+                end_time=end,
                 return_info=True,
             )
             open_positions, open_info = client.fetch_positions(
@@ -408,10 +511,18 @@ def main() -> None:
                 lifetime_incomplete=lifetime_incomplete,
                 lifetime_status=lifetime_status,
             )
+            summary.leaderboard_month_pnl = lb_month_pnl
+            summary.suspected_hft = False
+            summary.hft_reason = ""
+            summary.trade_actions_pages = trade_pages
+            summary.trade_actions_records = trade_records
+            summary.trade_actions_actions = trade_actions_cnt
+
+            trade_incomplete = bool(trade_info.get("incomplete"))
+            if suspected_hft and bool(trade_info.get("hit_cap")):
+                trade_incomplete = False
             incomplete = (
-                bool(closed_info["incomplete"])
-                or bool(open_info["incomplete"])
-                or bool(trade_info["incomplete"])
+                bool(closed_info["incomplete"]) or bool(open_info["incomplete"]) or trade_incomplete
             )
             if lifetime_mode == "all":
                 incomplete = incomplete or bool(lifetime_info["incomplete"])
@@ -450,6 +561,12 @@ def main() -> None:
                     "lifetime_incomplete": bool(lifetime_incomplete)
                     if lifetime_incomplete is not None
                     else "",
+                    "leaderboard_month_pnl": lb_month_pnl if lb_month_pnl is not None else "",
+                    "suspected_hft": 0,
+                    "hft_reason": "",
+                    "trade_actions_pages": trade_pages,
+                    "trade_actions_records": trade_records,
+                    "trade_actions_actions": trade_actions_cnt,
                     "error_msg": error_msg,
                 }
             )
@@ -500,6 +617,12 @@ def main() -> None:
                     "open_hit_max_pages": False,
                     "lifetime_status": "error",
                     "lifetime_incomplete": True,
+                    "leaderboard_month_pnl": "",
+                    "suspected_hft": "",
+                    "hft_reason": "",
+                    "trade_actions_pages": "",
+                    "trade_actions_records": "",
+                    "trade_actions_actions": "",
                     "error_msg": str(exc),
                 }
             )
@@ -614,6 +737,12 @@ def main() -> None:
             "open_hit_max_pages",
             "lifetime_status",
             "lifetime_incomplete",
+            "leaderboard_month_pnl",
+            "suspected_hft",
+            "hft_reason",
+            "trade_actions_pages",
+            "trade_actions_records",
+            "trade_actions_actions",
             "error_msg",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)
