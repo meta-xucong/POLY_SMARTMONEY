@@ -213,6 +213,7 @@ def _apply_filters(
     _check_min("min_median_roi", "median_roi")
     _check_min("min_mid_ratio", "mid_ratio")
     _check_min("min_interval_median_minutes", "interval_median_minutes")
+    _check_min("min_account_age_days", "account_age_days")
     _check_max("max_trades_per_day", "trades_per_day")
     _check_max("max_daily_trades", "max_trades_per_day")
     _check_max("max_p90_cost", "p90_cost")
@@ -241,6 +242,12 @@ def _apply_filters(
             failures.append(f"max_loss<{max_loss_threshold}")
         elif max_loss < max_loss_threshold:
             failures.append(f"max_loss<{max_loss_threshold}")
+
+    min_lifetime_pnl = filters.get("min_lifetime_realized_pnl")
+    lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
+    if min_lifetime_pnl is not None:
+        if lifetime_pnl is None or lifetime_pnl <= min_lifetime_pnl:
+            failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
 
     return (len(failures) == 0), failures, warnings
 
@@ -315,6 +322,14 @@ def _build_features(
         start_time, end_time = _extract_summary_times(summary_row)
         window_days = _calculate_window_days(start_time, end_time, window_days)
         asof_time = _parse_datetime(summary_row.get("asof_time", ""))
+
+    account_age_days = None
+    lifetime_realized_pnl_sum = None
+    if summary_row:
+        account_age_days = _parse_float(summary_row.get("account_age_days", ""))
+        lifetime_realized_pnl_sum = _parse_float(
+            summary_row.get("lifetime_realized_pnl_sum", "")
+        )
 
     trades_per_day = None
     if window_days > 0:
@@ -442,6 +457,8 @@ def _build_features(
         "tail_low_ratio": tail_low_ratio,
         "mid_ratio": mid_ratio,
         "price_median": price_median,
+        "account_age_days": account_age_days,
+        "lifetime_realized_pnl_sum": lifetime_realized_pnl_sum,
     }
 
     return metrics

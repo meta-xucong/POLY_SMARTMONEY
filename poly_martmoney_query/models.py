@@ -260,6 +260,9 @@ class UserSummary:
     user: str
     start_time: Optional[dt.datetime]
     end_time: Optional[dt.datetime]
+    account_start_time: Optional[dt.datetime]
+    account_age_days: Optional[float]
+    lifetime_realized_pnl_sum: float
     closed_count: int
     closed_realized_pnl_sum: float
     win_count: int
