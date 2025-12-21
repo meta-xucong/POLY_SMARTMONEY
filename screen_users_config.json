@@ -212,7 +212,10 @@
       "max_loss",
       "p95_loss",
       "near_expiry_ratio",
-      "profile_url"
+      "profile_url",
+      "passed_filter",
+      "filter_failures",
+      "filter_warnings"
     ],
     "_comment_columns": "最终输出列（按顺序输出）",
 
@@ -278,7 +281,13 @@
       "near_expiry_ratio": "近到期占比",
       "_comment_near_expiry_ratio": "近到期占比列名",
       "profile_url": "Polymarket主页",
-      "_comment_profile_url": "Polymarket 网页端个人主页链接"
+      "_comment_profile_url": "Polymarket 网页端个人主页链接",
+      "passed_filter": "通过筛选",
+      "_comment_passed_filter": "是否通过筛选列名",
+      "filter_failures": "失败原因",
+      "_comment_filter_failures": "筛选失败原因列名",
+      "filter_warnings": "警告原因",
+      "_comment_filter_warnings": "筛选警告原因列名"
     },
     "_comment_rename": "最终输出列名映射（键为字段名，值为输出显示名）"
   }
