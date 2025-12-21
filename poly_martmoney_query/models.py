@@ -65,6 +65,14 @@ class Trade:
 
 
 @dataclass
+class TradeAction:
+    """按交易哈希聚合后的成交动作。"""
+
+    tx_hash: str
+    timestamp: dt.datetime
+
+
+@dataclass
 class Position:
     """标准化的持仓记录，来源于 Polymarket `/positions` 接口。"""
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import email.utils
 import os
 import random
 import time
@@ -8,28 +9,55 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
-from .models import ClosedPosition, Position, Trade
+from .models import ClosedPosition, Position, Trade, TradeAction
 
 MAX_BACKOFF_SECONDS = float(os.environ.get("SMART_QUERY_MAX_BACKOFF", "60"))
 MAX_REQUESTS_PER_SECOND = float(os.environ.get("SMART_QUERY_MAX_RPS", "2"))
 MIN_REQUEST_INTERVAL = 1.0 / MAX_REQUESTS_PER_SECOND if MAX_REQUESTS_PER_SECOND > 0 else 0.0
+BASE_PAGE_SLEEP = float(os.environ.get("SMART_QUERY_BASE_SLEEP", "0.3"))
 
 
-def _respect_rate_limit() -> None:
-    """简单的全局限速，复用参考代码的节奏控制。"""
+class RateLimiter:
+    """简单的全局限速器，用于跨用户共享节流。"""
 
-    if MIN_REQUEST_INTERVAL <= 0:
+    def __init__(self, rps: float) -> None:
+        self.rps = max(rps, 0.1)
+        self.min_interval = 1.0 / self.rps
+        self._next_ts = 0.0
+
+    def wait(self) -> None:
+        now = time.monotonic()
+        if now < self._next_ts:
+            time.sleep(self._next_ts - now)
+        self._next_ts = max(self._next_ts, now) + self.min_interval
+
+
+_GLOBAL_LIMITER = RateLimiter(MAX_REQUESTS_PER_SECOND if MIN_REQUEST_INTERVAL > 0 else 1000.0)
+
+
+def _sleep_with_jitter(wait: float, jitter_ratio: float = 0.1) -> None:
+    if wait <= 0:
         return
-
-    now = time.monotonic()
-    elapsed = now - _respect_rate_limit._last_request_time  # type: ignore[attr-defined]
-    if elapsed < MIN_REQUEST_INTERVAL:
-        time.sleep(MIN_REQUEST_INTERVAL - elapsed)
-
-    _respect_rate_limit._last_request_time = time.monotonic()  # type: ignore[attr-defined]
+    jitter = min(wait * jitter_ratio, 1.0)
+    time.sleep(wait + random.random() * jitter)
 
 
-_respect_rate_limit._last_request_time = 0.0  # type: ignore[attr-defined]
+def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
+    if not header_value:
+        return None
+    try:
+        return float(header_value)
+    except ValueError:
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(header_value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return max(parsed.timestamp() - dt.datetime.now(tz=dt.timezone.utc).timestamp(), 0.0)
 
 
 def _request_with_backoff(
@@ -41,14 +69,16 @@ def _request_with_backoff(
     backoff: float = 2.0,
     max_backoff: float = MAX_BACKOFF_SECONDS,
     session: Optional[requests.Session] = None,
+    limiter: Optional[RateLimiter] = None,
 ) -> tuple[Optional[requests.Response], Optional[str]]:
     """复用原版脚本的指数回退 + 抖动请求封装。"""
 
     attempt = 1
     client = session or requests
+    limiter = limiter or _GLOBAL_LIMITER
     while True:
         try:
-            _respect_rate_limit()
+            limiter.wait()
             resp = client.get(url, params=params, timeout=timeout)
             resp.raise_for_status()
             return resp, None
@@ -62,6 +92,9 @@ def _request_with_backoff(
                 pass
 
             retryable_statuses = {408, 429}
+            if status is not None and 500 <= status < 600:
+                retryable_statuses.add(status)
+
             if status is not None and 400 <= status < 500 and status not in retryable_statuses:
                 extra = f" | body={body[:200]}" if body else ""
                 msg = f"HTTP {status} {exc}{extra}"
@@ -78,9 +111,15 @@ def _request_with_backoff(
                 )
                 return None, msg
 
-            wait = min(max_backoff, backoff * (2 ** (attempt - 1)))
-            jitter = min(wait * 0.1, 1.0)
-            time.sleep(wait + random.random() * jitter)
+            retry_after = None
+            if status == 429 and exc.response is not None:
+                retry_after = _parse_retry_after(exc.response.headers.get("Retry-After"))
+            wait = (
+                max(retry_after, backoff * (2 ** (attempt - 1)))
+                if retry_after is not None
+                else min(max_backoff, backoff * (2 ** (attempt - 1)))
+            )
+            _sleep_with_jitter(wait)
             attempt += 1
         except requests.RequestException as exc:
             if attempt >= retries:
@@ -91,9 +130,20 @@ def _request_with_backoff(
                 return None, msg
 
             wait = min(max_backoff, backoff * (2 ** (attempt - 1)))
-            jitter = min(wait * 0.1, 1.0)
-            time.sleep(wait + random.random() * jitter)
+            _sleep_with_jitter(wait)
             attempt += 1
+
+
+def _to_timestamp(value: Optional[dt.datetime]) -> Optional[float]:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=dt.timezone.utc)
+    return value.timestamp()
+
+
+def _shift_before(timestamp: dt.datetime) -> dt.datetime:
+    return timestamp - dt.timedelta(microseconds=1)
 
 
 class DataApiClient:
@@ -245,6 +295,121 @@ class DataApiClient:
 
         results.sort(key=lambda t: t.timestamp)
         return results
+
+    def fetch_trade_actions_window(
+        self,
+        user: str,
+        *,
+        start_time: Optional[dt.datetime] = None,
+        end_time: Optional[dt.datetime] = None,
+        page_size: int = 100,
+        max_pages: Optional[int] = None,
+        taker_only: bool = False,
+        return_info: bool = False,
+    ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
+        url = f"{self.host}/trades"
+        start_ts = _to_timestamp(start_time)
+        end_ts = _to_timestamp(end_time)
+        cursor_end = end_time
+        actions: Dict[str, dt.datetime] = {}
+        ok = True
+        incomplete = False
+        hit_max_pages = False
+        last_error: Optional[str] = None
+        pages_fetched = 0
+
+        while True:
+            params = {
+                "user": user,
+                "limit": page_size,
+                "offset": 0,
+                "takerOnly": taker_only,
+            }
+            if start_ts is not None:
+                params["start"] = start_ts
+            if cursor_end is not None:
+                params["end"] = _to_timestamp(cursor_end)
+
+            resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
+            if resp is None:
+                error_msg = error_msg or "request_failed"
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, error_msg)
+                break
+
+            try:
+                payload = resp.json()
+            except Exception:
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_json")
+                break
+
+            raw_trades = []
+            if isinstance(payload, list):
+                raw_trades = payload
+            elif isinstance(payload, dict):
+                raw_trades = payload.get("data") or payload.get("trades") or []
+            if not isinstance(raw_trades, list):
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_payload")
+                break
+
+            if not raw_trades:
+                break
+
+            reached_earliest = False
+            min_ts: Optional[dt.datetime] = None
+            for item in raw_trades:
+                trade = Trade.from_api(item)
+                if trade is None:
+                    continue
+                ts = trade.timestamp
+                if end_ts is not None and ts.timestamp() > end_ts:
+                    continue
+                if start_ts is not None and ts.timestamp() < start_ts:
+                    reached_earliest = True
+                    min_ts = ts if min_ts is None else min(min_ts, ts)
+                    continue
+                existing = actions.get(trade.tx_hash)
+                if existing is None or ts < existing:
+                    actions[trade.tx_hash] = ts
+                min_ts = ts if min_ts is None else min(min_ts, ts)
+
+            pages_fetched += 1
+            if reached_earliest or min_ts is None:
+                break
+
+            cursor_end = _shift_before(min_ts)
+            if max_pages is not None and pages_fetched >= max_pages:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, f"hit_max_pages={max_pages}")
+                print(
+                    f"[WARN] trades 分页被截断：user={user} hit max_pages={max_pages}",
+                    flush=True,
+                )
+                break
+
+            _sleep_with_jitter(BASE_PAGE_SLEEP)
+
+        action_list = [
+            TradeAction(tx_hash=tx_hash, timestamp=timestamp)
+            for tx_hash, timestamp in actions.items()
+        ]
+        action_list.sort(key=lambda t: t.timestamp)
+        info = {
+            "ok": ok,
+            "incomplete": incomplete,
+            "error_msg": last_error,
+            "hit_max_pages": hit_max_pages,
+            "pages_fetched": pages_fetched,
+        }
+
+        return (action_list, info) if return_info else action_list
 
     def fetch_positions(
         self,
@@ -424,6 +589,117 @@ class DataApiClient:
                     flush=True,
                 )
                 break
+
+        results.sort(key=lambda p: p.timestamp)
+        info = {
+            "ok": ok,
+            "incomplete": incomplete,
+            "error_msg": last_error,
+            "hit_max_pages": hit_max_pages,
+            "pages_fetched": pages_fetched,
+        }
+
+        return (results, info) if return_info else results
+
+    def fetch_closed_positions_window(
+        self,
+        user: str,
+        *,
+        start_time: Optional[dt.datetime] = None,
+        end_time: Optional[dt.datetime] = None,
+        page_size: int = 50,
+        max_pages: Optional[int] = None,
+        sort_by: str = "TIMESTAMP",
+        sort_dir: str = "DESC",
+        return_info: bool = False,
+    ) -> List[ClosedPosition] | tuple[List[ClosedPosition], Dict[str, object]]:
+        url = f"{self.host}/closed-positions"
+        start_ts = _to_timestamp(start_time)
+        end_ts = _to_timestamp(end_time)
+        cursor_end = end_time
+        results: List[ClosedPosition] = []
+        ok = True
+        incomplete = False
+        hit_max_pages = False
+        last_error: Optional[str] = None
+        pages_fetched = 0
+
+        while True:
+            params = {
+                "user": user,
+                "limit": page_size,
+                "offset": 0,
+                "sortBy": sort_by,
+                "sortDirection": sort_dir,
+            }
+            if start_ts is not None:
+                params["start"] = start_ts
+            if cursor_end is not None:
+                params["end"] = _to_timestamp(cursor_end)
+
+            resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
+            if resp is None:
+                error_msg = error_msg or "request_failed"
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, error_msg)
+                break
+
+            try:
+                payload = resp.json()
+            except Exception:
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_json")
+                break
+
+            raw_positions = []
+            if isinstance(payload, list):
+                raw_positions = payload
+            elif isinstance(payload, dict):
+                raw_positions = payload.get("data") or payload.get("positions") or []
+            if not isinstance(raw_positions, list):
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_payload")
+                break
+
+            if not raw_positions:
+                break
+
+            reached_earliest = False
+            min_ts: Optional[dt.datetime] = None
+            for item in raw_positions:
+                position = ClosedPosition.from_api(item, user=user)
+                if position is None:
+                    continue
+                ts = position.timestamp
+                if end_ts is not None and ts.timestamp() > end_ts:
+                    continue
+                if start_ts is not None and ts.timestamp() < start_ts:
+                    reached_earliest = True
+                    min_ts = ts if min_ts is None else min(min_ts, ts)
+                    continue
+                results.append(position)
+                min_ts = ts if min_ts is None else min(min_ts, ts)
+
+            pages_fetched += 1
+            if reached_earliest or min_ts is None:
+                break
+
+            cursor_end = _shift_before(min_ts)
+            if max_pages is not None and pages_fetched >= max_pages:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, f"hit_max_pages={max_pages}")
+                print(
+                    f"[WARN] closed-positions 分页被截断：user={user} hit max_pages={max_pages}",
+                    flush=True,
+                )
+                break
+
+            _sleep_with_jitter(BASE_PAGE_SLEEP)
 
         results.sort(key=lambda p: p.timestamp)
         info = {
