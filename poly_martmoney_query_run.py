@@ -554,8 +554,6 @@ def main() -> None:
             summary.trade_actions_actions = trade_actions_cnt
 
             trade_incomplete = bool(trade_info.get("incomplete"))
-            if suspected_hft and bool(trade_info.get("hit_cap")):
-                trade_incomplete = False
             incomplete = (
                 bool(closed_info["incomplete"]) or bool(open_info["incomplete"]) or trade_incomplete
             )
