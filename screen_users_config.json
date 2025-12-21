@@ -23,6 +23,10 @@
   "_comment_flat_pnl_epsilon": "判定盈亏为 flat 的阈值",
   "near_expiry_days": 3,
   "_comment_near_expiry_days": "距到期多少天内视为“临近到期”",
+  "min_action_timing_count": 1,
+  "_comment_min_action_timing_count": "使用成交动作时间统计所需的最小数量",
+  "require_action_timestamps": true,
+  "_comment_require_action_timestamps": "强制使用成交动作时间序列，不足则直接淘汰",
 
   "bayes_alpha": 2.0,
   "_comment_bayes_alpha": "Bayes 胜率平滑参数 alpha",
