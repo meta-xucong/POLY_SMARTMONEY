@@ -224,6 +224,9 @@ def write_user_summary_csv(path: Path, summary: UserSummary) -> None:
         "user",
         "start_time",
         "end_time",
+        "account_start_time",
+        "account_age_days",
+        "lifetime_realized_pnl_sum",
         "closed_count",
         "closed_realized_pnl_sum",
         "win_count",
@@ -251,6 +254,9 @@ def write_user_summaries_csv(path: Path, summaries: Iterable[UserSummary]) -> No
         "user",
         "start_time",
         "end_time",
+        "account_start_time",
+        "account_age_days",
+        "lifetime_realized_pnl_sum",
         "closed_count",
         "closed_realized_pnl_sum",
         "win_count",
@@ -276,6 +282,13 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         "user": summary.user,
         "start_time": summary.start_time.isoformat() if summary.start_time else "",
         "end_time": summary.end_time.isoformat() if summary.end_time else "",
+        "account_start_time": summary.account_start_time.isoformat()
+        if summary.account_start_time
+        else "",
+        "account_age_days": f"{summary.account_age_days:.2f}"
+        if summary.account_age_days is not None
+        else "",
+        "lifetime_realized_pnl_sum": f"{summary.lifetime_realized_pnl_sum:.6f}",
         "closed_count": summary.closed_count,
         "closed_realized_pnl_sum": f"{summary.closed_realized_pnl_sum:.6f}",
         "win_count": summary.win_count,
