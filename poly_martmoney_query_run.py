@@ -174,6 +174,7 @@ def _load_existing_summary(path: Path) -> Optional[UserSummary]:
                 asof_time=_parse_datetime(row.get("asof_time", "")) or dt.datetime.now(
                     tz=dt.timezone.utc
                 ),
+                status=row.get("status") or None,
             )
     except Exception:
         return None
@@ -202,7 +203,7 @@ def main() -> None:
         summary_path = user_dir / "summary.csv"
         if args.resume and summary_path.exists():
             existing_summary = _load_existing_summary(summary_path)
-            if existing_summary is not None:
+            if existing_summary is not None and existing_summary.status == "ok":
                 summaries.append(existing_summary)
                 report_rows.append(
                     {
@@ -221,10 +222,16 @@ def main() -> None:
                 )
                 print(f"[INFO] 地址 {addr} 已存在 summary.csv，跳过。", flush=True)
                 continue
-            print(
-                f"[WARN] 地址 {addr} summary.csv 无法解析，将重新抓取。",
-                flush=True,
-            )
+            if existing_summary is None:
+                print(
+                    f"[WARN] 地址 {addr} summary.csv 无法解析，将重新抓取。",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[WARN] 地址 {addr} summary.csv 状态为 {existing_summary.status or 'unknown'}，将重新抓取。",
+                    flush=True,
+                )
 
         try:
             closed_positions, closed_info = client.fetch_closed_positions_window(
@@ -233,7 +240,7 @@ def main() -> None:
                 end_time=end,
                 return_info=True,
             )
-            trade_actions, trade_info = client.fetch_trade_actions_window(
+            trade_actions, trade_info = client.fetch_trade_actions_window_from_activity(
                 user=addr,
                 start_time=start,
                 end_time=end,
@@ -248,11 +255,7 @@ def main() -> None:
                 size_threshold=args.size_threshold,
                 return_info=True,
             )
-            account_start_time = (
-                min((pos.timestamp for pos in lifetime_closed_positions), default=None)
-                if lifetime_closed_positions
-                else None
-            )
+            account_start_time = client.fetch_account_start_time_from_activity(user=addr)
             lifetime_realized_pnl_sum = sum(
                 pos.realized_pnl for pos in lifetime_closed_positions
             )
@@ -266,6 +269,14 @@ def main() -> None:
                 account_start_time=account_start_time,
                 lifetime_realized_pnl_sum=lifetime_realized_pnl_sum,
             )
+            incomplete = (
+                bool(closed_info["incomplete"])
+                or bool(open_info["incomplete"])
+                or bool(lifetime_info["incomplete"])
+                or bool(trade_info["incomplete"])
+            )
+            status = "ok" if not incomplete else "incomplete"
+            summary.status = status
             summaries.append(summary)
 
             write_closed_positions_csv(user_dir / "closed_positions.csv", closed_positions)
@@ -273,12 +284,6 @@ def main() -> None:
             write_positions_csv(user_dir / "positions.csv", open_positions)
             write_user_summary_csv(summary_path, summary)
 
-            incomplete = (
-                bool(closed_info["incomplete"])
-                or bool(open_info["incomplete"])
-                or bool(lifetime_info["incomplete"])
-                or bool(trade_info["incomplete"])
-            )
             error_msg = "; ".join(
                 msg
                 for msg in [
@@ -289,7 +294,6 @@ def main() -> None:
                 ]
                 if msg
             )
-            status = "ok" if not incomplete else "incomplete"
             report_rows.append(
                 {
                     "user": addr,

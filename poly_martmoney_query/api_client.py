@@ -146,6 +146,26 @@ def _shift_before(timestamp: dt.datetime) -> dt.datetime:
     return timestamp - dt.timedelta(microseconds=1)
 
 
+def _parse_timestamp(value: Any) -> Optional[dt.datetime]:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            if value > 1e12:
+                value /= 1000.0
+            return dt.datetime.fromtimestamp(value, tz=dt.timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            return dt.datetime.fromisoformat(text)
+    except Exception:
+        return None
+    return None
+
+
 class DataApiClient:
     """Polymarket Data-API 客户端，覆盖 leaderboard 与 trades。"""
 
@@ -411,6 +431,170 @@ class DataApiClient:
 
         return (action_list, info) if return_info else action_list
 
+    def fetch_trade_actions_window_from_activity(
+        self,
+        user: str,
+        *,
+        start_time: Optional[dt.datetime] = None,
+        end_time: Optional[dt.datetime] = None,
+        page_size: int = 500,
+        max_offset: int = 10000,
+        return_info: bool = False,
+    ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
+        url = f"{self.host}/activity"
+        start_ts = _to_timestamp(start_time)
+        end_ts = _to_timestamp(end_time)
+        actions: Dict[str, dt.datetime] = {}
+        ok = True
+        incomplete = False
+        hit_max_pages = False
+        last_error: Optional[str] = None
+        pages_fetched = 0
+
+        min_slice = dt.timedelta(seconds=1)
+
+        def _fetch_range(range_start: Optional[dt.datetime], range_end: Optional[dt.datetime]) -> None:
+            nonlocal ok, incomplete, hit_max_pages, last_error, pages_fetched
+            offset = 0
+            while True:
+                params = {
+                    "user": user,
+                    "type": "TRADE",
+                    "limit": page_size,
+                    "offset": offset,
+                    "sortBy": "TIMESTAMP",
+                    "sortDirection": "DESC",
+                }
+                if range_start is not None:
+                    params["start"] = _to_timestamp(range_start)
+                if range_end is not None:
+                    params["end"] = _to_timestamp(range_end)
+
+                resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
+                if resp is None:
+                    error_msg = error_msg or "request_failed"
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(last_error, error_msg)
+                    return
+
+                try:
+                    payload = resp.json()
+                except Exception:
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(last_error, "invalid_json")
+                    return
+
+                raw_items = []
+                if isinstance(payload, list):
+                    raw_items = payload
+                elif isinstance(payload, dict):
+                    raw_items = payload.get("data") or payload.get("activity") or []
+                if not isinstance(raw_items, list):
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(last_error, "invalid_payload")
+                    return
+
+                if not raw_items:
+                    return
+
+                for item in raw_items:
+                    tx_hash = (
+                        str(
+                            item.get("transactionHash")
+                            or item.get("txHash")
+                            or item.get("tx_hash")
+                            or ""
+                        ).strip()
+                    )
+                    ts = _parse_timestamp(item.get("timestamp") or item.get("time") or item.get("createdAt"))
+                    if not tx_hash or ts is None:
+                        continue
+                    if start_ts is not None and ts.timestamp() < start_ts:
+                        continue
+                    if end_ts is not None and ts.timestamp() > end_ts:
+                        continue
+                    existing = actions.get(tx_hash)
+                    if existing is None or ts < existing:
+                        actions[tx_hash] = ts
+
+                pages_fetched += 1
+                if len(raw_items) < page_size:
+                    return
+
+                offset += len(raw_items)
+                if offset >= max_offset:
+                    if range_start is None or range_end is None:
+                        hit_max_pages = True
+                        incomplete = True
+                        ok = False
+                        last_error = _combine_error(last_error, f"hit_max_offset={max_offset}")
+                        return
+                    if range_end - range_start <= min_slice:
+                        hit_max_pages = True
+                        incomplete = True
+                        ok = False
+                        last_error = _combine_error(last_error, "range_too_small_to_split")
+                        return
+                    mid = range_start + (range_end - range_start) / 2
+                    _fetch_range(range_start, mid)
+                    _fetch_range(mid, range_end)
+                    return
+
+                _sleep_with_jitter(BASE_PAGE_SLEEP)
+
+        _fetch_range(start_time, end_time)
+
+        action_list = [
+            TradeAction(tx_hash=tx_hash, timestamp=timestamp)
+            for tx_hash, timestamp in actions.items()
+        ]
+        action_list.sort(key=lambda t: t.timestamp)
+        info = {
+            "ok": ok,
+            "incomplete": incomplete,
+            "error_msg": last_error,
+            "hit_max_pages": hit_max_pages,
+            "pages_fetched": pages_fetched,
+        }
+
+        return (action_list, info) if return_info else action_list
+
+    def fetch_account_start_time_from_activity(
+        self,
+        user: str,
+    ) -> Optional[dt.datetime]:
+        url = f"{self.host}/activity"
+        params = {
+            "user": user,
+            "type": "TRADE",
+            "limit": 1,
+            "offset": 0,
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "ASC",
+        }
+        resp, _ = _request_with_backoff(url, params=params, session=self.session)
+        if resp is None:
+            return None
+        try:
+            payload = resp.json()
+        except Exception:
+            return None
+
+        raw_items = []
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("data") or payload.get("activity") or []
+        if not isinstance(raw_items, list) or not raw_items:
+            return None
+        ts = _parse_timestamp(
+            raw_items[0].get("timestamp") or raw_items[0].get("time") or raw_items[0].get("createdAt")
+        )
+        return ts
+
     def fetch_positions(
         self,
         user: str,
@@ -616,26 +800,23 @@ class DataApiClient:
         url = f"{self.host}/closed-positions"
         start_ts = _to_timestamp(start_time)
         end_ts = _to_timestamp(end_time)
-        cursor_end = end_time
         results: List[ClosedPosition] = []
         ok = True
         incomplete = False
         hit_max_pages = False
         last_error: Optional[str] = None
         pages_fetched = 0
+        offset = 0
+        page_size = max(1, min(page_size, 50))
 
         while True:
             params = {
                 "user": user,
                 "limit": page_size,
-                "offset": 0,
+                "offset": offset,
                 "sortBy": sort_by,
                 "sortDirection": sort_dir,
             }
-            if start_ts is not None:
-                params["start"] = start_ts
-            if cursor_end is not None:
-                params["end"] = _to_timestamp(cursor_end)
 
             resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
             if resp is None:
@@ -684,10 +865,9 @@ class DataApiClient:
                 min_ts = ts if min_ts is None else min(min_ts, ts)
 
             pages_fetched += 1
-            if reached_earliest or min_ts is None:
+            if reached_earliest or len(raw_positions) < page_size or min_ts is None:
                 break
-
-            cursor_end = _shift_before(min_ts)
+            offset += len(raw_positions)
             if max_pages is not None and pages_fetched >= max_pages:
                 hit_max_pages = True
                 incomplete = True

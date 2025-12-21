@@ -260,6 +260,7 @@ def write_user_summary_csv(path: Path, summary: UserSummary) -> None:
         "open_unrealized_pnl_sum",
         "open_realized_pnl_sum",
         "asof_time",
+        "status",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -290,6 +291,7 @@ def write_user_summaries_csv(path: Path, summaries: Iterable[UserSummary]) -> No
         "open_unrealized_pnl_sum",
         "open_realized_pnl_sum",
         "asof_time",
+        "status",
     ]
 
     with path.open("w", encoding="utf-8", newline="") as f:
@@ -324,6 +326,7 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
         "open_unrealized_pnl_sum": f"{summary.open_unrealized_pnl_sum:.6f}",
         "open_realized_pnl_sum": f"{summary.open_realized_pnl_sum:.6f}",
         "asof_time": summary.asof_time.isoformat(),
+        "status": summary.status or "",
     }
 
 
