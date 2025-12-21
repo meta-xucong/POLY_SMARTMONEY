@@ -636,6 +636,7 @@ def main() -> None:
         enriched["price_style"] = _build_price_style(enriched, price_rules)
         enriched["copy_style"] = _build_copy_style(enriched, copy_rules)
         enriched["notes"] = _build_notes(enriched, {**price_rules, **copy_rules})
+        enriched["profile_url"] = f"https://polymarket.com/profile/{str(row.get('user', '')).lower()}"
 
         if final_columns:
             filtered = {col: enriched.get(col) for col in final_columns}
