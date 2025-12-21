@@ -198,6 +198,15 @@ def _apply_filters(
         failures.append("suspected_hft_trade_actions_cap")
         return False, failures, warnings
 
+    if config.get("require_action_timestamps"):
+        min_action_timing = int(config.get("min_action_timing_count", 10))
+        if min_action_timing < 1:
+            min_action_timing = 1
+        action_timing_count = metrics.get("action_timing_count")
+        if action_timing_count is None or action_timing_count < min_action_timing:
+            failures.append(f"action_timing_count<{min_action_timing}")
+            return False, failures, warnings
+
     def _check_min(key: str, label: str) -> None:
         threshold = filters.get(key)
         value = metrics.get(label)
@@ -327,9 +336,10 @@ def _build_features(
     min_action_timing = int(config.get("min_action_timing_count", 10))
     if min_action_timing < 1:
         min_action_timing = 1
-    timing_timestamps = (
-        action_timestamps if len(action_timestamps) >= min_action_timing else timestamps
-    )
+    require_action_timestamps = bool(config.get("require_action_timestamps"))
+    timing_timestamps = action_timestamps
+    if not require_action_timestamps and len(action_timestamps) < min_action_timing:
+        timing_timestamps = timestamps
     timing_count = len(timing_timestamps)
 
     closed_count = len(closed_rows)
@@ -511,6 +521,7 @@ def _build_features(
         "trade_actions_records": trade_actions_records,
         "trade_actions_actions": trade_actions_actions,
         "leaderboard_month_pnl": leaderboard_month_pnl,
+        "action_timing_count": len(action_timestamps),
     }
 
     return metrics

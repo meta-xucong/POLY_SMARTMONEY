@@ -77,8 +77,16 @@ def _coerce_int(value: Any) -> Any:
     if isinstance(value, float):
         return int(value)
     try:
-        if isinstance(value, str) and value.strip().isdigit():
-            return int(value.strip())
+        if isinstance(value, str):
+            s = value.strip()
+            if s.isdigit() or (s.startswith("-") and s[1:].isdigit()):
+                return int(s)
+            try:
+                f = float(s)
+                if math.isfinite(f):
+                    return int(f)
+            except Exception:
+                pass
     except Exception:
         pass
     return value
@@ -384,7 +392,7 @@ class DataApiClient:
         *,
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
-        page_size: int = 500,
+        page_size: int = 300,
         max_offset: int = 10000,
         progress_every: Optional[int] = None,
         return_info: bool = False,
@@ -513,19 +521,28 @@ class DataApiClient:
                 last_error = _combine_error(last_error, "missing_timestamps")
                 break
 
-            if min_ts_sec < cursor_end_sec:
-                cursor_end_sec = min_ts_sec - 1
-                offset = 0
-            elif min_ts_sec == cursor_end_sec:
-                offset += len(raw_items)
-                if offset >= max_offset:
+            offset += len(raw_items)
+
+            if offset >= max_offset:
+                if min_ts_sec is None:
                     hit_max_pages = True
                     incomplete = True
                     ok = False
-                    last_error = _combine_error(last_error, f"hit_max_offset={max_offset}")
+                    last_error = _combine_error(
+                        last_error, "missing_timestamps_for_window_shift"
+                    )
                     break
-            else:
-                cursor_end_sec = min_ts_sec - 1
+
+                if min_ts_sec >= cursor_end_sec:
+                    hit_max_pages = True
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(
+                        last_error, f"hit_max_offset_same_end={max_offset}"
+                    )
+                    break
+
+                cursor_end_sec = int(min_ts_sec)
                 offset = 0
 
             if start_ts_sec is not None and cursor_end_sec < start_ts_sec:

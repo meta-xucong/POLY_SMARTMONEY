@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from poly_martmoney_query.api_client import DataApiClient
 from poly_martmoney_query.models import UserSummary
@@ -76,6 +76,12 @@ def _parse_args() -> argparse.Namespace:
         "--keep-prescreen-output",
         action="store_true",
         help="保留预筛输出：users_features_prescreen.csv / candidates_prescreen.csv",
+    )
+    parser.add_argument(
+        "--trade-actions-page-size",
+        type=int,
+        default=300,
+        help="trade_actions 拉取的分页大小（默认 300）",
     )
     return parser.parse_args()
 
@@ -359,6 +365,12 @@ def main() -> None:
                         "leaderboard_month_pnl": existing_summary.leaderboard_month_pnl
                         if existing_summary.leaderboard_month_pnl is not None
                         else "",
+                        "account_start_time": existing_summary.account_start_time.isoformat()
+                        if existing_summary.account_start_time is not None
+                        else "",
+                        "account_age_days": existing_summary.account_age_days
+                        if existing_summary.account_age_days is not None
+                        else "",
                         "suspected_hft": 1
                         if existing_summary.suspected_hft
                         else 0
@@ -397,6 +409,7 @@ def main() -> None:
                 user=addr,
                 start_time=start,
                 end_time=end,
+                page_size=args.trade_actions_page_size,
                 progress_every=20,
                 return_info=True,
             )
@@ -451,6 +464,12 @@ def main() -> None:
                         "lifetime_status": "skipped",
                         "lifetime_incomplete": "",
                         "leaderboard_month_pnl": lb_month_pnl if lb_month_pnl is not None else "",
+                        "account_start_time": summary.account_start_time.isoformat()
+                        if summary.account_start_time is not None
+                        else "",
+                        "account_age_days": summary.account_age_days
+                        if summary.account_age_days is not None
+                        else "",
                         "suspected_hft": 1,
                         "hft_reason": hft_reason,
                         "trade_actions_pages": trade_pages,
@@ -562,6 +581,12 @@ def main() -> None:
                     if lifetime_incomplete is not None
                     else "",
                     "leaderboard_month_pnl": lb_month_pnl if lb_month_pnl is not None else "",
+                    "account_start_time": summary.account_start_time.isoformat()
+                    if summary.account_start_time is not None
+                    else "",
+                    "account_age_days": summary.account_age_days
+                    if summary.account_age_days is not None
+                    else "",
                     "suspected_hft": 0,
                     "hft_reason": "",
                     "trade_actions_pages": trade_pages,
@@ -618,6 +643,8 @@ def main() -> None:
                     "lifetime_status": "error",
                     "lifetime_incomplete": True,
                     "leaderboard_month_pnl": "",
+                    "account_start_time": "",
+                    "account_age_days": "",
                     "suspected_hft": "",
                     "hft_reason": "",
                     "trade_actions_pages": "",
@@ -632,16 +659,15 @@ def main() -> None:
     if lifetime_mode == "candidates":
         candidates_path = data_dir / "users_features.csv"
         if auto_screen:
-            if not candidates_path.exists():
-                _write_prescreen_config(screen_config, prescreen_config)
-                _run_screen_users(base_dir, prescreen_config)
-                if args.keep_prescreen_output:
-                    f1 = data_dir / "users_features.csv"
-                    f2 = data_dir / "candidates.csv"
-                    if f1.exists():
-                        shutil.copyfile(f1, data_dir / "users_features_prescreen.csv")
-                    if f2.exists():
-                        shutil.copyfile(f2, data_dir / "candidates_prescreen.csv")
+            _write_prescreen_config(screen_config, prescreen_config)
+            _run_screen_users(base_dir, prescreen_config)
+            if args.keep_prescreen_output:
+                f1 = data_dir / "users_features.csv"
+                f2 = data_dir / "candidates.csv"
+                if f1.exists():
+                    shutil.copyfile(f1, data_dir / "users_features_prescreen.csv")
+                if f2.exists():
+                    shutil.copyfile(f2, data_dir / "candidates_prescreen.csv")
         candidate_users = _load_candidate_users(candidates_path)
         if not candidate_users:
             print(
@@ -738,6 +764,8 @@ def main() -> None:
             "lifetime_status",
             "lifetime_incomplete",
             "leaderboard_month_pnl",
+            "account_start_time",
+            "account_age_days",
             "suspected_hft",
             "hft_reason",
             "trade_actions_pages",
