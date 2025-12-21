@@ -195,7 +195,7 @@ def _apply_filters(
     warnings = []
 
     if str(metrics.get("suspected_hft", "")).strip() in ("1", "true", "True"):
-        failures.append("suspected_hft_trade_actions_cap")
+        failures.append("suspected_hft_unique_tx")
         return False, failures, warnings
 
     if config.get("require_action_timestamps"):
