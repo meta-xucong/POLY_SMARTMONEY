@@ -172,7 +172,7 @@ def _normalize(value: Optional[float], clamp: Optional[float]) -> float:
     return max(min(value, clamp), 0.0) / clamp
 
 
-def _compute_copy_score(metrics: Dict[str, Optional[float]], config: Dict[str, Any]) -> float:
+def _compute_copy_score(metrics: Dict[str, Any], config: Dict[str, Any]) -> float:
     weights = config.get("score_weights", {})
     clamps = config.get("score_clamps", {})
     score = 0.0
@@ -186,7 +186,7 @@ def _compute_copy_score(metrics: Dict[str, Optional[float]], config: Dict[str, A
 
 
 def _apply_filters(
-    metrics: Dict[str, Optional[float]], config: Dict[str, Any]
+    metrics: Dict[str, Any], config: Dict[str, Any]
 ) -> Tuple[bool, List[str], List[str]]:
     filters = config.get("filters", {})
     label_rules = config.get("label_rules", {})
@@ -247,9 +247,15 @@ def _apply_filters(
 
     min_lifetime_pnl = filters.get("min_lifetime_realized_pnl")
     lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
+    lifetime_status = metrics.get("lifetime_status")
     if min_lifetime_pnl is not None:
         if lifetime_pnl is None or lifetime_pnl <= min_lifetime_pnl:
-            failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
+            if lifetime_status == "ok":
+                failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
+            else:
+                warnings.append(
+                    f"lifetime_realized_pnl_sum<={min_lifetime_pnl}(pending)"
+                )
 
     return (len(failures) == 0), failures, warnings
 
@@ -261,7 +267,7 @@ def _build_features(
     summary_row: Optional[Dict[str, str]],
     trade_action_rows: List[Dict[str, str]],
     config: Dict[str, Any],
-) -> Dict[str, Optional[float]]:
+) -> Dict[str, Any]:
     flat_eps = float(config.get("flat_pnl_epsilon", 1e-9))
     min_cost_for_roi = float(config.get("min_cost_for_roi", 1.0))
     bayes_alpha = float(config.get("bayes_alpha", 2.0))
@@ -342,11 +348,13 @@ def _build_features(
 
     account_age_days = None
     lifetime_realized_pnl_sum = None
+    lifetime_status = None
     if summary_row:
         account_age_days = _parse_float(summary_row.get("account_age_days", ""))
         lifetime_realized_pnl_sum = _parse_float(
             summary_row.get("lifetime_realized_pnl_sum", "")
         )
+        lifetime_status = summary_row.get("lifetime_status") or None
 
     trades_per_day = None
     if window_days > 0:
@@ -439,7 +447,7 @@ def _build_features(
     )
     price_median = _median(prices)
 
-    metrics: Dict[str, Optional[float]] = {
+    metrics: Dict[str, Any] = {
         "closed_count": float(closed_count),
         "win_count": float(win_count),
         "loss_count": float(loss_count),
@@ -476,6 +484,7 @@ def _build_features(
         "price_median": price_median,
         "account_age_days": account_age_days,
         "lifetime_realized_pnl_sum": lifetime_realized_pnl_sum,
+        "lifetime_status": lifetime_status,
     }
 
     return metrics

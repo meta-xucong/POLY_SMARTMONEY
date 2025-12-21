@@ -13,6 +13,7 @@ from poly_martmoney_query.api_client import DataApiClient
 from poly_martmoney_query.models import UserSummary
 from poly_martmoney_query.processors import summarize_user
 from poly_martmoney_query.storage import (
+    update_user_summary,
     write_closed_positions_csv,
     write_positions_csv,
     write_trade_actions_csv,
@@ -50,6 +51,12 @@ def _parse_args() -> argparse.Namespace:
         "--resume",
         action="store_true",
         help="若 data/users/<addr>/summary.csv 已存在则跳过该地址",
+    )
+    parser.add_argument(
+        "--lifetime-mode",
+        choices=("all", "candidates", "none"),
+        default="candidates",
+        help="历史收益拉取模式：all=全量，candidates=仅候选补齐，none=跳过",
     )
     return parser.parse_args()
 
@@ -124,6 +131,8 @@ def _parse_datetime(value: str) -> Optional[dt.datetime]:
     if not value:
         return None
     try:
+        if value.endswith("Z"):
+            value = f"{value[:-1]}+00:00"
         return dt.datetime.fromisoformat(value)
     except ValueError:
         return None
@@ -143,6 +152,43 @@ def _parse_float(value: str) -> float:
         return 0.0
 
 
+def _parse_optional_float(value: str) -> Optional[float]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    try:
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_int(value: str) -> Optional[int]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if text == "":
+        return None
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        return None
+
+
+def _parse_optional_bool(value: str) -> Optional[bool]:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text == "":
+        return None
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
 def _load_existing_summary(path: Path) -> Optional[UserSummary]:
     if not path.exists():
         return None
@@ -158,9 +204,16 @@ def _load_existing_summary(path: Path) -> Optional[UserSummary]:
                 end_time=_parse_datetime(row.get("end_time", "")),
                 account_start_time=_parse_datetime(row.get("account_start_time", "")),
                 account_age_days=_to_float(row.get("account_age_days")),
-                lifetime_realized_pnl_sum=_parse_float(
-                    row.get("lifetime_realized_pnl_sum", "0")
+                lifetime_realized_pnl_sum=_parse_optional_float(
+                    row.get("lifetime_realized_pnl_sum", "")
                 ),
+                lifetime_closed_count=_parse_optional_int(
+                    row.get("lifetime_closed_count", "")
+                ),
+                lifetime_incomplete=_parse_optional_bool(
+                    row.get("lifetime_incomplete", "")
+                ),
+                lifetime_status=row.get("lifetime_status") or None,
                 closed_count=_parse_int(row.get("closed_count", "0")),
                 closed_realized_pnl_sum=_parse_float(row.get("closed_realized_pnl_sum", "0")),
                 win_count=_parse_int(row.get("win_count", "0")),
@@ -180,6 +233,24 @@ def _load_existing_summary(path: Path) -> Optional[UserSummary]:
         return None
 
 
+def _load_candidate_users(path: Path) -> List[str]:
+    if not path.exists():
+        return []
+    users: List[str] = []
+    try:
+        with path.open("r", encoding="utf-8", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                if str(row.get("passed_filter", "")).strip().lower() != "true":
+                    continue
+                user = row.get("user")
+                if user:
+                    users.append(user)
+    except Exception:
+        return []
+    return users
+
+
 def main() -> None:
     args = _parse_args()
     client = DataApiClient()
@@ -196,6 +267,7 @@ def main() -> None:
     users = _collect_users(client, args)
     summaries = []
     report_rows: List[dict] = []
+    lifetime_mode = args.lifetime_mode
 
     for idx, addr in enumerate(users, start=1):
         print(f"[INFO] ({idx}/{len(users)}) 抓取地址 {addr} 的仓位数据……", flush=True)
@@ -217,6 +289,10 @@ def main() -> None:
                         "open_incomplete": False,
                         "closed_hit_max_pages": False,
                         "open_hit_max_pages": False,
+                        "lifetime_status": existing_summary.lifetime_status or "",
+                        "lifetime_incomplete": existing_summary.lifetime_incomplete
+                        if existing_summary.lifetime_incomplete is not None
+                        else "",
                         "error_msg": "resume-skip",
                     }
                 )
@@ -246,19 +322,33 @@ def main() -> None:
                 end_time=end,
                 return_info=True,
             )
-            lifetime_closed_positions, lifetime_info = client.fetch_closed_positions_window(
-                user=addr,
-                return_info=True,
-            )
             open_positions, open_info = client.fetch_positions(
                 user=addr,
                 size_threshold=args.size_threshold,
                 return_info=True,
             )
             account_start_time = client.fetch_account_start_time_from_activity(user=addr)
-            lifetime_realized_pnl_sum = sum(
-                pos.realized_pnl for pos in lifetime_closed_positions
-            )
+
+            lifetime_realized_pnl_sum = None
+            lifetime_closed_count = None
+            lifetime_incomplete = None
+            lifetime_status = None
+            lifetime_info: dict = {"incomplete": False, "error_msg": None}
+            if lifetime_mode == "all":
+                lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
+                    user=addr,
+                    return_info=True,
+                )
+                lifetime_realized_pnl_sum = sum(
+                    pos.realized_pnl for pos in lifetime_closed_positions
+                )
+                lifetime_closed_count = len(lifetime_closed_positions)
+                lifetime_incomplete = bool(lifetime_info["incomplete"])
+                lifetime_status = "ok" if not lifetime_incomplete else "incomplete"
+            elif lifetime_mode == "candidates":
+                lifetime_status = "skipped"
+            else:
+                lifetime_status = "disabled"
             summary = summarize_user(
                 closed_positions,
                 open_positions,
@@ -268,13 +358,17 @@ def main() -> None:
                 asof_time=now,
                 account_start_time=account_start_time,
                 lifetime_realized_pnl_sum=lifetime_realized_pnl_sum,
+                lifetime_closed_count=lifetime_closed_count,
+                lifetime_incomplete=lifetime_incomplete,
+                lifetime_status=lifetime_status,
             )
             incomplete = (
                 bool(closed_info["incomplete"])
                 or bool(open_info["incomplete"])
-                or bool(lifetime_info["incomplete"])
                 or bool(trade_info["incomplete"])
             )
+            if lifetime_mode == "all":
+                incomplete = incomplete or bool(lifetime_info["incomplete"])
             status = "ok" if not incomplete else "incomplete"
             summary.status = status
             summaries.append(summary)
@@ -290,7 +384,7 @@ def main() -> None:
                     closed_info.get("error_msg"),
                     trade_info.get("error_msg"),
                     open_info.get("error_msg"),
-                    lifetime_info.get("error_msg"),
+                    lifetime_info.get("error_msg") if lifetime_mode == "all" else None,
                 ]
                 if msg
             )
@@ -306,6 +400,10 @@ def main() -> None:
                     "open_incomplete": bool(open_info["incomplete"]),
                     "closed_hit_max_pages": bool(closed_info["hit_max_pages"]),
                     "open_hit_max_pages": bool(open_info["hit_max_pages"]),
+                    "lifetime_status": lifetime_status,
+                    "lifetime_incomplete": bool(lifetime_incomplete)
+                    if lifetime_incomplete is not None
+                    else "",
                     "error_msg": error_msg,
                 }
             )
@@ -318,6 +416,11 @@ def main() -> None:
                 if summary.account_age_days is not None
                 else "N/A"
             )
+            lifetime_text = (
+                f"{summary.lifetime_realized_pnl_sum:.4f}"
+                if summary.lifetime_realized_pnl_sum is not None
+                else "N/A"
+            )
             print(
                 f"[INFO] 地址 {addr}：已平仓={summary.closed_count}，"
                 f"已实现盈亏={summary.closed_realized_pnl_sum:.4f}，"
@@ -325,7 +428,7 @@ def main() -> None:
                 f"持仓浮盈浮亏={summary.open_unrealized_pnl_sum:.4f}，"
                 f"胜率={win_rate_text}，"
                 f"账号年龄={account_days_text}，"
-                f"历史总收益={summary.lifetime_realized_pnl_sum:.4f}",
+                f"历史总收益={lifetime_text}",
                 flush=True,
             )
             if incomplete:
@@ -346,12 +449,69 @@ def main() -> None:
                     "open_incomplete": True,
                     "closed_hit_max_pages": False,
                     "open_hit_max_pages": False,
+                    "lifetime_status": "error",
+                    "lifetime_incomplete": True,
                     "error_msg": str(exc),
                 }
             )
             print(f"[WARN] 地址 {addr} 处理失败：{exc}", flush=True)
 
     write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
+    if lifetime_mode == "candidates":
+        candidates_path = data_dir / "users_features.csv"
+        candidate_users = _load_candidate_users(candidates_path)
+        if not candidate_users:
+            print(
+                f"[WARN] 未检测到候选名单（{candidates_path}），跳过历史收益补齐。",
+                flush=True,
+            )
+        else:
+            summary_map = {summary.user.lower(): summary for summary in summaries}
+            report_map = {row.get("user", "").lower(): row for row in report_rows}
+            for idx, addr in enumerate(candidate_users, start=1):
+                print(
+                    f"[INFO] (候选{idx}/{len(candidate_users)}) 补抓历史收益：{addr}",
+                    flush=True,
+                )
+                user_dir = users_dir / addr
+                if not user_dir.exists():
+                    print(
+                        f"[WARN] 候选地址 {addr} 未找到用户目录，跳过。",
+                        flush=True,
+                    )
+                    continue
+                lifetime_closed_positions, lifetime_info = client.fetch_closed_positions(
+                    user=addr,
+                    return_info=True,
+                )
+                lifetime_realized_pnl_sum = sum(
+                    pos.realized_pnl for pos in lifetime_closed_positions
+                )
+                lifetime_closed_count = len(lifetime_closed_positions)
+                lifetime_incomplete = bool(lifetime_info["incomplete"])
+                lifetime_status = "ok" if not lifetime_incomplete else "incomplete"
+
+                summary = summary_map.get(addr.lower())
+                if summary is not None:
+                    summary.lifetime_realized_pnl_sum = lifetime_realized_pnl_sum
+                    summary.lifetime_closed_count = lifetime_closed_count
+                    summary.lifetime_incomplete = lifetime_incomplete
+                    summary.lifetime_status = lifetime_status
+
+                report_row = report_map.get(addr.lower())
+                if report_row is not None:
+                    report_row["lifetime_status"] = lifetime_status
+                    report_row["lifetime_incomplete"] = lifetime_incomplete
+
+                patch = {
+                    "lifetime_realized_pnl_sum": lifetime_realized_pnl_sum,
+                    "lifetime_closed_count": lifetime_closed_count,
+                    "lifetime_incomplete": lifetime_incomplete,
+                    "lifetime_status": lifetime_status,
+                }
+                update_user_summary(user_dir / "summary.csv", addr, patch)
+
+            write_user_summaries_csv(data_dir / "users_summary.csv", summaries)
     report_path = data_dir / "run_report.csv"
     with report_path.open("w", encoding="utf-8", newline="") as f:
         fieldnames = [
@@ -365,6 +525,8 @@ def main() -> None:
             "open_incomplete",
             "closed_hit_max_pages",
             "open_hit_max_pages",
+            "lifetime_status",
+            "lifetime_incomplete",
             "error_msg",
         ]
         writer = csv.DictWriter(f, fieldnames=fieldnames)

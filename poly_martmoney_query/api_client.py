@@ -160,7 +160,10 @@ def _parse_timestamp(value: Any) -> Optional[dt.datetime]:
                 return None
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
-            return dt.datetime.fromisoformat(text)
+            parsed = dt.datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed
     except Exception:
         return None
     return None
