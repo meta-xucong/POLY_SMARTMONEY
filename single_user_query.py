@@ -122,6 +122,28 @@ def _write_rows(fieldnames: List[str], rows: Iterable[Dict[str, object]]) -> Non
         writer.writerow(row)
 
 
+def _format_value(value: object) -> str:
+    if value is None or value == "":
+        return "-"
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        formatted = f"{value:,.4f}".rstrip("0").rstrip(".")
+        return formatted or "0"
+    return str(value)
+
+
+def _print_readable_output(row: Dict[str, object]) -> None:
+    if not row:
+        return
+    max_key_len = max(len(str(key)) for key in row.keys())
+    for key, value in row.items():
+        key_text = str(key).ljust(max_key_len)
+        print(f"{key_text} ： {_format_value(value)}")
+
+
 def _closed_position_row(item) -> Dict[str, object]:
     return {
         "user": item.user,
@@ -400,6 +422,9 @@ def main() -> None:
 
     _print_section("FINAL_OUTPUT")
     _write_rows(list(renamed.keys()), [renamed])
+
+    _print_section("READABLE_OUTPUT")
+    _print_readable_output(renamed)
 
     if not passed:
         print(
