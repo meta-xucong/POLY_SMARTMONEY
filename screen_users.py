@@ -314,7 +314,12 @@ def _build_features(
         if ts is not None:
             action_timestamps.append(ts)
 
-    timing_timestamps = action_timestamps if action_timestamps else timestamps
+    min_action_timing = int(config.get("min_action_timing_count", 10))
+    if min_action_timing < 1:
+        min_action_timing = 1
+    timing_timestamps = (
+        action_timestamps if len(action_timestamps) >= min_action_timing else timestamps
+    )
     timing_count = len(timing_timestamps)
 
     closed_count = len(closed_rows)

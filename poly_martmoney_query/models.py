@@ -282,3 +282,4 @@ class UserSummary:
     open_unrealized_pnl_sum: float
     open_realized_pnl_sum: float
     asof_time: dt.datetime
+    status: Optional[str] = None
