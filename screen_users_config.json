@@ -202,7 +202,8 @@
 
       "max_loss",
       "p95_loss",
-      "near_expiry_ratio"
+      "near_expiry_ratio",
+      "profile_url"
     ],
     "_comment_columns": "最终输出列（按顺序输出）",
 
@@ -256,7 +257,9 @@
       "p95_loss": "亏损单P95",
       "_comment_p95_loss": "亏损单 P95 列名",
       "near_expiry_ratio": "近到期占比",
-      "_comment_near_expiry_ratio": "近到期占比列名"
+      "_comment_near_expiry_ratio": "近到期占比列名",
+      "profile_url": "Polymarket主页",
+      "_comment_profile_url": "Polymarket 网页端个人主页链接"
     },
     "_comment_rename": "最终输出列名映射（键为字段名，值为输出显示名）"
   }
