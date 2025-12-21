@@ -86,8 +86,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--hft-unique-tx-threshold",
         type=int,
-        default=20000,
-        help="判定为高频并跳过深拉的阈值，使用 trade_actions 的 actions_count/unique_tx（默认 20000）",
+        default=700,
+        help=(
+            "判定为高频并跳过深拉的阈值，使用 trade_actions 的 unique_tx/天（默认 700）"
+        ),
     )
     return parser.parse_args()
 
@@ -442,14 +444,23 @@ def main() -> None:
             trade_actions_cnt = int(
                 trade_info.get("actions_count") or trade_info.get("unique_tx") or 0
             )
+            window_days = max(1, args.days)
+            unique_tx_per_day = trade_actions_cnt / window_days
 
-            suspected_hft = trade_actions_cnt >= args.hft_unique_tx_threshold
+            suspected_hft = bool(trade_info.get("suspected_hft")) or (
+                unique_tx_per_day >= args.hft_unique_tx_threshold
+            )
 
             if suspected_hft:
-                hft_reason = (
-                    f"unique_tx/actions_count>={args.hft_unique_tx_threshold} "
-                    f"(actions={trade_actions_cnt}, records={trade_records}, pages={trade_pages})"
-                )
+                if trade_info.get("suspected_hft") and cap_reason:
+                    hft_reason = f"{cap_reason}"
+                else:
+                    hft_reason = (
+                        f"unique_tx_per_day>={args.hft_unique_tx_threshold} "
+                        f"(unique_tx={trade_actions_cnt}, days={window_days}, "
+                        f"per_day={unique_tx_per_day:.2f}, records={trade_records}, "
+                        f"pages={trade_pages})"
+                    )
             elif hit_cap and cap_reason:
                 hft_reason = f"cap_hit_only: {cap_reason}"
             else:
