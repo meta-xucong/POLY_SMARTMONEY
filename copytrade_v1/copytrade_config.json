@@ -1,0 +1,23 @@
+{
+  "target_address": "0x...",
+  "my_address": "0x...",
+  "follow_ratio": 0.2,
+
+  "poll_interval_sec": 20,
+  "size_threshold": 0.0,
+
+  "deadband_shares": 3.0,
+
+  "slice_min": 5,
+  "slice_max": 25,
+
+  "order_ttl_sec": 90,
+  "tick_size": 0.001,
+
+  "maker_only": true,
+
+  "max_notional_per_token": 500,
+  "max_notional_total": 2000,
+
+  "blacklist_token_keys": []
+}
