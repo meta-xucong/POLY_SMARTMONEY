@@ -5,6 +5,18 @@ from typing import Any, Dict, Iterable, List, Mapping, Optional
 from ct_utils import round_to_tick, safe_float
 
 
+def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
+    bid = orderbook.get("best_bid")
+    ask = orderbook.get("best_ask")
+    if bid is not None and ask is not None:
+        return (bid + ask) / 2.0
+    if bid is not None:
+        return bid
+    if ask is not None:
+        return ask
+    return None
+
+
 def _best_from_levels(levels: Iterable[Any], pick_max: bool) -> Optional[float]:
     prices: List[float] = []
     for level in levels:
@@ -124,14 +136,42 @@ def reconcile_one(
 
     abs_delta = abs(delta)
 
-    slice_min = float(cfg.get("slice_min") or 0)
-    slice_max = float(cfg.get("slice_max") or abs_delta)
-    if slice_max <= 0:
-        slice_max = abs_delta
+    mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
+    size: float = 0.0
 
-    size = min(abs_delta, slice_max)
-    if slice_min > 0 and abs_delta >= slice_min and size < slice_min:
-        size = slice_min
+    if mode == "auto_usd":
+        ref_price = _mid_price(orderbook)
+        if ref_price is None or ref_price <= 0:
+            return actions
+
+        min_usd = float(cfg.get("min_order_usd") or 5.0)
+        max_usd = float(cfg.get("max_order_usd") or 25.0)
+        if max_usd < min_usd:
+            max_usd = min_usd
+
+        k = float(cfg.get("_auto_order_k") or 0.3)
+
+        delta_usd = abs_delta * ref_price
+        order_usd = delta_usd * k
+        if order_usd < min_usd:
+            order_usd = min_usd
+        if order_usd > max_usd:
+            order_usd = max_usd
+
+        size = min(abs_delta, order_usd / ref_price)
+
+        max_shares_cap = float(cfg.get("max_order_shares_cap") or 5000.0)
+        if size > max_shares_cap:
+            size = max_shares_cap
+    else:
+        slice_min = float(cfg.get("slice_min") or 0)
+        slice_max = float(cfg.get("slice_max") or abs_delta)
+        if slice_max <= 0:
+            slice_max = abs_delta
+
+        size = min(abs_delta, slice_max)
+        if slice_min > 0 and abs_delta > slice_min and size < slice_min:
+            size = slice_min
 
     if size <= 0:
         return actions
