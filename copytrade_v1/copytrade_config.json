@@ -10,6 +10,9 @@
 
   "slice_min": 5,
   "slice_max": 25,
+  "order_size_mode": "auto_usd",
+  "min_order_usd": 5,
+  "max_order_usd": 25,
 
   "order_ttl_sec": 90,
   "tick_size": 0.001,

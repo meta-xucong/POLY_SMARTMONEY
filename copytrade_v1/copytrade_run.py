@@ -167,6 +167,8 @@ def main() -> None:
     )
 
     state = load_state(args.state)
+    state.setdefault("sizing", {})
+    state["sizing"].setdefault("ema_delta_usd", None)
     print(
         "[CFG] target="
         f"{cfg['target_address']} my={cfg['my_address']} ratio={cfg.get('follow_ratio')}"
@@ -358,6 +360,22 @@ def main() -> None:
                 total_notional += abs(desired) * ref_price
             cfg["_total_notional"] = total_notional
 
+        mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
+        min_usd = float(cfg.get("min_order_usd") or 5.0)
+        max_usd = float(cfg.get("max_order_usd") or 25.0)
+        target_mid_usd = (min_usd + max_usd) / 2.0
+
+        ema = state.get("sizing", {}).get("ema_delta_usd")
+        if ema is None or ema <= 0:
+            ema = target_mid_usd * 3.0
+
+        k = target_mid_usd / max(ema, 1e-9)
+        k = max(0.002, min(1.2, k))
+
+        cfg["_auto_order_k"] = k
+
+        delta_usd_samples = []
+
         for token_id in reconcile_set:
             if skip_closed:
                 if token_id in ignored:
@@ -429,6 +447,10 @@ def main() -> None:
                 print(f"[WARN] 无法获取盘口: token_id={token_id}")
                 continue
 
+            if mode == "auto_usd":
+                delta_shares = abs(desired - my_shares)
+                delta_usd_samples.append(delta_shares * ref_price)
+
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
             ok, reason = risk_check(token_key, desired, my_shares, ref_price, cfg)
             if not ok:
@@ -459,6 +481,14 @@ def main() -> None:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
             else:
                 state.get("open_orders", {}).pop(token_id, None)
+
+        if mode == "auto_usd" and delta_usd_samples:
+            delta_usd_samples.sort()
+            mid = delta_usd_samples[len(delta_usd_samples) // 2]
+            alpha = 0.2
+            new_ema = (1 - alpha) * ema + alpha * mid
+            state.setdefault("sizing", {})["ema_delta_usd"] = new_ema
+            state["sizing"]["last_k"] = cfg.get("_auto_order_k")
 
         state["last_sync_ts"] = now_ts
         save_state(args.state, state)
