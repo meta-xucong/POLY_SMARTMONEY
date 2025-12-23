@@ -771,6 +771,8 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
     trades_per_day = metrics.get("trades_per_day") or 0.0
     burstiness = metrics.get("burstiness") or 0.0
     near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
+    recent_pnl_share = metrics.get("recent_pnl_share") or 0.0
+    recent_surge_ratio = metrics.get("recent_surge_ratio") or 0.0
 
     tail_high_threshold = float(rules.get("tail_high_ratio_tail", 0.6))
     tail_low_threshold = float(rules.get("tail_low_ratio_longshot", 0.25))
