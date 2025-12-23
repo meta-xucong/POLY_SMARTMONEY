@@ -110,6 +110,51 @@ def _gamma_fetch_by_condition(condition_id: str) -> Optional[dict]:
     return None
 
 
+def gamma_fetch_markets_by_clob_token_ids(token_ids: list[str]) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    if not token_ids:
+        return out
+
+    chunk_size = 50
+    for idx in range(0, len(token_ids), chunk_size):
+        chunk = token_ids[idx : idx + chunk_size]
+        data = _http_json(
+            f"{GAMMA_ROOT}/markets",
+            params={"clob_token_ids": chunk, "limit": len(chunk)},
+        )
+        markets = []
+        if isinstance(data, dict) and "data" in data:
+            markets = data.get("data") or []
+        elif isinstance(data, list):
+            markets = data
+
+        if not isinstance(markets, list):
+            continue
+
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            token_ids_in_market = _extract_token_ids_from_market(market) or []
+            for token_id in token_ids_in_market:
+                if token_id in chunk and token_id not in out:
+                    out[token_id] = market
+    return out
+
+
+def market_is_tradeable(market: dict) -> bool:
+    if not isinstance(market, dict):
+        return False
+    if market.get("archived") is True:
+        return False
+    if market.get("acceptingOrders") is False:
+        return False
+    if market.get("closed") is True:
+        return False
+    if market.get("active") is False:
+        return False
+    return True
+
+
 def resolve_token_id(token_key: str, pos: Dict[str, Any], cache: Dict[str, str]) -> str:
     if token_key in cache:
         return cache[token_key]

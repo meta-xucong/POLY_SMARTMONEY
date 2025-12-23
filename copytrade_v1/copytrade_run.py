@@ -23,7 +23,11 @@ from ct_exec import (
     get_orderbook,
     reconcile_one,
 )
-from ct_resolver import resolve_token_id
+from ct_resolver import (
+    gamma_fetch_markets_by_clob_token_ids,
+    market_is_tradeable,
+    resolve_token_id,
+)
 from ct_risk import risk_check
 from ct_state import load_state, save_state
 
@@ -202,12 +206,31 @@ def main() -> None:
     state["target"] = cfg.get("target_address")
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
+    state.setdefault("seen_tokens", [])
+    state.setdefault("tracked_tokens", [])
+    state.setdefault("ignored_tokens", {})
+    state.setdefault("market_status_cache", {})
+    state.setdefault("bootstrapped", False)
+    if not isinstance(state.get("seen_tokens"), list):
+        state["seen_tokens"] = []
+    if not isinstance(state.get("tracked_tokens"), list):
+        state["tracked_tokens"] = []
+    if not isinstance(state.get("ignored_tokens"), dict):
+        state["ignored_tokens"] = {}
+    if not isinstance(state.get("market_status_cache"), dict):
+        state["market_status_cache"] = {}
+    if not isinstance(state.get("bootstrapped"), bool):
+        state["bootstrapped"] = False
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
 
     poll_interval = int(cfg.get("poll_interval_sec") or 20)
     size_threshold = float(cfg.get("size_threshold") or 0)
+    follow_new_only = bool(cfg.get("follow_new_topics_only", False))
+    bootstrap_skip = bool(cfg.get("bootstrap_skip_first_cycle", True))
+    skip_closed = bool(cfg.get("skip_closed_markets", True))
+    refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
 
     while True:
         now_ts = int(time.time())
@@ -275,6 +298,33 @@ def main() -> None:
             desired_by_token_id[token_id] = desired_by_token_key[token_key]
             token_key_by_token_id[token_id] = token_key
 
+        seen = set(state["seen_tokens"])
+        tracked = set(state["tracked_tokens"])
+        target_tokens_now = set(desired_by_token_id.keys())
+
+        if follow_new_only and not state["bootstrapped"]:
+            seen |= target_tokens_now
+            state["seen_tokens"] = sorted(seen)
+            state["tracked_tokens"] = sorted(tracked)
+            state["bootstrapped"] = True
+            print(
+                "[BOOT] follow_new_topics_only=1，已忽略启动时存量 topics:"
+                f" {len(target_tokens_now)} 个 token"
+            )
+            save_state(args.state, state)
+            if bootstrap_skip:
+                time.sleep(poll_interval)
+                continue
+
+        if follow_new_only:
+            new_tokens = target_tokens_now - seen
+            if new_tokens:
+                print(f"[NEW] 发现新 topics: {len(new_tokens)} 个 token，将开始跟随")
+            seen |= new_tokens
+            tracked |= new_tokens
+            state["seen_tokens"] = sorted(seen)
+            state["tracked_tokens"] = sorted(tracked)
+
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
             token_key = pos["token_key"]
@@ -287,13 +337,38 @@ def main() -> None:
             token_key_by_token_id.setdefault(token_id, token_key)
 
         reconcile_set: Set[str] = set(desired_by_token_id)
-        reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
+        if follow_new_only:
+            reconcile_set = (reconcile_set & tracked) | set(state.get("open_orders", {}).keys())
+        else:
+            reconcile_set.update(my_by_token_id)
+
+        ignored = state["ignored_tokens"]
+        status_cache = state["market_status_cache"]
+        if skip_closed:
+            need_query = []
+            for token_id in reconcile_set:
+                if token_id in ignored:
+                    continue
+                cached = status_cache.get(token_id)
+                if not cached or now_ts - int(cached.get("ts") or 0) >= refresh_sec:
+                    need_query.append(token_id)
+
+            if need_query:
+                meta_map = gamma_fetch_markets_by_clob_token_ids(need_query)
+                for token_id in need_query:
+                    meta = meta_map.get(token_id)
+                    tradeable = market_is_tradeable(meta) if meta else False
+                    status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
         total_notional = 0.0
         if float(cfg.get("max_notional_total") or 0) > 0:
             for token_id in reconcile_set:
+                if skip_closed:
+                    cached = status_cache.get(token_id)
+                    if token_id in ignored or (cached and cached.get("tradeable") is False):
+                        continue
                 ob = get_orderbook(clob_client, token_id)
                 orderbooks[token_id] = ob
                 ref_price = _mid_price(ob)
@@ -304,6 +379,57 @@ def main() -> None:
             cfg["_total_notional"] = total_notional
 
         for token_id in reconcile_set:
+            if skip_closed and token_id in ignored:
+                if token_id in state.get("open_orders", {}):
+                    cancels = [
+                        {"type": "cancel", "order_id": o.get("order_id")}
+                        for o in state["open_orders"].get(token_id, [])
+                        if o.get("order_id")
+                    ]
+                    if cancels:
+                        updated_orders = apply_actions(
+                            clob_client,
+                            cancels,
+                            state["open_orders"].get(token_id, []),
+                            now_ts,
+                            args.dry_run,
+                        )
+                        if updated_orders:
+                            state.setdefault("open_orders", {})[token_id] = updated_orders
+                        else:
+                            state.get("open_orders", {}).pop(token_id, None)
+                continue
+
+            if skip_closed:
+                cached = status_cache.get(token_id)
+                if cached and cached.get("tradeable") is False:
+                    ignored[token_id] = {"ts": now_ts, "reason": "closed_or_inactive"}
+                    if token_id in state.get("open_orders", {}):
+                        cancels = [
+                            {"type": "cancel", "order_id": o.get("order_id")}
+                            for o in state["open_orders"].get(token_id, [])
+                            if o.get("order_id")
+                        ]
+                        if cancels:
+                            updated_orders = apply_actions(
+                                clob_client,
+                                cancels,
+                                state["open_orders"].get(token_id, []),
+                                now_ts,
+                                args.dry_run,
+                            )
+                            if updated_orders:
+                                state.setdefault("open_orders", {})[token_id] = updated_orders
+                            else:
+                                state.get("open_orders", {}).pop(token_id, None)
+                    if follow_new_only and token_id in tracked:
+                        tracked.discard(token_id)
+                        state["tracked_tokens"] = sorted(tracked)
+                    meta = (cached or {}).get("meta") or {}
+                    slug = meta.get("slug") or meta.get("marketSlug") or ""
+                    print(f"[SKIP] market closed/inactive token_id={token_id} slug={slug}")
+                    continue
+
             desired = desired_by_token_id.get(token_id, 0.0)
             my_shares = my_by_token_id.get(token_id, 0.0)
 
