@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -42,6 +43,46 @@ def _load_config(path: Path) -> Dict[str, Any]:
 
 def _normalize_privkey(key: str) -> str:
     return key[2:] if key.startswith(("0x", "0X")) else key
+
+
+_EVM_ADDR_RE = re.compile(r"^0x[a-fA-F0-9]{40}$")
+
+
+def _is_placeholder_addr(value: Optional[str]) -> bool:
+    if not value:
+        return True
+    text = value.strip()
+    if text.lower() in ("0x...", "0x…", "0x"):
+        return True
+    if "..." in text or "…" in text:
+        return True
+    return False
+
+
+def _is_evm_address(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return bool(_EVM_ADDR_RE.match(value.strip()))
+
+
+def _get_env_first(keys: list[str]) -> Optional[str]:
+    for key in keys:
+        env_value = os.getenv(key)
+        if env_value and env_value.strip():
+            return env_value.strip()
+    return None
+
+
+def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str:
+    if _is_placeholder_addr(current):
+        current = _get_env_first(env_keys)
+
+    if not _is_evm_address(current):
+        raise ValueError(
+            f"{name} 未配置或格式不合法：{current!r}。需要 0x + 40 位十六进制地址。"
+            f" 你可以在 copytrade_config.json 里填 {name}，或设置环境变量：{env_keys}"
+        )
+    return current.strip()
 
 
 def init_clob_client():
@@ -132,10 +173,32 @@ def main() -> None:
         arg_val = getattr(args, key, None)
         if arg_val is not None:
             cfg[key] = arg_val
-    if not cfg.get("target_address") or not cfg.get("my_address"):
-        raise ValueError("target_address / my_address 未配置")
+
+    cfg["my_address"] = _resolve_addr(
+        "my_address",
+        cfg.get("my_address"),
+        env_keys=[
+            "POLY_FUNDER",
+            "POLY_MY_ADDRESS",
+            "MY_ADDRESS",
+        ],
+    )
+    cfg["target_address"] = _resolve_addr(
+        "target_address",
+        cfg.get("target_address"),
+        env_keys=[
+            "COPYTRADE_TARGET",
+            "CT_TARGET",
+            "POLY_TARGET_ADDRESS",
+            "TARGET_ADDRESS",
+        ],
+    )
 
     state = load_state(args.state)
+    print(
+        "[CFG] target="
+        f"{cfg['target_address']} my={cfg['my_address']} ratio={cfg.get('follow_ratio')}"
+    )
     state["target"] = cfg.get("target_address")
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
