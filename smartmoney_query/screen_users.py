@@ -253,7 +253,10 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
         lifetime_pnl, (int, float)
     ):
         lifetime_rate = float(lifetime_pnl) / max(float(age_days), 1.0)
-        lifetime_rate_score = _clamp01(_tanh01(max(lifetime_rate, 0.0) / rate_cap))
+        if lifetime_rate <= 0:
+            lifetime_rate_score = 0.0
+        else:
+            lifetime_rate_score = _clamp01(_tanh01(lifetime_rate / rate_cap))
 
         if isinstance(month_pnl, (int, float)):
             recent_pnl_share = abs(float(month_pnl)) / max(abs(float(lifetime_pnl)), 1e-9)
@@ -603,11 +606,15 @@ def _build_features(
     daily_sharpe_like = mean_daily / (std_daily + 1e-9)
 
     max_drawdown, drawdown_series = _compute_max_drawdown(daily_series)
-    max_drawdown_ratio = max_drawdown / (abs(sum_daily) + 1e-9)
+    drawdown_denom = max(abs(sum_daily), pos_sum, 1.0)
+    max_drawdown_ratio = max_drawdown / drawdown_denom
 
     pos_sum = sum(max(p, 0.0) for p in daily_series)
     top1 = max((max(p, 0.0) for p in daily_series), default=0.0)
-    pnl_top1_day_share = top1 / (pos_sum + 1e-9)
+    if pos_sum <= 1e-9:
+        pnl_top1_day_share = 1.0
+    else:
+        pnl_top1_day_share = top1 / pos_sum
 
     ulcer_index = _compute_ulcer_index(drawdown_series)
 
