@@ -573,6 +573,14 @@ def main() -> None:
                 lifetime_incomplete=lifetime_incomplete,
                 lifetime_status=lifetime_status,
             )
+            # === PATCH: make lifetime_realized_pnl_sum comparable to website "ALL" Profit/Loss ===
+            # NOTE:
+            # - lifetime_realized_pnl_sum is computed from lifetime closed positions (pos.realized_pnl)
+            # - website "ALL" is a net P/L style number; so we fold in current open position PnL (realized + unrealized)
+            if lifetime_realized_pnl_sum is not None:
+                open_real = float(summary.open_realized_pnl_sum or 0.0)
+                open_unreal = float(summary.open_unrealized_pnl_sum or 0.0)
+                summary.lifetime_realized_pnl_sum = float(lifetime_realized_pnl_sum) + open_real + open_unreal
             summary.leaderboard_month_pnl = lb_month_pnl
             summary.suspected_hft = False
             summary.hft_reason = hft_reason
