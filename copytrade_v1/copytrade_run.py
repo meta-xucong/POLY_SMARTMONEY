@@ -25,7 +25,7 @@ from ct_exec import (
 )
 from ct_resolver import (
     gamma_fetch_markets_by_clob_token_ids,
-    market_is_tradeable,
+    market_tradeable_state,
     resolve_token_id,
 )
 from ct_risk import risk_check
@@ -138,38 +138,6 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _sync_open_orders_state(
-    prev: Dict[str, Any],
-    remote: list[dict],
-    now_ts: int,
-) -> Dict[str, Any]:
-    existing_by_id: Dict[str, dict] = {}
-    for orders in (prev or {}).values():
-        for order in orders or []:
-            oid = str(order.get("order_id") or "")
-            if oid:
-                existing_by_id[oid] = order
-
-    new_map: Dict[str, list[dict]] = {}
-    for order in remote:
-        token_id = str(order.get("token_id") or "")
-        oid = str(order.get("order_id") or "")
-        if not token_id or not oid:
-            continue
-        prev_order = existing_by_id.get(oid, {})
-        ts = int(prev_order.get("ts") or order.get("created_ts") or now_ts)
-        new_map.setdefault(token_id, []).append(
-            {
-                "order_id": oid,
-                "side": order.get("side") or prev_order.get("side"),
-                "price": order.get("price") if order.get("price") is not None else prev_order.get("price"),
-                "size": order.get("size") if order.get("size") is not None else prev_order.get("size"),
-                "ts": ts,
-            }
-        )
-    return new_map
-
-
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
@@ -206,44 +174,56 @@ def main() -> None:
     state["target"] = cfg.get("target_address")
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
-    state.setdefault("seen_tokens", [])
-    state.setdefault("tracked_tokens", [])
+    state.setdefault("open_orders", {})
+    state.setdefault("token_map", {})
+    state.setdefault("seen_token_keys", [])
+    state.setdefault("tracked_token_keys", [])
+    state.setdefault("bootstrapped", False)
     state.setdefault("ignored_tokens", {})
     state.setdefault("market_status_cache", {})
-    state.setdefault("bootstrapped", False)
-    if not isinstance(state.get("seen_tokens"), list):
-        state["seen_tokens"] = []
-    if not isinstance(state.get("tracked_tokens"), list):
-        state["tracked_tokens"] = []
+    if not isinstance(state.get("open_orders"), dict):
+        state["open_orders"] = {}
+    if not isinstance(state.get("token_map"), dict):
+        state["token_map"] = {}
+    if not isinstance(state.get("seen_token_keys"), list):
+        state["seen_token_keys"] = []
+    if not isinstance(state.get("tracked_token_keys"), list):
+        state["tracked_token_keys"] = []
+    if not isinstance(state.get("bootstrapped"), bool):
+        state["bootstrapped"] = False
     if not isinstance(state.get("ignored_tokens"), dict):
         state["ignored_tokens"] = {}
     if not isinstance(state.get("market_status_cache"), dict):
         state["market_status_cache"] = {}
-    if not isinstance(state.get("bootstrapped"), bool):
-        state["bootstrapped"] = False
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
 
     poll_interval = int(cfg.get("poll_interval_sec") or 20)
     size_threshold = float(cfg.get("size_threshold") or 0)
-    follow_new_only = bool(cfg.get("follow_new_topics_only", False))
+    follow_new_only = bool(cfg.get("follow_new_topics_only", True))
     bootstrap_skip = bool(cfg.get("bootstrap_skip_first_cycle", True))
     skip_closed = bool(cfg.get("skip_closed_markets", True))
     refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
 
     while True:
         now_ts = int(time.time())
-        if not args.dry_run:
-            try:
-                remote_orders = fetch_open_orders_norm(clob_client)
-                state["open_orders"] = _sync_open_orders_state(
-                    state.get("open_orders", {}),
-                    remote_orders,
-                    now_ts,
+        try:
+            remote_orders = fetch_open_orders_norm(clob_client)
+            remote_by_token: Dict[str, list[dict]] = {}
+            for order in remote_orders:
+                remote_by_token.setdefault(order["token_id"], []).append(
+                    {
+                        "order_id": order["order_id"],
+                        "side": order["side"],
+                        "price": order["price"],
+                        "size": order["size"],
+                        "ts": order.get("ts") or now_ts,
+                    }
                 )
-            except Exception as exc:
-                print(f"[WARN] sync open orders failed: {exc}")
+            state["open_orders"] = remote_by_token
+        except Exception as exc:
+            print(f"[WARN] sync open orders failed: {exc}")
 
         target_pos, target_info = fetch_positions_norm(
             data_client,
@@ -281,15 +261,43 @@ def main() -> None:
             time.sleep(poll_interval)
             continue
 
+        token_keys_now = [pos["token_key"] for pos in target_pos]
+        seen = set(state.get("seen_token_keys", []))
+        tracked = set(state.get("tracked_token_keys", []))
+
+        if follow_new_only and not state.get("bootstrapped"):
+            seen |= set(token_keys_now)
+            state["seen_token_keys"] = sorted(seen)
+            state["tracked_token_keys"] = sorted(tracked)
+            state["bootstrapped"] = True
+            print(f"[BOOT] 已忽略启动时存量 topics: {len(token_keys_now)}")
+            save_state(args.state, state)
+            if bootstrap_skip:
+                time.sleep(poll_interval)
+                continue
+
+        if follow_new_only:
+            new_keys = set(token_keys_now) - seen
+            if new_keys:
+                print(f"[NEW] 发现新 topics: {len(new_keys)}，开始跟随")
+                tracked |= new_keys
+                seen |= new_keys
+                state["seen_token_keys"] = sorted(seen)
+                state["tracked_token_keys"] = sorted(tracked)
+
         desired_by_token_key: Dict[str, float] = {}
         for pos in target_pos:
             token_key = pos["token_key"]
+            if follow_new_only and token_key not in tracked:
+                continue
             desired_by_token_key[token_key] = float(cfg["follow_ratio"]) * float(pos["size"])
 
         desired_by_token_id: Dict[str, float] = {}
         token_key_by_token_id: Dict[str, str] = {}
         for pos in target_pos:
             token_key = pos["token_key"]
+            if follow_new_only and token_key not in tracked:
+                continue
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
@@ -298,36 +306,11 @@ def main() -> None:
             desired_by_token_id[token_id] = desired_by_token_key[token_key]
             token_key_by_token_id[token_id] = token_key
 
-        seen = set(state["seen_tokens"])
-        tracked = set(state["tracked_tokens"])
-        target_tokens_now = set(desired_by_token_id.keys())
-
-        if follow_new_only and not state["bootstrapped"]:
-            seen |= target_tokens_now
-            state["seen_tokens"] = sorted(seen)
-            state["tracked_tokens"] = sorted(tracked)
-            state["bootstrapped"] = True
-            print(
-                "[BOOT] follow_new_topics_only=1，已忽略启动时存量 topics:"
-                f" {len(target_tokens_now)} 个 token"
-            )
-            save_state(args.state, state)
-            if bootstrap_skip:
-                time.sleep(poll_interval)
-                continue
-
-        if follow_new_only:
-            new_tokens = target_tokens_now - seen
-            if new_tokens:
-                print(f"[NEW] 发现新 topics: {len(new_tokens)} 个 token，将开始跟随")
-            seen |= new_tokens
-            tracked |= new_tokens
-            state["seen_tokens"] = sorted(seen)
-            state["tracked_tokens"] = sorted(tracked)
-
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
             token_key = pos["token_key"]
+            if follow_new_only and token_key not in tracked:
+                continue
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
@@ -337,11 +320,8 @@ def main() -> None:
             token_key_by_token_id.setdefault(token_id, token_key)
 
         reconcile_set: Set[str] = set(desired_by_token_id)
+        reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
-        if follow_new_only:
-            reconcile_set = (reconcile_set & tracked) | set(state.get("open_orders", {}).keys())
-        else:
-            reconcile_set.update(my_by_token_id)
 
         ignored = state["ignored_tokens"]
         status_cache = state["market_status_cache"]
@@ -358,7 +338,7 @@ def main() -> None:
                 meta_map = gamma_fetch_markets_by_clob_token_ids(need_query)
                 for token_id in need_query:
                     meta = meta_map.get(token_id)
-                    tradeable = market_is_tradeable(meta) if meta else False
+                    tradeable = market_tradeable_state(meta)
                     status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
@@ -379,31 +359,15 @@ def main() -> None:
             cfg["_total_notional"] = total_notional
 
         for token_id in reconcile_set:
-            if skip_closed and token_id in ignored:
-                if token_id in state.get("open_orders", {}):
-                    cancels = [
-                        {"type": "cancel", "order_id": o.get("order_id")}
-                        for o in state["open_orders"].get(token_id, [])
-                        if o.get("order_id")
-                    ]
-                    if cancels:
-                        updated_orders = apply_actions(
-                            clob_client,
-                            cancels,
-                            state["open_orders"].get(token_id, []),
-                            now_ts,
-                            args.dry_run,
-                        )
-                        if updated_orders:
-                            state.setdefault("open_orders", {})[token_id] = updated_orders
-                        else:
-                            state.get("open_orders", {}).pop(token_id, None)
-                continue
-
             if skip_closed:
-                cached = status_cache.get(token_id)
-                if cached and cached.get("tradeable") is False:
-                    ignored[token_id] = {"ts": now_ts, "reason": "closed_or_inactive"}
+                if token_id in ignored:
+                    continue
+
+                cached = status_cache.get(token_id) or {}
+                tradeable = cached.get("tradeable")
+
+                if tradeable is False:
+                    ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
                     if token_id in state.get("open_orders", {}):
                         cancels = [
                             {"type": "cancel", "order_id": o.get("order_id")}
@@ -422,12 +386,13 @@ def main() -> None:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
                             else:
                                 state.get("open_orders", {}).pop(token_id, None)
-                    if follow_new_only and token_id in tracked:
-                        tracked.discard(token_id)
-                        state["tracked_tokens"] = sorted(tracked)
-                    meta = (cached or {}).get("meta") or {}
-                    slug = meta.get("slug") or meta.get("marketSlug") or ""
-                    print(f"[SKIP] market closed/inactive token_id={token_id} slug={slug}")
+                    meta = cached.get("meta") or {}
+                    slug = meta.get("slug") or ""
+                    print(f"[SKIP] closed/inactive token_id={token_id} slug={slug}")
+                    continue
+
+                if tradeable is None:
+                    print(f"[WARN] market 状态未知(稍后重试): token_id={token_id}")
                     continue
 
             desired = desired_by_token_id.get(token_id, 0.0)

@@ -155,6 +155,32 @@ def market_is_tradeable(market: dict) -> bool:
     return True
 
 
+def market_tradeable_state(market: Optional[Dict[str, Any]]) -> Optional[bool]:
+    if not isinstance(market, dict):
+        return None
+
+    if market.get("enableOrderBook") is False:
+        return False
+    if market.get("archived") is True:
+        return False
+    if market.get("acceptingOrders") is False:
+        return False
+    if market.get("closed") is True:
+        return False
+    if market.get("active") is False:
+        return False
+
+    if (
+        market.get("enableOrderBook") is None
+        and market.get("acceptingOrders") is None
+        and market.get("closed") is None
+        and market.get("active") is None
+    ):
+        return None
+
+    return True
+
+
 def resolve_token_id(token_key: str, pos: Dict[str, Any], cache: Dict[str, str]) -> str:
     if token_key in cache:
         return cache[token_key]
