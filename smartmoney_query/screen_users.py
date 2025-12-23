@@ -376,14 +376,13 @@ def _apply_filters(
     min_lifetime_pnl = filters.get("min_lifetime_realized_pnl")
     lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
     lifetime_status = metrics.get("lifetime_status")
+
     if min_lifetime_pnl is not None:
-        if lifetime_pnl is None or lifetime_pnl <= min_lifetime_pnl:
-            if lifetime_status == "ok":
-                failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
-            else:
-                warnings.append(
-                    f"lifetime_realized_pnl_sum<={min_lifetime_pnl}(pending)"
-                )
+        # 总收益必须可用且为 ok；否则直接淘汰（杜绝 pending/skipped/error 账号混入最终表）
+        if lifetime_status != "ok" or lifetime_pnl is None:
+            failures.append("lifetime_required_but_missing_or_not_ok")
+        elif lifetime_pnl <= min_lifetime_pnl:
+            failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
 
     return (len(failures) == 0), failures, warnings
 
