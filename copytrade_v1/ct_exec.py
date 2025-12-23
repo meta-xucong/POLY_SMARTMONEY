@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from ct_utils import clamp, round_to_tick, safe_float
+from ct_utils import round_to_tick, safe_float
 
 
 class PriceSample:
@@ -152,9 +152,19 @@ def reconcile_one(
     if remaining_orders:
         return actions
 
+    abs_delta = abs(delta)
+
     slice_min = float(cfg.get("slice_min") or 0)
-    slice_max = float(cfg.get("slice_max") or abs(delta))
-    size = clamp(abs(delta), slice_min, slice_max)
+    slice_max = float(cfg.get("slice_max") or abs_delta)
+    if slice_max <= 0:
+        slice_max = abs_delta
+
+    size = min(abs_delta, slice_max)
+    if slice_min > 0 and abs_delta > slice_min and size < slice_min:
+        size = slice_min
+
+    if size <= 0:
+        return actions
 
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
@@ -176,6 +186,16 @@ def reconcile_one(
             price = best_bid + tick_size
         if price is not None:
             price = round_to_tick(price, tick_size, direction="up")
+
+    maker_only = bool(cfg.get("maker_only"))
+    if maker_only and tick_size and tick_size > 0:
+        if side == "BUY" and best_ask is not None and price is not None and price >= best_ask:
+            price = round_to_tick(best_ask - tick_size, tick_size, direction="down")
+        if side == "SELL" and best_bid is not None and price is not None and price <= best_bid:
+            price = round_to_tick(best_bid + tick_size, tick_size, direction="up")
+
+        if price is None or price <= 0:
+            return actions
 
     if price is None or price <= 0:
         return actions
@@ -286,9 +306,15 @@ def apply_actions(
             order_id = action.get("order_id")
             if not order_id:
                 continue
-            if not dry_run:
+            if dry_run:
+                updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
+                continue
+            try:
                 cancel_order(client, str(order_id))
-            updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
+                updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
+            except Exception as exc:
+                print(f"[WARN] cancel_order failed order_id={order_id}: {exc}")
+            continue
 
     for action in actions:
         if action.get("type") != "place":
@@ -304,13 +330,17 @@ def apply_actions(
                 }
             )
             continue
-        response = place_order(
-            client,
-            token_id=str(action.get("token_id")),
-            side=str(action.get("side")),
-            price=float(action.get("price")),
-            size=float(action.get("size")),
-        )
+        try:
+            response = place_order(
+                client,
+                token_id=str(action.get("token_id")),
+                side=str(action.get("side")),
+                price=float(action.get("price")),
+                size=float(action.get("size")),
+            )
+        except Exception as exc:
+            print(f"[WARN] place_order failed token_id={action.get('token_id')}: {exc}")
+            continue
         order_id = response.get("order_id")
         if order_id:
             updated.append(
@@ -340,9 +370,160 @@ def cancel_expired_only(
             if ttl_sec > 0 and now_ts - ts > ttl_sec:
                 order_id = order.get("order_id")
                 if order_id and not dry_run:
-                    cancel_order(client, str(order_id))
+                    try:
+                        cancel_order(client, str(order_id))
+                        continue
+                    except Exception as exc:
+                        print(
+                            f"[WARN] cancel_order failed(order_id={order_id}) in cancel_expired_only: {exc}"
+                        )
+                        keep.append(order)
+                        continue
                 continue
             keep.append(order)
         if keep:
             updated[token_id] = keep
     return updated
+
+
+def _as_dict(obj: Any) -> Optional[Dict[str, Any]]:
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "dict"):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+    if hasattr(obj, "__dict__"):
+        try:
+            return dict(obj.__dict__)
+        except Exception:
+            pass
+    return None
+
+
+def _coerce_list(payload: Any) -> List[Any]:
+    if payload is None:
+        return []
+    if isinstance(payload, list):
+        return payload
+    if isinstance(payload, dict):
+        for key in ("data", "orders", "result", "items"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return value
+        return []
+    for key in ("data", "orders", "result", "items"):
+        value = getattr(payload, key, None)
+        if isinstance(value, list):
+            return value
+    return []
+
+
+def _parse_created_ts(value: Any) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, (int, float)):
+            parsed = int(value)
+            return parsed if parsed > 0 else None
+        if isinstance(value, str):
+            text = value.strip()
+            num = safe_float(text)
+            if num is not None and num > 0:
+                numeric = int(num)
+                return numeric // 1000 if numeric > 10_000_000_000 else numeric
+            from datetime import datetime, timezone
+
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed_dt = datetime.fromisoformat(text)
+            if parsed_dt.tzinfo is None:
+                parsed_dt = parsed_dt.replace(tzinfo=timezone.utc)
+            return int(parsed_dt.timestamp())
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_open_order(order: Any) -> Optional[Dict[str, Any]]:
+    data = _as_dict(order)
+    if not data:
+        return None
+
+    order_id = (
+        data.get("id")
+        or data.get("order_id")
+        or data.get("orderId")
+        or data.get("orderID")
+        or data.get("order_hash")
+        or data.get("orderHash")
+    )
+    token_id = (
+        data.get("asset_id")
+        or data.get("assetId")
+        or data.get("token_id")
+        or data.get("tokenId")
+        or data.get("clobTokenId")
+        or data.get("clob_token_id")
+    )
+    if not order_id or not token_id:
+        return None
+
+    side = data.get("side") or data.get("taker_side") or data.get("maker_side")
+    side_norm = side.upper() if isinstance(side, str) else str(side).upper()
+
+    price = safe_float(data.get("price") or data.get("limit_price") or data.get("limitPrice"))
+    size = safe_float(
+        data.get("size")
+        or data.get("original_size")
+        or data.get("originalSize")
+        or data.get("remaining_size")
+        or data.get("remainingSize")
+        or data.get("amount")
+    )
+
+    created_ts = _parse_created_ts(data.get("created_at") or data.get("createdAt") or data.get("timestamp"))
+    return {
+        "order_id": str(order_id),
+        "token_id": str(token_id),
+        "side": side_norm,
+        "price": price,
+        "size": size,
+        "created_ts": created_ts,
+    }
+
+
+def fetch_open_orders_norm(
+    client: Any,
+    asset_id: Optional[str] = None,
+    market: Optional[str] = None,
+    order_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    raw = None
+    try:
+        from py_clob_client.clob_types import OpenOrderParams
+
+        params = OpenOrderParams(id=order_id, market=market, asset_id=asset_id)
+        try:
+            raw = client.get_orders(params)
+        except TypeError:
+            raw = client.get_orders()
+    except Exception:
+        for name in ("get_open_orders", "getOpenOrders", "open_orders"):
+            fn = getattr(client, name, None)
+            if fn is None:
+                continue
+            try:
+                raw = fn()
+                break
+            except Exception:
+                continue
+
+    orders = _coerce_list(raw)
+    normalized: List[Dict[str, Any]] = []
+    for order in orders:
+        parsed = _normalize_open_order(order)
+        if parsed is not None:
+            normalized.append(parsed)
+    return normalized
