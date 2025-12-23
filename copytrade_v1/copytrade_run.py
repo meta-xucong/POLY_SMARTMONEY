@@ -349,7 +349,7 @@ def main() -> None:
             for token_id in reconcile_set:
                 if skip_closed:
                     cached = status_cache.get(token_id)
-                    if token_id in ignored or (cached and cached.get("tradeable") is False):
+                    if token_id in ignored or (cached and cached.get("tradeable") is not True):
                         continue
                 ob = get_orderbook(clob_client, token_id)
                 orderbooks[token_id] = ob
