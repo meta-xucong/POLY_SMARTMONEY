@@ -279,7 +279,7 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
 
     dd_score = 1.0 - _clamp01(max_drawdown_ratio / dd_ratio_cap)
     conc_score = 1.0 - _clamp01(pnl_top1_day_share / conc_cap)
-    sharpe_score = _clamp01(_tanh01(sharpe_like / 2.0))
+    sharpe_score = _clamp01(_tanh01(max(sharpe_like, 0.0) / 2.0))
 
     window_score = 0.35 * profit_day_ratio + 0.35 * dd_score + 0.15 * conc_score + 0.15 * sharpe_score
 
@@ -605,11 +605,11 @@ def _build_features(
 
     daily_sharpe_like = mean_daily / (std_daily + 1e-9)
 
+    pos_sum = sum(max(p, 0.0) for p in daily_series)
+
     max_drawdown, drawdown_series = _compute_max_drawdown(daily_series)
     drawdown_denom = max(abs(sum_daily), pos_sum, 1.0)
     max_drawdown_ratio = max_drawdown / drawdown_denom
-
-    pos_sum = sum(max(p, 0.0) for p in daily_series)
     top1 = max((max(p, 0.0) for p in daily_series), default=0.0)
     if pos_sum <= 1e-9:
         pnl_top1_day_share = 1.0
