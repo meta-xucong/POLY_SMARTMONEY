@@ -185,6 +185,121 @@ def _compute_copy_score(metrics: Dict[str, Any], config: Dict[str, Any]) -> floa
     return score
 
 
+def _clamp01(value: float) -> float:
+    if value <= 0:
+        return 0.0
+    if value >= 1:
+        return 1.0
+    return value
+
+
+def _tanh01(value: float) -> float:
+    import math
+
+    return 0.5 * (math.tanh(value) + 1.0)
+
+
+def _safe_div(numerator: float, denominator: float, eps: float = 1e-9) -> float:
+    if abs(denominator) <= eps:
+        return numerator / eps
+    return numerator / denominator
+
+
+def _compute_max_drawdown(daily_pnls: List[float]) -> Tuple[float, List[float]]:
+    cum = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    drawdowns: List[float] = []
+    for pnl in daily_pnls:
+        cum += float(pnl)
+        if cum > peak:
+            peak = cum
+        dd = peak - cum
+        if dd > max_dd:
+            max_dd = dd
+        drawdowns.append(dd)
+    return max_dd, drawdowns
+
+
+def _compute_ulcer_index(drawdowns: List[float]) -> float:
+    import math
+
+    if not drawdowns:
+        return 0.0
+    mean_sq = sum(dd * dd for dd in drawdowns) / len(drawdowns)
+    return math.sqrt(mean_sq)
+
+
+def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) -> Dict[str, float]:
+    stability_params = config.get("stability_params", {})
+    if not isinstance(stability_params, dict):
+        stability_params = {}
+    rate_cap = float(stability_params.get("rate_cap", 100.0))
+    share_cap = float(stability_params.get("share_cap", 0.60))
+    surge_cap = float(stability_params.get("surge_cap", 5.0))
+    dd_ratio_cap = float(stability_params.get("dd_ratio_cap", 1.0))
+    conc_cap = float(stability_params.get("conc_cap", 0.70))
+
+    age_days = metrics.get("account_age_days")
+    lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
+    month_pnl = metrics.get("leaderboard_month_pnl")
+
+    lifetime_rate = 0.0
+    recent_pnl_share = 0.0
+    recent_surge_ratio = 0.0
+    lifetime_score = 0.0
+
+    if isinstance(age_days, (int, float)) and age_days and isinstance(
+        lifetime_pnl, (int, float)
+    ):
+        lifetime_rate = float(lifetime_pnl) / max(float(age_days), 1.0)
+        if lifetime_rate <= 0:
+            lifetime_rate_score = 0.0
+        else:
+            lifetime_rate_score = _clamp01(_tanh01(lifetime_rate / rate_cap))
+
+        if isinstance(month_pnl, (int, float)):
+            recent_pnl_share = abs(float(month_pnl)) / max(abs(float(lifetime_pnl)), 1e-9)
+            share_score = 1.0 - _clamp01(recent_pnl_share / share_cap)
+
+            month_rate = abs(float(month_pnl)) / 30.0
+            hist_rate = abs(lifetime_rate)
+            recent_surge_ratio = _safe_div(month_rate, hist_rate, eps=1e-9)
+            surge_over = max(recent_surge_ratio - 1.0, 0.0)
+            surge_score = 1.0 - _clamp01(surge_over / surge_cap)
+
+            lifetime_score = 0.40 * lifetime_rate_score + 0.30 * share_score + 0.30 * surge_score
+        else:
+            lifetime_score = lifetime_rate_score
+
+    profit_day_ratio = float(metrics.get("profit_day_ratio") or 0.0)
+    max_drawdown_ratio = float(metrics.get("max_drawdown_ratio") or 0.0)
+    pnl_top1_day_share = float(metrics.get("pnl_top1_day_share") or 0.0)
+    sharpe_like = float(metrics.get("daily_sharpe_like") or 0.0)
+
+    dd_score = 1.0 - _clamp01(max_drawdown_ratio / dd_ratio_cap)
+    conc_score = 1.0 - _clamp01(pnl_top1_day_share / conc_cap)
+    sharpe_score = _clamp01(_tanh01(sharpe_like / 2.0))
+
+    window_score = 0.35 * profit_day_ratio + 0.35 * dd_score + 0.15 * conc_score + 0.15 * sharpe_score
+
+    if lifetime_score > 0:
+        stability_score = 0.70 * lifetime_score + 0.30 * window_score
+    else:
+        stability_score = window_score
+
+    return {
+        "stability_score": float(stability_score),
+        "lifetime_rate": float(lifetime_rate),
+        "recent_pnl_share": float(recent_pnl_share),
+        "recent_surge_ratio": float(recent_surge_ratio),
+        "profit_day_ratio": float(profit_day_ratio),
+        "max_drawdown_ratio": float(max_drawdown_ratio),
+        "pnl_top1_day_share": float(pnl_top1_day_share),
+        "daily_sharpe_like": float(sharpe_like),
+    }
+
+
 def _apply_filters(
     metrics: Dict[str, Any], config: Dict[str, Any]
 ) -> Tuple[bool, List[str], List[str]]:
@@ -296,6 +411,7 @@ def _build_features(
     costs: List[float] = []
     roi_values: List[float] = []
     prices: List[float] = []
+    daily_pnl: Dict[dt.date, float] = {}
 
     win_count = 0
     loss_count = 0
@@ -326,6 +442,9 @@ def _build_features(
 
         if ts is not None:
             timestamps.append(ts)
+            if pnl is not None:
+                day = ts.date()
+                daily_pnl[day] = daily_pnl.get(day, 0.0) + pnl
 
     action_timestamps: List[dt.datetime] = []
     for row in trade_action_rows:
@@ -355,6 +474,8 @@ def _build_features(
 
     window_days = float(config.get("window_days_default", 30))
     asof_time = None
+    start_time = None
+    end_time = None
     if summary_row:
         start_time, end_time = _extract_summary_times(summary_row)
         window_days = _calculate_window_days(start_time, end_time, window_days)
@@ -450,6 +571,53 @@ def _build_features(
     if asof_time is None:
         asof_time = dt.datetime.now(tz=dt.timezone.utc)
 
+    end_day = (end_time or asof_time).date()
+    if start_time:
+        start_day = start_time.date()
+    else:
+        back_days = int(max(1.0, float(window_days) + 0.9999))
+        start_day = (asof_time - dt.timedelta(days=back_days)).date()
+
+    total_days = (end_day - start_day).days + 1
+    if total_days <= 0:
+        total_days = 1
+
+    daily_series: List[float] = []
+    profit_days = 0
+    sum_daily = 0.0
+    for i in range(total_days):
+        day = start_day + dt.timedelta(days=i)
+        pnl = float(daily_pnl.get(day, 0.0))
+        daily_series.append(pnl)
+        sum_daily += pnl
+        if pnl > flat_eps:
+            profit_days += 1
+
+    profit_day_ratio = profit_days / float(total_days)
+
+    if total_days >= 2:
+        mean_daily = sum_daily / float(total_days)
+        var = sum((p - mean_daily) ** 2 for p in daily_series) / float(total_days)
+        std_daily = var ** 0.5
+    else:
+        mean_daily = sum_daily
+        std_daily = 0.0
+
+    daily_sharpe_like = mean_daily / (std_daily + 1e-9)
+
+    max_drawdown, drawdown_series = _compute_max_drawdown(daily_series)
+    drawdown_denom = max(abs(sum_daily), pos_sum, 1.0)
+    max_drawdown_ratio = max_drawdown / drawdown_denom
+
+    pos_sum = sum(max(p, 0.0) for p in daily_series)
+    top1 = max((max(p, 0.0) for p in daily_series), default=0.0)
+    if pos_sum <= 1e-9:
+        pnl_top1_day_share = 1.0
+    else:
+        pnl_top1_day_share = top1 / pos_sum
+
+    ulcer_index = _compute_ulcer_index(drawdown_series)
+
     near_expiry_value = 0.0
     for row in open_rows:
         end_date = _parse_datetime(row.get("end_date", ""))
@@ -522,6 +690,12 @@ def _build_features(
         "trade_actions_actions": trade_actions_actions,
         "leaderboard_month_pnl": leaderboard_month_pnl,
         "action_timing_count": len(action_timestamps),
+        "profit_day_ratio": profit_day_ratio,
+        "daily_sharpe_like": daily_sharpe_like,
+        "max_drawdown": max_drawdown,
+        "max_drawdown_ratio": max_drawdown_ratio,
+        "pnl_top1_day_share": pnl_top1_day_share,
+        "ulcer_index": ulcer_index,
     }
 
     return metrics
@@ -565,6 +739,8 @@ def _build_copy_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]
     trades_per_day = metrics.get("trades_per_day") or 0.0
     burstiness = metrics.get("burstiness") or 0.0
     near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
+    recent_pnl_share = metrics.get("recent_pnl_share") or 0.0
+    recent_surge_ratio = metrics.get("recent_surge_ratio") or 0.0
 
     minute_burst_threshold = float(rules.get("minute_burst_ratio_high", 0.25))
     interval_fast = float(rules.get("interval_median_minutes_fast", 2))
@@ -621,6 +797,10 @@ def _build_notes(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> 
         notes.append("日均交易偏多")
     if burstiness >= burstiness_high:
         notes.append("日内爆发度高")
+    if recent_pnl_share >= 0.55:
+        notes.append("近月收益占比高(爆发型?)")
+    if recent_surge_ratio >= 4.0:
+        notes.append("近月收益远高于历史")
 
     return "；".join(notes[:3])
 
@@ -673,7 +853,22 @@ def main() -> None:
         )
         row: Dict[str, Any] = {"user": user}
         row.update(metrics)
-        row["copy_score"] = _compute_copy_score(row, config)
+        base_copy_score = _compute_copy_score(row, config)
+        row["base_copy_score"] = base_copy_score
+
+        stability = _compute_stability_score(row, config)
+        row.update(stability)
+
+        stability_weight = float(config.get("stability_weight", 0.55))
+        if stability_weight < 0:
+            stability_weight = 0.0
+        if stability_weight > 1:
+            stability_weight = 1.0
+
+        final_score = (1.0 - stability_weight) * base_copy_score + stability_weight * row.get(
+            "stability_score", 0.0
+        )
+        row["copy_score"] = final_score
 
         passed, failures, warnings = _apply_filters(row, config)
         row["passed_filter"] = passed
