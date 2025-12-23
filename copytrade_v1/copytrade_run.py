@@ -10,7 +10,13 @@ from typing import Any, Dict, Optional, Set
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 
 from ct_data import fetch_positions_norm
-from ct_exec import apply_actions, cancel_expired_only, get_orderbook, reconcile_one
+from ct_exec import (
+    apply_actions,
+    cancel_expired_only,
+    fetch_open_orders_norm,
+    get_orderbook,
+    reconcile_one,
+)
 from ct_resolver import resolve_token_id
 from ct_risk import risk_check
 from ct_state import load_state, save_state
@@ -82,6 +88,38 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _sync_open_orders_state(
+    prev: Dict[str, Any],
+    remote: list[dict],
+    now_ts: int,
+) -> Dict[str, Any]:
+    existing_by_id: Dict[str, dict] = {}
+    for orders in (prev or {}).values():
+        for order in orders or []:
+            oid = str(order.get("order_id") or "")
+            if oid:
+                existing_by_id[oid] = order
+
+    new_map: Dict[str, list[dict]] = {}
+    for order in remote:
+        token_id = str(order.get("token_id") or "")
+        oid = str(order.get("order_id") or "")
+        if not token_id or not oid:
+            continue
+        prev_order = existing_by_id.get(oid, {})
+        ts = int(prev_order.get("ts") or order.get("created_ts") or now_ts)
+        new_map.setdefault(token_id, []).append(
+            {
+                "order_id": oid,
+                "side": order.get("side") or prev_order.get("side"),
+                "price": order.get("price") if order.get("price") is not None else prev_order.get("price"),
+                "size": order.get("size") if order.get("size") is not None else prev_order.get("size"),
+                "ts": ts,
+            }
+        )
+    return new_map
+
+
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
@@ -105,6 +143,16 @@ def main() -> None:
 
     while True:
         now_ts = int(time.time())
+        if not args.dry_run:
+            try:
+                remote_orders = fetch_open_orders_norm(clob_client)
+                state["open_orders"] = _sync_open_orders_state(
+                    state.get("open_orders", {}),
+                    remote_orders,
+                    now_ts,
+                )
+            except Exception as exc:
+                print(f"[WARN] sync open orders failed: {exc}")
 
         target_pos, target_info = fetch_positions_norm(
             data_client,
