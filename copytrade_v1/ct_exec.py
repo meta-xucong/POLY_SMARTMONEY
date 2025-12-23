@@ -36,48 +36,55 @@ def _normalize_orderbook_payload(book: Any) -> Optional[Mapping[str, Any]]:
 
 
 def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
-    best_bid: Optional[float] = None
+    tid = str(token_id)
+
     best_ask: Optional[float] = None
+    best_bid: Optional[float] = None
 
-    get_price = getattr(client, "get_price", None)
-    if callable(get_price):
-        try:
-            best_ask = safe_float(get_price(str(token_id), side="BUY"))
-        except Exception:
-            best_ask = None
-        try:
-            best_bid = safe_float(get_price(str(token_id), side="SELL"))
-        except Exception:
-            best_bid = None
+    try:
+        best_ask = safe_float(client.get_price(tid, side="BUY"))
+    except Exception:
+        pass
+    try:
+        best_bid = safe_float(client.get_price(tid, side="SELL"))
+    except Exception:
+        pass
 
-    if best_bid is not None or best_ask is not None:
+    if best_ask is not None or best_bid is not None:
         return {"best_bid": best_bid, "best_ask": best_ask}
 
-    get_order_book = getattr(client, "get_order_book", None)
-    if not callable(get_order_book):
-        get_order_book = getattr(client, "get_orderbook", None)
-    if callable(get_order_book):
-        try:
-            book = get_order_book(str(token_id))
-            payload = _normalize_orderbook_payload(book)
-            if payload is not None:
-                bids = payload.get("bids") or []
-                asks = payload.get("asks") or []
-                if isinstance(bids, Iterable) and not isinstance(bids, (str, bytes, bytearray)):
-                    best_bid = _best_from_levels(bids, pick_max=True)
-                if isinstance(asks, Iterable) and not isinstance(asks, (str, bytes, bytearray)):
-                    best_ask = _best_from_levels(asks, pick_max=False)
-        except Exception:
-            best_bid = None
-            best_ask = None
+    try:
+        book = client.get_order_book(tid)
+        payload: Any = book
+        if hasattr(book, "dict"):
+            payload = book.dict()
+        elif isinstance(book, dict):
+            payload = book
 
-    if best_bid is not None or best_ask is not None:
+        bids = payload.get("bids", []) if isinstance(payload, dict) else getattr(book, "bids", [])
+        asks = payload.get("asks", []) if isinstance(payload, dict) else getattr(book, "asks", [])
+
+        def _best(levels: Any, pick_max: bool) -> Optional[float]:
+            prices: list[float] = []
+            if isinstance(levels, list):
+                for level in levels:
+                    if isinstance(level, dict):
+                        price = safe_float(level.get("price"))
+                    elif isinstance(level, (list, tuple)) and level:
+                        price = safe_float(level[0])
+                    else:
+                        price = None
+                    if price is not None:
+                        prices.append(float(price))
+            if not prices:
+                return None
+            return max(prices) if pick_max else min(prices)
+
+        best_bid = _best(bids, pick_max=True)
+        best_ask = _best(asks, pick_max=False)
         return {"best_bid": best_bid, "best_ask": best_ask}
-
-    return {
-        "best_bid": best_bid,
-        "best_ask": best_ask,
-    }
+    except Exception:
+        return {"best_bid": None, "best_ask": None}
 
 
 def reconcile_one(
@@ -115,7 +122,7 @@ def reconcile_one(
         slice_max = abs_delta
 
     size = min(abs_delta, slice_max)
-    if slice_min > 0 and abs_delta > slice_min and size < slice_min:
+    if slice_min > 0 and abs_delta >= slice_min and size < slice_min:
         size = slice_min
 
     if size <= 0:
@@ -449,36 +456,39 @@ def _normalize_open_order(order: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_open_orders_norm(
-    client: Any,
-    asset_id: Optional[str] = None,
-    market: Optional[str] = None,
-    order_id: Optional[str] = None,
-) -> List[Dict[str, Any]]:
-    raw = None
+def fetch_open_orders_norm(client: Any) -> List[Dict[str, Any]]:
+    from py_clob_client.clob_types import OpenOrderParams
+
     try:
-        from py_clob_client.clob_types import OpenOrderParams
-
-        params = OpenOrderParams(id=order_id, market=market, asset_id=asset_id)
-        try:
-            raw = client.get_orders(params)
-        except TypeError:
-            raw = client.get_orders()
+        orders = client.get_orders(OpenOrderParams())
     except Exception:
-        for name in ("get_open_orders", "getOpenOrders", "open_orders"):
-            fn = getattr(client, name, None)
-            if fn is None:
-                continue
-            try:
-                raw = fn()
-                break
-            except Exception:
-                continue
+        try:
+            orders = client.get_orders()
+        except Exception:
+            return []
 
-    orders = _coerce_list(raw)
+    if not isinstance(orders, list):
+        return []
+
     normalized: List[Dict[str, Any]] = []
     for order in orders:
-        parsed = _normalize_open_order(order)
-        if parsed is not None:
-            normalized.append(parsed)
+        if not isinstance(order, dict):
+            continue
+        order_id = order.get("id")
+        token_id = order.get("asset_id")
+        side = order.get("side")
+        price = safe_float(order.get("price"))
+        size = safe_float(order.get("original_size"))
+        ts = order.get("created_at")
+        if order_id and token_id and side and price is not None and size is not None:
+            normalized.append(
+                {
+                    "order_id": str(order_id),
+                    "token_id": str(token_id),
+                    "side": str(side),
+                    "price": float(price),
+                    "size": float(size),
+                    "ts": int(ts) if isinstance(ts, (int, float)) else None,
+                }
+            )
     return normalized
