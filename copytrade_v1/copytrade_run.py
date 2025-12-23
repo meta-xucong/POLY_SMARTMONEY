@@ -434,7 +434,27 @@ def main() -> None:
             desired = desired_by_token_id.get(token_id, 0.0)
             my_shares = my_by_token_id.get(token_id, 0.0)
 
-            if abs(desired - my_shares) <= float(cfg.get("deadband_shares") or 0):
+            deadband = float(cfg.get("deadband_shares") or 0)
+            if abs(desired - my_shares) <= deadband:
+                existing = state.get("open_orders", {}).get(token_id, [])
+                if existing:
+                    cancels = [
+                        {"type": "cancel", "order_id": o.get("order_id")}
+                        for o in existing
+                        if o.get("order_id")
+                    ]
+                    if cancels:
+                        updated_orders = apply_actions(
+                            clob_client,
+                            cancels,
+                            existing,
+                            now_ts,
+                            args.dry_run,
+                        )
+                        if updated_orders:
+                            state.setdefault("open_orders", {})[token_id] = updated_orders
+                        else:
+                            state.get("open_orders", {}).pop(token_id, None)
                 continue
 
             if token_id in orderbooks:
