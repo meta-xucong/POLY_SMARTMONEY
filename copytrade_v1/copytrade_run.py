@@ -361,6 +361,24 @@ def main() -> None:
         for token_id in reconcile_set:
             if skip_closed:
                 if token_id in ignored:
+                    if token_id in state.get("open_orders", {}) and state["open_orders"].get(token_id):
+                        cancels = [
+                            {"type": "cancel", "order_id": o.get("order_id")}
+                            for o in state["open_orders"].get(token_id, [])
+                            if o.get("order_id")
+                        ]
+                        if cancels:
+                            updated_orders = apply_actions(
+                                clob_client,
+                                cancels,
+                                state["open_orders"].get(token_id, []),
+                                now_ts,
+                                args.dry_run,
+                            )
+                            if updated_orders:
+                                state.setdefault("open_orders", {})[token_id] = updated_orders
+                            else:
+                                state.get("open_orders", {}).pop(token_id, None)
                     continue
 
                 cached = status_cache.get(token_id) or {}

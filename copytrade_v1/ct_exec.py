@@ -42,11 +42,19 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
     best_bid: Optional[float] = None
 
     try:
-        best_ask = safe_float(client.get_price(tid, side="BUY"))
+        price = client.get_price(tid, side="BUY")
+        if isinstance(price, dict):
+            best_ask = safe_float(price.get("price"))
+        else:
+            best_ask = safe_float(price)
     except Exception:
         pass
     try:
-        best_bid = safe_float(client.get_price(tid, side="SELL"))
+        price = client.get_price(tid, side="SELL")
+        if isinstance(price, dict):
+            best_bid = safe_float(price.get("price"))
+        else:
+            best_bid = safe_float(price)
     except Exception:
         pass
 
@@ -216,27 +224,22 @@ def _extract_order_id(response: object) -> Optional[str]:
 def cancel_order(client: Any, order_id: str) -> Optional[object]:
     if not order_id:
         return None
-    candidates = []
-    for attr in ("cancel", "cancel_order", "cancel_orders"):
-        method = getattr(client, attr, None)
-        if callable(method):
-            candidates.append(method)
+    if callable(getattr(client, "cancel", None)):
+        return client.cancel(order_id=order_id)
+    if callable(getattr(client, "cancel_order", None)):
+        return client.cancel_order(order_id)
+    if callable(getattr(client, "cancel_orders", None)):
+        return client.cancel_orders([order_id])
+
     private = getattr(client, "private", None)
     if private is not None:
-        for attr in ("cancel", "cancel_order", "cancel_orders"):
-            method = getattr(private, attr, None)
-            if callable(method):
-                candidates.append(method)
+        if callable(getattr(private, "cancel", None)):
+            return private.cancel(order_id=order_id)
+        if callable(getattr(private, "cancel_order", None)):
+            return private.cancel_order(order_id)
+        if callable(getattr(private, "cancel_orders", None)):
+            return private.cancel_orders([order_id])
 
-    last_error: Optional[Exception] = None
-    for method in candidates:
-        try:
-            return method(order_id)
-        except Exception as exc:
-            last_error = exc
-            continue
-    if last_error is not None:
-        raise last_error
     return None
 
 
@@ -460,35 +463,27 @@ def fetch_open_orders_norm(client: Any) -> List[Dict[str, Any]]:
     from py_clob_client.clob_types import OpenOrderParams
 
     try:
-        orders = client.get_orders(OpenOrderParams())
+        payload = client.get_orders(OpenOrderParams())
     except Exception:
         try:
-            orders = client.get_orders()
+            payload = client.get_orders()
         except Exception:
             return []
 
-    if not isinstance(orders, list):
-        return []
-
+    orders = _coerce_list(payload)
     normalized: List[Dict[str, Any]] = []
     for order in orders:
-        if not isinstance(order, dict):
+        parsed = _normalize_open_order(order)
+        if not parsed:
             continue
-        order_id = order.get("id")
-        token_id = order.get("asset_id")
-        side = order.get("side")
-        price = safe_float(order.get("price"))
-        size = safe_float(order.get("original_size"))
-        ts = order.get("created_at")
-        if order_id and token_id and side and price is not None and size is not None:
-            normalized.append(
-                {
-                    "order_id": str(order_id),
-                    "token_id": str(token_id),
-                    "side": str(side),
-                    "price": float(price),
-                    "size": float(size),
-                    "ts": int(ts) if isinstance(ts, (int, float)) else None,
-                }
-            )
-    return normalized
+        normalized.append(
+            {
+                "order_id": parsed["order_id"],
+                "token_id": parsed["token_id"],
+                "side": parsed["side"],
+                "price": float(parsed["price"]) if parsed["price"] is not None else None,
+                "size": float(parsed["size"]) if parsed["size"] is not None else None,
+                "ts": parsed["created_ts"],
+            }
+        )
+    return [item for item in normalized if item["price"] is not None and item["size"] is not None]
