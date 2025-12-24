@@ -138,6 +138,7 @@ def reconcile_one(
 
     mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
     size: float = 0.0
+    target_order_usd: Optional[float] = None
 
     if mode == "auto_usd":
         ref_price = _mid_price(orderbook)
@@ -158,11 +159,8 @@ def reconcile_one(
         if order_usd > max_usd:
             order_usd = max_usd
 
-        size = min(abs_delta, order_usd / ref_price)
-
-        max_shares_cap = float(cfg.get("max_order_shares_cap") or 5000.0)
-        if size > max_shares_cap:
-            size = max_shares_cap
+        target_order_usd = order_usd
+        size = order_usd / ref_price
     else:
         slice_min = float(cfg.get("slice_min") or 0)
         slice_max = float(cfg.get("slice_max") or abs_delta)
@@ -172,9 +170,6 @@ def reconcile_one(
         size = min(abs_delta, slice_max)
         if slice_min > 0 and abs_delta > slice_min and size < slice_min:
             size = slice_min
-
-    if size <= 0:
-        return actions
 
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
@@ -208,6 +203,20 @@ def reconcile_one(
             return actions
 
     if price is None or price <= 0:
+        return actions
+
+    if mode == "auto_usd" and target_order_usd is not None:
+        size = target_order_usd / price
+
+    max_shares_cap = float(cfg.get("max_order_shares_cap") or 5000.0)
+    if size > max_shares_cap:
+        size = max_shares_cap
+
+    allow_short = bool(cfg.get("allow_short"))
+    if side == "SELL" and not allow_short:
+        size = min(size, my_shares)
+
+    if size <= 0:
         return actions
 
     actions.append(

@@ -344,21 +344,6 @@ def main() -> None:
                     status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
-        total_notional = 0.0
-        if float(cfg.get("max_notional_total") or 0) > 0:
-            for token_id in reconcile_set:
-                if skip_closed:
-                    cached = status_cache.get(token_id)
-                    if token_id in ignored or (cached and cached.get("tradeable") is not True):
-                        continue
-                ob = get_orderbook(clob_client, token_id)
-                orderbooks[token_id] = ob
-                ref_price = _mid_price(ob)
-                if ref_price is None:
-                    continue
-                desired = desired_by_token_id.get(token_id, 0.0)
-                total_notional += abs(desired) * ref_price
-            cfg["_total_notional"] = total_notional
 
         mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
         min_usd = float(cfg.get("min_order_usd") or 5.0)
@@ -472,11 +457,6 @@ def main() -> None:
                 delta_usd_samples.append(delta_shares * ref_price)
 
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
-            ok, reason = risk_check(token_key, desired, my_shares, ref_price, cfg)
-            if not ok:
-                print(f"[RISK] {token_key} 拒绝: {reason}")
-                continue
-
             actions = reconcile_one(
                 token_id,
                 desired,
@@ -488,6 +468,25 @@ def main() -> None:
             )
             if not actions:
                 continue
+            filtered_actions = []
+            for act in actions:
+                if act.get("type") != "place":
+                    filtered_actions.append(act)
+                    continue
+                ok, reason = risk_check(
+                    token_key,
+                    float(act.get("size") or 0.0),
+                    my_shares,
+                    float(act.get("price") or ref_price or 0.0),
+                    cfg,
+                )
+                if not ok:
+                    print(f"[RISK] {token_key} 拒绝: {reason}")
+                    continue
+                filtered_actions.append(act)
+            if not filtered_actions:
+                continue
+            actions = filtered_actions
             print(f"[ACTION] token_id={token_id} -> {actions}")
 
             updated_orders = apply_actions(
