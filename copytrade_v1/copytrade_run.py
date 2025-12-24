@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
 import re
 import sys
@@ -75,6 +76,51 @@ def _get_env_first(keys: list[str]) -> Optional[str]:
         if env_value and env_value.strip():
             return env_value.strip()
     return None
+
+
+def _shorten_address(address: str) -> str:
+    text = address.strip()
+    if len(text) <= 12:
+        return text
+    return f"{text[:6]}..{text[-4:]}"
+
+
+def _setup_logging(cfg: Dict[str, Any], target_address: str) -> logging.Logger:
+    log_dir = Path(cfg.get("log_dir") or "logs")
+    log_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    pid = os.getpid()
+    short = _shorten_address(target_address)
+    log_path = log_dir / f"copytrade_{short}_{timestamp}_pid{pid}.log"
+
+    level_name = str(cfg.get("log_level") or "INFO").upper()
+    level = logging.INFO
+    if level_name in logging._nameToLevel:
+        level = logging._nameToLevel[level_name]
+
+    root_logger = logging.getLogger()
+    root_logger.setLevel(level)
+    root_logger.handlers.clear()
+
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    stream_handler = logging.StreamHandler()
+    stream_handler.setLevel(level)
+    stream_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    root_logger.addHandler(stream_handler)
+    root_logger.addHandler(file_handler)
+
+    logger = logging.getLogger(__name__)
+    logger.info("日志初始化完成: %s", log_path)
+    return logger
 
 
 def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str:
@@ -166,12 +212,16 @@ def main() -> None:
         ],
     )
 
+    logger = _setup_logging(cfg, cfg["target_address"])
+
     state = load_state(args.state)
     state.setdefault("sizing", {})
     state["sizing"].setdefault("ema_delta_usd", None)
-    print(
-        "[CFG] target="
-        f"{cfg['target_address']} my={cfg['my_address']} ratio={cfg.get('follow_ratio')}"
+    logger.info(
+        "[CFG] target=%s my=%s ratio=%s",
+        cfg["target_address"],
+        cfg["my_address"],
+        cfg.get("follow_ratio"),
     )
     state["target"] = cfg.get("target_address")
     state["my_address"] = cfg.get("my_address")
@@ -183,6 +233,11 @@ def main() -> None:
     state.setdefault("bootstrapped", False)
     state.setdefault("ignored_tokens", {})
     state.setdefault("market_status_cache", {})
+    state.setdefault("target_last_shares", {})
+    state.setdefault("target_last_seen_ts", {})
+    state.setdefault("target_missing_streak", {})
+    state.setdefault("cooldown_until", {})
+    state.setdefault("target_last_event_ts", {})
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("token_map"), dict):
@@ -197,6 +252,16 @@ def main() -> None:
         state["ignored_tokens"] = {}
     if not isinstance(state.get("market_status_cache"), dict):
         state["market_status_cache"] = {}
+    if not isinstance(state.get("target_last_shares"), dict):
+        state["target_last_shares"] = {}
+    if not isinstance(state.get("target_last_seen_ts"), dict):
+        state["target_last_seen_ts"] = {}
+    if not isinstance(state.get("target_missing_streak"), dict):
+        state["target_missing_streak"] = {}
+    if not isinstance(state.get("cooldown_until"), dict):
+        state["cooldown_until"] = {}
+    if not isinstance(state.get("target_last_event_ts"), dict):
+        state["target_last_event_ts"] = {}
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -225,7 +290,7 @@ def main() -> None:
                 )
             state["open_orders"] = remote_by_token
         except Exception as exc:
-            print(f"[WARN] sync open orders failed: {exc}")
+            logger.warning("[WARN] sync open orders failed: %s", exc)
 
         target_pos, target_info = fetch_positions_norm(
             data_client,
@@ -233,7 +298,7 @@ def main() -> None:
             size_threshold,
         )
         if not target_info.get("ok") or target_info.get("incomplete"):
-            print("[SAFE] target positions 不完整，仅撤单")
+            logger.warning("[SAFE] target positions 不完整，仅撤单")
             state["open_orders"] = cancel_expired_only(
                 clob_client,
                 state.get("open_orders", {}),
@@ -251,7 +316,7 @@ def main() -> None:
             0.0,
         )
         if not my_info.get("ok") or my_info.get("incomplete"):
-            print("[SAFE] my positions 不完整，仅撤单")
+            logger.warning("[SAFE] my positions 不完整，仅撤单")
             state["open_orders"] = cancel_expired_only(
                 clob_client,
                 state.get("open_orders", {}),
@@ -272,7 +337,7 @@ def main() -> None:
             state["seen_token_keys"] = sorted(seen)
             state["tracked_token_keys"] = sorted(tracked)
             state["bootstrapped"] = True
-            print(f"[BOOT] 已忽略启动时存量 topics: {len(token_keys_now)}")
+            logger.info("[BOOT] 已忽略启动时存量 topics: %s", len(token_keys_now))
             save_state(args.state, state)
             if bootstrap_skip:
                 time.sleep(poll_interval)
@@ -281,21 +346,17 @@ def main() -> None:
         if follow_new_only:
             new_keys = set(token_keys_now) - seen
             if new_keys:
-                print(f"[NEW] 发现新 topics: {len(new_keys)}，开始跟随")
+                logger.info("[NEW] 发现新 topics: %s，开始跟随", len(new_keys))
                 tracked |= new_keys
                 seen |= new_keys
                 state["seen_token_keys"] = sorted(seen)
                 state["tracked_token_keys"] = sorted(tracked)
 
-        desired_by_token_key: Dict[str, float] = {}
-        for pos in target_pos:
-            token_key = pos["token_key"]
-            if follow_new_only and token_key not in tracked:
-                continue
-            desired_by_token_key[token_key] = float(cfg["follow_ratio"]) * float(pos["size"])
+        token_key_by_token_id: Dict[str, str] = {
+            token_id: token_key for token_key, token_id in state.get("token_map", {}).items()
+        }
 
-        desired_by_token_id: Dict[str, float] = {}
-        token_key_by_token_id: Dict[str, str] = {}
+        target_shares_now_by_token_id: Dict[str, float] = {}
         for pos in target_pos:
             token_key = pos["token_key"]
             if follow_new_only and token_key not in tracked:
@@ -303,9 +364,9 @@ def main() -> None:
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
-                print(f"[WARN] resolver 失败: {token_key} -> {exc}")
+                logger.warning("[WARN] resolver 失败: %s -> %s", token_key, exc)
                 continue
-            desired_by_token_id[token_id] = desired_by_token_key[token_key]
+            target_shares_now_by_token_id[token_id] = float(pos["size"])
             token_key_by_token_id[token_id] = token_key
 
         my_by_token_id: Dict[str, float] = {}
@@ -316,12 +377,13 @@ def main() -> None:
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
-                print(f"[WARN] resolver 失败(自身): {token_key} -> {exc}")
+                logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
                 continue
             my_by_token_id[token_id] = float(pos["size"])
             token_key_by_token_id.setdefault(token_id, token_key)
 
-        reconcile_set: Set[str] = set(desired_by_token_id)
+        reconcile_set: Set[str] = set(target_shares_now_by_token_id)
+        reconcile_set.update(state.get("target_last_shares", {}).keys())
         reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
 
@@ -349,6 +411,10 @@ def main() -> None:
         min_usd = float(cfg.get("min_order_usd") or 5.0)
         max_usd = float(cfg.get("max_order_usd") or 25.0)
         target_mid_usd = (min_usd + max_usd) / 2.0
+        max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
+        cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
+        debug_token_ids = {str(token_id) for token_id in (cfg.get("debug_token_ids") or [])}
+        eps = float(cfg.get("delta_eps") or 1e-9)
 
         ema = state.get("sizing", {}).get("ema_delta_usd")
         if ema is None or ema <= 0:
@@ -409,38 +475,64 @@ def main() -> None:
                                 state.get("open_orders", {}).pop(token_id, None)
                     meta = cached.get("meta") or {}
                     slug = meta.get("slug") or ""
-                    print(f"[SKIP] closed/inactive token_id={token_id} slug={slug}")
+                    logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
                     continue
 
                 if tradeable is None:
-                    print(f"[WARN] market 状态未知(稍后重试): token_id={token_id}")
+                    logger.warning("[WARN] market 状态未知(稍后重试): token_id=%s", token_id)
                     continue
 
-            desired = desired_by_token_id.get(token_id, 0.0)
+            t_now_present = token_id in target_shares_now_by_token_id
+            t_now = target_shares_now_by_token_id.get(token_id) if t_now_present else None
+            t_last = state.get("target_last_shares", {}).get(token_id)
             my_shares = my_by_token_id.get(token_id, 0.0)
+            open_orders = state.get("open_orders", {}).get(token_id, [])
+            open_orders_count = len(open_orders)
+            missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
 
-            deadband = float(cfg.get("deadband_shares") or 0)
-            if abs(desired - my_shares) <= deadband:
-                existing = state.get("open_orders", {}).get(token_id, [])
-                if existing:
-                    cancels = [
-                        {"type": "cancel", "order_id": o.get("order_id")}
-                        for o in existing
-                        if o.get("order_id")
-                    ]
-                    if cancels:
-                        updated_orders = apply_actions(
-                            clob_client,
-                            cancels,
-                            existing,
-                            now_ts,
-                            args.dry_run,
-                        )
-                        if updated_orders:
-                            state.setdefault("open_orders", {})[token_id] = updated_orders
-                        else:
-                            state.get("open_orders", {}).pop(token_id, None)
+            if not t_now_present:
+                missing_streak += 1
+                state.setdefault("target_missing_streak", {})[token_id] = missing_streak
+                if token_id in debug_token_ids or my_shares != 0 or open_orders_count > 0:
+                    legacy_desired = float(cfg.get("follow_ratio") or 0.0) * 0.0
+                    legacy_delta = legacy_desired - my_shares
+                    logger.info(
+                        "[DBG] token_id=%s missing=True missing_streak=%s t_now=None t_last=%s "
+                        "my_shares=%s open_orders_count=%s legacy_desired=%s legacy_delta=%s",
+                        token_id,
+                        missing_streak,
+                        t_last,
+                        my_shares,
+                        open_orders_count,
+                        legacy_desired,
+                        legacy_delta,
+                    )
                 continue
+
+            state.setdefault("target_missing_streak", {})[token_id] = 0
+            state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+
+            if t_last is None:
+                state.setdefault("target_last_shares", {})[token_id] = float(t_now)
+                continue
+
+            d_target = float(t_now) - float(t_last)
+            state.setdefault("target_last_shares", {})[token_id] = float(t_now)
+            if abs(d_target) <= eps:
+                continue
+
+            if cooldown_sec > 0:
+                cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
+                if now_ts < cooldown_until:
+                    logger.info(
+                        "[COOLDOWN] token_id=%s until=%s d_target=%s",
+                        token_id,
+                        cooldown_until,
+                        d_target,
+                    )
+                    continue
+
+            state.setdefault("target_last_event_ts", {})[token_id] = now_ts
 
             if token_id in orderbooks:
                 ob = orderbooks[token_id]
@@ -449,20 +541,32 @@ def main() -> None:
 
             ref_price = _mid_price(ob)
             if ref_price is None:
-                print(f"[WARN] 无法获取盘口: token_id={token_id}")
+                logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
                 continue
 
+            d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
+            if max_position_usd_per_token > 0:
+                cap_shares = max_position_usd_per_token / ref_price
+            else:
+                cap_shares = float("inf")
+
+            my_target = my_shares + d_my
+            if my_target < 0:
+                my_target = 0.0
+            if my_target > cap_shares:
+                my_target = cap_shares
+
             if mode == "auto_usd":
-                delta_shares = abs(desired - my_shares)
+                delta_shares = abs(my_target - my_shares)
                 delta_usd_samples.append(delta_shares * ref_price)
 
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
             actions = reconcile_one(
                 token_id,
-                desired,
+                my_target,
                 my_shares,
                 ob,
-                state.get("open_orders", {}).get(token_id, []),
+                open_orders,
                 now_ts,
                 cfg,
             )
@@ -481,18 +585,18 @@ def main() -> None:
                     cfg,
                 )
                 if not ok:
-                    print(f"[RISK] {token_key} 拒绝: {reason}")
+                    logger.warning("[RISK] %s 拒绝: %s", token_key, reason)
                     continue
                 filtered_actions.append(act)
             if not filtered_actions:
                 continue
             actions = filtered_actions
-            print(f"[ACTION] token_id={token_id} -> {actions}")
+            logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
             updated_orders = apply_actions(
                 clob_client,
                 actions,
-                state.get("open_orders", {}).get(token_id, []),
+                open_orders,
                 now_ts,
                 args.dry_run,
             )
@@ -500,6 +604,9 @@ def main() -> None:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
             else:
                 state.get("open_orders", {}).pop(token_id, None)
+
+            if cooldown_sec > 0 and actions:
+                state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
 
         if mode == "auto_usd" and delta_usd_samples:
             delta_usd_samples.sort()

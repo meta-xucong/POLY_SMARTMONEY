@@ -13,11 +13,18 @@
   "order_size_mode": "auto_usd",
   "min_order_usd": 5,
   "max_order_usd": 25,
+  "max_position_usd_per_token": 25,
 
   "order_ttl_sec": 90,
   "tick_size": 0.001,
 
   "maker_only": true,
+
+  "cooldown_sec_per_token": 60,
+  "missing_timeout_sec": 600,
+  "debug_token_ids": [],
+  "log_dir": "logs",
+  "log_level": "INFO",
 
   "max_notional_per_token": 500,
   "max_notional_total": 2000,
