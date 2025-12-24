@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ct_utils import round_to_tick, safe_float
+
+
+logger = logging.getLogger(__name__)
 
 
 def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
@@ -327,7 +331,7 @@ def apply_actions(
                 cancel_order(client, str(order_id))
                 updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
             except Exception as exc:
-                print(f"[WARN] cancel_order failed order_id={order_id}: {exc}")
+                logger.warning("cancel_order failed order_id=%s: %s", order_id, exc)
             continue
 
     for action in actions:
@@ -353,7 +357,7 @@ def apply_actions(
                 size=float(action.get("size")),
             )
         except Exception as exc:
-            print(f"[WARN] place_order failed token_id={action.get('token_id')}: {exc}")
+            logger.warning("place_order failed token_id=%s: %s", action.get("token_id"), exc)
             continue
         order_id = response.get("order_id")
         if order_id:
@@ -388,8 +392,10 @@ def cancel_expired_only(
                         cancel_order(client, str(order_id))
                         continue
                     except Exception as exc:
-                        print(
-                            f"[WARN] cancel_order failed(order_id={order_id}) in cancel_expired_only: {exc}"
+                        logger.warning(
+                            "cancel_order failed(order_id=%s) in cancel_expired_only: %s",
+                            order_id,
+                            exc,
                         )
                         keep.append(order)
                         continue

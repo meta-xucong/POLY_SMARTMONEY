@@ -9,6 +9,11 @@ DEFAULT_STATE: Dict[str, Any] = {
     "token_map": {},
     "open_orders": {},
     "last_sync_ts": 0,
+    "target_last_shares": {},
+    "target_last_seen_ts": {},
+    "target_missing_streak": {},
+    "cooldown_until": {},
+    "target_last_event_ts": {},
 }
 
 
@@ -27,6 +32,16 @@ def load_state(path: str) -> Dict[str, Any]:
         state["token_map"] = {}
     if "open_orders" not in state or not isinstance(state["open_orders"], dict):
         state["open_orders"] = {}
+    if "target_last_shares" not in state or not isinstance(state["target_last_shares"], dict):
+        state["target_last_shares"] = {}
+    if "target_last_seen_ts" not in state or not isinstance(state["target_last_seen_ts"], dict):
+        state["target_last_seen_ts"] = {}
+    if "target_missing_streak" not in state or not isinstance(state["target_missing_streak"], dict):
+        state["target_missing_streak"] = {}
+    if "cooldown_until" not in state or not isinstance(state["cooldown_until"], dict):
+        state["cooldown_until"] = {}
+    if "target_last_event_ts" not in state or not isinstance(state["target_last_event_ts"], dict):
+        state["target_last_event_ts"] = {}
     return state
 
 
