@@ -553,7 +553,6 @@ def main() -> None:
                     t_now = 0.0
                     treating_missing_as_zero = True
                     state.setdefault("target_missing_streak", {})[token_id] = 0
-                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
                 missing = t_now is None
                 if (missing and (my_shares > 0 or open_orders_count > 0)) or (
                     token_id in debug_token_ids
