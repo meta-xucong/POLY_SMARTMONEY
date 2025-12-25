@@ -172,6 +172,16 @@ def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
     return None
 
 
+def _maybe_update_target_last(
+    state: Dict[str, Any],
+    token_id: str,
+    t_now: Optional[float],
+    should_update: bool,
+) -> None:
+    if should_update and t_now is not None:
+        state.setdefault("target_last_shares", {})[token_id] = float(t_now)
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Polymarket Copytrade v1")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG_PATH))
@@ -532,13 +542,17 @@ def main() -> None:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
+            should_update_last = t_now_present
             if t_last is None:
-                state.setdefault("target_last_shares", {})[token_id] = float(t_now)
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                continue
+
+            if t_now is None:
                 continue
 
             d_target = float(t_now) - float(t_last)
-            state.setdefault("target_last_shares", {})[token_id] = float(t_now)
             if abs(d_target) <= eps:
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
             desired_side = "BUY" if d_target > 0 else "SELL"
@@ -582,6 +596,7 @@ def main() -> None:
                         cooldown_until,
                         d_target,
                     )
+                    _maybe_update_target_last(state, token_id, t_now, should_update_last)
                     continue
 
             state.setdefault("target_last_event_ts", {})[token_id] = now_ts
@@ -594,6 +609,7 @@ def main() -> None:
             ref_price = _mid_price(ob)
             if ref_price is None:
                 logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
             d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
@@ -623,6 +639,7 @@ def main() -> None:
                 cfg,
             )
             if not actions:
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             filtered_actions = []
             for act in actions:
@@ -641,6 +658,7 @@ def main() -> None:
                     continue
                 filtered_actions.append(act)
             if not filtered_actions:
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             actions = filtered_actions
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
@@ -659,6 +677,8 @@ def main() -> None:
 
             if cooldown_sec > 0 and actions:
                 state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
+
+            _maybe_update_target_last(state, token_id, t_now, should_update_last)
 
         if mode == "auto_usd" and delta_usd_samples:
             delta_usd_samples.sort()
