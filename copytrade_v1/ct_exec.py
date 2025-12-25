@@ -514,16 +514,16 @@ def _normalize_open_order(order: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_open_orders_norm(client: Any) -> List[Dict[str, Any]]:
+def fetch_open_orders_norm(client: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
     from py_clob_client.clob_types import OpenOrderParams
 
     try:
         payload = client.get_orders(OpenOrderParams())
-    except Exception:
+    except Exception as exc:
         try:
             payload = client.get_orders()
-        except Exception:
-            return []
+        except Exception as exc2:
+            return [], False, str(exc2 or exc)
 
     orders = _coerce_list(payload)
     normalized: List[Dict[str, Any]] = []
@@ -541,4 +541,5 @@ def fetch_open_orders_norm(client: Any) -> List[Dict[str, Any]]:
                 "ts": parsed["created_ts"],
             }
         )
-    return [item for item in normalized if item["price"] is not None and item["size"] is not None]
+    filtered = [item for item in normalized if item["price"] is not None and item["size"] is not None]
+    return filtered, True, None

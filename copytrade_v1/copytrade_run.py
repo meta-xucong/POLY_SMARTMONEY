@@ -316,19 +316,25 @@ def main() -> None:
                     else:
                         state.get("open_orders", {}).pop(token_id, None)
         try:
-            remote_orders = fetch_open_orders_norm(clob_client)
-            remote_by_token: Dict[str, list[dict]] = {}
-            for order in remote_orders:
-                remote_by_token.setdefault(order["token_id"], []).append(
-                    {
-                        "order_id": order["order_id"],
-                        "side": order["side"],
-                        "price": order["price"],
-                        "size": order["size"],
-                        "ts": order.get("ts") or now_ts,
-                    }
-                )
-            state["open_orders"] = remote_by_token
+            remote_orders, ok, err = fetch_open_orders_norm(clob_client)
+            if ok:
+                remote_by_token: Dict[str, list[dict]] = {}
+                for order in remote_orders:
+                    remote_by_token.setdefault(order["token_id"], []).append(
+                        {
+                            "order_id": order["order_id"],
+                            "side": order["side"],
+                            "price": order["price"],
+                            "size": order["size"],
+                            "ts": order.get("ts") or now_ts,
+                        }
+                    )
+                local_open_orders = state.get("open_orders", {})
+                merged_open_orders = dict(local_open_orders) if isinstance(local_open_orders, dict) else {}
+                merged_open_orders.update(remote_by_token)
+                state["open_orders"] = merged_open_orders
+            else:
+                logger.warning("[WARN] sync open orders failed: %s", err)
         except Exception as exc:
             logger.warning("[WARN] sync open orders failed: %s", exc)
 
