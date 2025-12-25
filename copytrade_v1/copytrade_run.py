@@ -574,17 +574,29 @@ def main() -> None:
                     t_now_present = True
                     t_now = 0.0
                     treating_missing_as_zero = True
-                if token_id in debug_token_ids or my_shares != 0 or open_orders_count > 0:
-                    legacy_desired = float(cfg.get("follow_ratio") or 0.0) * 0.0
+                missing = t_now is None
+                if (missing and (my_shares > 0 or open_orders_count > 0)) or (
+                    token_id in debug_token_ids
+                ):
+                    legacy_desired = float(cfg.get("follow_ratio") or 0.0) * (
+                        t_now or 0.0
+                    )
                     legacy_delta = legacy_desired - my_shares
                     logger.info(
-                        "[DBG] token_id=%s missing=True missing_streak=%s t_now=None t_last=%s "
-                        "my_shares=%s open_orders_count=%s legacy_desired=%s legacy_delta=%s",
+                        "[DBG] token_id=%s missing=%s missing_streak=%s t_now=%s t_last=%s "
+                        "my_shares=%s open_orders_count=%s",
                         token_id,
+                        missing,
                         missing_streak,
+                        t_now,
                         t_last,
                         my_shares,
                         open_orders_count,
+                    )
+                    logger.info(
+                        "[DBG] token_id=%s legacy_desired=%s legacy_delta=%s "
+                        "old logic would SELL → churn risk",
+                        token_id,
                         legacy_desired,
                         legacy_delta,
                     )
