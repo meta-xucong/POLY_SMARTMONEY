@@ -447,6 +447,15 @@ def main() -> None:
         delta_usd_samples = []
 
         for token_id in reconcile_set:
+            if cooldown_sec > 0:
+                cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
+                if now_ts < cooldown_until:
+                    logger.info(
+                        "[COOLDOWN] token_id=%s until=%s",
+                        token_id,
+                        cooldown_until,
+                    )
+                    continue
             if skip_closed:
                 if token_id in ignored:
                     if token_id in state.get("open_orders", {}) and state["open_orders"].get(token_id):
@@ -467,6 +476,10 @@ def main() -> None:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
                             else:
                                 state.get("open_orders", {}).pop(token_id, None)
+                            if cooldown_sec > 0:
+                                state.setdefault("cooldown_until", {})[token_id] = (
+                                    now_ts + cooldown_sec
+                                )
                     continue
 
                 cached = status_cache.get(token_id) or {}
@@ -492,6 +505,10 @@ def main() -> None:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
                             else:
                                 state.get("open_orders", {}).pop(token_id, None)
+                            if cooldown_sec > 0:
+                                state.setdefault("cooldown_until", {})[token_id] = (
+                                    now_ts + cooldown_sec
+                                )
                     meta = cached.get("meta") or {}
                     slug = meta.get("slug") or ""
                     logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
@@ -615,23 +632,15 @@ def main() -> None:
                         else:
                             state.get("open_orders", {}).pop(token_id, None)
                             open_orders = []
+                        if cooldown_sec > 0:
+                            state.setdefault("cooldown_until", {})[token_id] = (
+                                now_ts + cooldown_sec
+                            )
                 open_orders_for_reconcile = [
                     order
                     for order in open_orders
                     if str(order.get("side") or "").upper() == desired_side
                 ]
-
-            if cooldown_sec > 0:
-                cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
-                if now_ts < cooldown_until:
-                    logger.info(
-                        "[COOLDOWN] token_id=%s until=%s d_target=%s",
-                        token_id,
-                        cooldown_until,
-                        d_target,
-                    )
-                    _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                    continue
 
             state.setdefault("target_last_event_ts", {})[token_id] = now_ts
 
