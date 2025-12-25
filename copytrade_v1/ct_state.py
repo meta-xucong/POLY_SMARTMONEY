@@ -15,6 +15,9 @@ DEFAULT_STATE: Dict[str, Any] = {
     "target_missing_streak": {},
     "cooldown_until": {},
     "target_last_event_ts": {},
+    "bootstrapped": False,
+    "boot_token_ids": [],
+    "probed_token_ids": [],
 }
 
 
@@ -47,6 +50,12 @@ def load_state(path: str) -> Dict[str, Any]:
         state["cooldown_until"] = {}
     if "target_last_event_ts" not in state or not isinstance(state["target_last_event_ts"], dict):
         state["target_last_event_ts"] = {}
+    if "bootstrapped" not in state or not isinstance(state["bootstrapped"], bool):
+        state["bootstrapped"] = False
+    if "boot_token_ids" not in state or not isinstance(state["boot_token_ids"], list):
+        state["boot_token_ids"] = []
+    if "probed_token_ids" not in state or not isinstance(state["probed_token_ids"], list):
+        state["probed_token_ids"] = []
     return state
 
 

@@ -265,9 +265,9 @@ def main() -> None:
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
     state.setdefault("token_map", {})
-    state.setdefault("seen_token_keys", [])
-    state.setdefault("tracked_token_keys", [])
     state.setdefault("bootstrapped", False)
+    state.setdefault("boot_token_ids", [])
+    state.setdefault("probed_token_ids", [])
     state.setdefault("ignored_tokens", {})
     state.setdefault("market_status_cache", {})
     state.setdefault("target_last_shares", {})
@@ -280,12 +280,12 @@ def main() -> None:
         state["open_orders"] = {}
     if not isinstance(state.get("token_map"), dict):
         state["token_map"] = {}
-    if not isinstance(state.get("seen_token_keys"), list):
-        state["seen_token_keys"] = []
-    if not isinstance(state.get("tracked_token_keys"), list):
-        state["tracked_token_keys"] = []
     if not isinstance(state.get("bootstrapped"), bool):
         state["bootstrapped"] = False
+    if not isinstance(state.get("boot_token_ids"), list):
+        state["boot_token_ids"] = []
+    if not isinstance(state.get("probed_token_ids"), list):
+        state["probed_token_ids"] = []
     if not isinstance(state.get("ignored_tokens"), dict):
         state["ignored_tokens"] = {}
     if not isinstance(state.get("market_status_cache"), dict):
@@ -308,8 +308,6 @@ def main() -> None:
 
     poll_interval = int(cfg.get("poll_interval_sec") or 20)
     size_threshold = float(cfg.get("size_threshold") or 0)
-    follow_new_only = bool(cfg.get("follow_new_topics_only", True))
-    bootstrap_skip = bool(cfg.get("bootstrap_skip_first_cycle", True))
     skip_closed = bool(cfg.get("skip_closed_markets", True))
     refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
 
@@ -383,30 +381,6 @@ def main() -> None:
             time.sleep(poll_interval)
             continue
 
-        token_keys_now = [pos["token_key"] for pos in target_pos]
-        seen = set(state.get("seen_token_keys", []))
-        tracked = set(state.get("tracked_token_keys", []))
-
-        if follow_new_only and not state.get("bootstrapped"):
-            seen |= set(token_keys_now)
-            state["seen_token_keys"] = sorted(seen)
-            state["tracked_token_keys"] = sorted(tracked)
-            state["bootstrapped"] = True
-            logger.info("[BOOT] 已忽略启动时存量 topics: %s", len(token_keys_now))
-            save_state(args.state, state)
-            if bootstrap_skip:
-                time.sleep(poll_interval)
-                continue
-
-        if follow_new_only:
-            new_keys = set(token_keys_now) - seen
-            if new_keys:
-                logger.info("[NEW] 发现新 topics: %s，开始跟随", len(new_keys))
-                tracked |= new_keys
-                seen |= new_keys
-                state["seen_token_keys"] = sorted(seen)
-                state["tracked_token_keys"] = sorted(tracked)
-
         token_key_by_token_id: Dict[str, str] = {
             token_id: token_key for token_key, token_id in state.get("token_map", {}).items()
         }
@@ -414,8 +388,6 @@ def main() -> None:
         target_shares_now_by_token_id: Dict[str, float] = {}
         for pos in target_pos:
             token_key = pos["token_key"]
-            if follow_new_only and token_key not in tracked:
-                continue
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
@@ -427,8 +399,6 @@ def main() -> None:
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
             token_key = pos["token_key"]
-            if follow_new_only and token_key not in tracked:
-                continue
             try:
                 token_id = resolve_token_id(token_key, pos, state["token_map"])
             except Exception as exc:
@@ -436,6 +406,20 @@ def main() -> None:
                 continue
             my_by_token_id[token_id] = float(pos["size"])
             token_key_by_token_id.setdefault(token_id, token_key)
+
+        boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+        if not state.get("bootstrapped") and boot_sync_mode == "baseline_only":
+            boot_token_ids = sorted(target_shares_now_by_token_id.keys())
+            state["boot_token_ids"] = boot_token_ids
+            for token_id, t_now in target_shares_now_by_token_id.items():
+                state.setdefault("target_last_shares", {})[token_id] = float(t_now)
+                state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+                state.setdefault("target_missing_streak", {})[token_id] = 0
+            state["bootstrapped"] = True
+            logger.info("[BOOT] baseline_only: baseline_tokens=%s", len(boot_token_ids))
+            save_state(args.state, state)
+            time.sleep(poll_interval)
+            continue
 
         reconcile_set: Set[str] = set(target_shares_now_by_token_id)
         reconcile_set.update(state.get("target_last_shares", {}).keys())
@@ -638,6 +622,182 @@ def main() -> None:
             should_update_last = t_now_present
             if t_last is None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                should_probe = (
+                    bool(state.get("bootstrapped"))
+                    and token_id not in set(state.get("boot_token_ids", []))
+                    and bool(cfg.get("probe_buy_on_first_seen", True))
+                    and t_now is not None
+                    and float(t_now) > 0
+                    and token_id not in set(state.get("probed_token_ids", []))
+                    and my_shares <= 0
+                )
+                has_buy_open = any(
+                    str(order.get("side") or "").upper() == "BUY" for order in open_orders or []
+                )
+                if should_probe and not has_buy_open:
+                    if token_id in orderbooks:
+                        ob = orderbooks[token_id]
+                    else:
+                        ob = get_orderbook(clob_client, token_id)
+                        orderbooks[token_id] = ob
+
+                    ref_price = _mid_price(ob)
+                    if ref_price is None:
+                        logger.warning("[WARN] 无法获取盘口(探针): token_id=%s", token_id)
+                        continue
+
+                    state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(
+                        ref_price
+                    )
+                    probe_usd = float(
+                        cfg.get("probe_order_usd") or cfg.get("min_order_usd") or 5.0
+                    )
+                    if probe_usd <= 0:
+                        probe_usd = float(cfg.get("min_order_usd") or 5.0)
+                    probe_shares = probe_usd / ref_price
+
+                    cap_shares = float("inf")
+                    if max_position_usd_per_token > 0:
+                        cap_shares = max_position_usd_per_token / ref_price
+
+                    my_target = min(my_shares + probe_shares, cap_shares)
+                    delta = my_target - my_shares
+                    if delta <= eps:
+                        continue
+
+                    desired_side = "BUY"
+                    open_orders_for_reconcile = open_orders
+                    if open_orders:
+                        opposite_orders = [
+                            order
+                            for order in open_orders
+                            if str(order.get("side") or "").upper() != desired_side
+                        ]
+                        if opposite_orders:
+                            cancel_actions = [
+                                {"type": "cancel", "order_id": order.get("order_id")}
+                                for order in opposite_orders
+                                if order.get("order_id")
+                            ]
+                            if cancel_actions:
+                                logger.info(
+                                    "[REVERSE] token_id=%s side=%s cancel_open_orders=%s",
+                                    token_id,
+                                    desired_side,
+                                    len(cancel_actions),
+                                )
+                                updated_orders = apply_actions(
+                                    clob_client,
+                                    cancel_actions,
+                                    open_orders,
+                                    now_ts,
+                                    args.dry_run,
+                                )
+                                if updated_orders:
+                                    state.setdefault("open_orders", {})[
+                                        token_id
+                                    ] = updated_orders
+                                    open_orders = updated_orders
+                                else:
+                                    state.get("open_orders", {}).pop(token_id, None)
+                                    open_orders = []
+                                planned_total_notional = _calc_used_notional_total(
+                                    my_by_token_id,
+                                    state.get("open_orders", {}),
+                                    state.get("last_mid_price_by_token_id", {}),
+                                    max_position_usd_per_token,
+                                )
+                                if cooldown_sec > 0:
+                                    state.setdefault("cooldown_until", {})[
+                                        token_id
+                                    ] = now_ts + cooldown_sec
+                        open_orders_for_reconcile = [
+                            order
+                            for order in open_orders
+                            if str(order.get("side") or "").upper() == desired_side
+                        ]
+
+                    token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
+                    actions = reconcile_one(
+                        token_id,
+                        my_target,
+                        my_shares,
+                        ob,
+                        open_orders_for_reconcile,
+                        now_ts,
+                        cfg,
+                    )
+                    if not actions:
+                        continue
+                    filtered_actions = []
+                    for act in actions:
+                        if act.get("type") != "place":
+                            filtered_actions.append(act)
+                            continue
+                        side = str(act.get("side") or "")
+                        price = float(act.get("price") or ref_price or 0.0)
+                        size = float(act.get("size") or 0.0)
+                        ok, reason = risk_check(
+                            token_key,
+                            size,
+                            my_shares,
+                            price,
+                            cfg,
+                            side=side,
+                            planned_total_notional=planned_total_notional,
+                        )
+                        if not ok:
+                            if reason == "max_notional_total":
+                                max_total = float(cfg.get("max_notional_total") or 0.0)
+                                order_notional = abs(size) * price
+                                logger.warning(
+                                    "[RISK] %s 拒绝: %s token=%s side=%s planned_total=%s "
+                                    "order_notional=%s max_total=%s",
+                                    token_key,
+                                    reason,
+                                    token_id,
+                                    side,
+                                    planned_total_notional,
+                                    order_notional,
+                                    max_total,
+                                )
+                            else:
+                                logger.warning("[RISK] %s 拒绝: %s", token_key, reason)
+                            continue
+                        filtered_actions.append(act)
+                        if act.get("type") == "place" and str(side).upper() == "BUY":
+                            planned_total_notional += abs(size) * price
+                    if not filtered_actions:
+                        continue
+                    actions = filtered_actions
+                    logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+
+                    updated_orders = apply_actions(
+                        clob_client,
+                        actions,
+                        open_orders,
+                        now_ts,
+                        args.dry_run,
+                    )
+                    if updated_orders:
+                        state.setdefault("open_orders", {})[token_id] = updated_orders
+                    else:
+                        state.get("open_orders", {}).pop(token_id, None)
+                    planned_total_notional = _calc_used_notional_total(
+                        my_by_token_id,
+                        state.get("open_orders", {}),
+                        state.get("last_mid_price_by_token_id", {}),
+                        max_position_usd_per_token,
+                    )
+
+                    if cooldown_sec > 0 and actions:
+                        state.setdefault("cooldown_until", {})[token_id] = (
+                            now_ts + cooldown_sec
+                        )
+
+                    probed = set(state.get("probed_token_ids", []))
+                    probed.add(token_id)
+                    state["probed_token_ids"] = sorted(probed)
                 continue
 
             if t_now is None:
@@ -665,6 +825,22 @@ def main() -> None:
                 cap_shares = max_position_usd_per_token / ref_price
 
             d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
+            if d_target > 0:
+                logger.info(
+                    "[SIGNAL] BUY token_id=%s d_target=%s d_my=%s my_shares=%s",
+                    token_id,
+                    d_target,
+                    d_my,
+                    my_shares,
+                )
+            elif d_target < 0:
+                logger.info(
+                    "[SIGNAL] SELL token_id=%s d_target=%s d_my=%s my_shares=%s",
+                    token_id,
+                    d_target,
+                    d_my,
+                    my_shares,
+                )
             my_target = my_shares + d_my
             if my_target < 0:
                 my_target = 0.0
