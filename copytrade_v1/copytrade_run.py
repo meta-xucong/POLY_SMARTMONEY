@@ -828,11 +828,11 @@ def main() -> None:
                                 state.get("open_orders", {}),
                                 state.get("last_mid_price_by_token_id", {}),
                                 max_position_usd_per_token,
+                            )
+                            if cooldown_sec > 0:
+                                state.setdefault("cooldown_until", {})[token_id] = (
+                                    now_ts + cooldown_sec
                                 )
-                                if cooldown_sec > 0:
-                                    state.setdefault("cooldown_until", {})[
-                                        token_id
-                                    ] = now_ts + cooldown_sec
                         open_orders_for_reconcile = [
                             order
                             for order in open_orders
