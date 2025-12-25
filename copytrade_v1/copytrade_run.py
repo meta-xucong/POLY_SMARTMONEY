@@ -336,7 +336,7 @@ def main() -> None:
             else:
                 logger.warning("[WARN] sync open orders failed: %s", err)
         except Exception as exc:
-            logger.warning("[WARN] sync open orders failed: %s", exc)
+            logger.exception("[ERR] sync open orders failed: %s", exc)
 
         state["open_orders"] = cancel_expired_only(
             clob_client,
