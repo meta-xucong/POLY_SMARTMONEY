@@ -292,6 +292,14 @@ def main() -> None:
         except Exception as exc:
             logger.warning("[WARN] sync open orders failed: %s", exc)
 
+        state["open_orders"] = cancel_expired_only(
+            clob_client,
+            state.get("open_orders", {}),
+            now_ts,
+            int(cfg.get("order_ttl_sec") or 0),
+            args.dry_run,
+        )
+
         target_pos, target_info = fetch_positions_norm(
             data_client,
             cfg["target_address"],
@@ -413,6 +421,7 @@ def main() -> None:
         target_mid_usd = (min_usd + max_usd) / 2.0
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
+        missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 2)
         debug_token_ids = {str(token_id) for token_id in (cfg.get("debug_token_ids") or [])}
         eps = float(cfg.get("delta_eps") or 1e-9)
 
@@ -489,10 +498,19 @@ def main() -> None:
             open_orders = state.get("open_orders", {}).get(token_id, [])
             open_orders_count = len(open_orders)
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
+            treating_missing_as_zero = False
 
             if not t_now_present:
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
+                if (
+                    missing_streak >= missing_to_zero_rounds
+                    and t_last is not None
+                    and float(t_last) > 0
+                ):
+                    t_now_present = True
+                    t_now = 0.0
+                    treating_missing_as_zero = True
                 if token_id in debug_token_ids or my_shares != 0 or open_orders_count > 0:
                     legacy_desired = float(cfg.get("follow_ratio") or 0.0) * 0.0
                     legacy_delta = legacy_desired - my_shares
@@ -507,10 +525,12 @@ def main() -> None:
                         legacy_desired,
                         legacy_delta,
                     )
-                continue
+                if not treating_missing_as_zero:
+                    continue
 
-            state.setdefault("target_missing_streak", {})[token_id] = 0
-            state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+            if not treating_missing_as_zero:
+                state.setdefault("target_missing_streak", {})[token_id] = 0
+                state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
             if t_last is None:
                 state.setdefault("target_last_shares", {})[token_id] = float(t_now)
@@ -520,6 +540,38 @@ def main() -> None:
             state.setdefault("target_last_shares", {})[token_id] = float(t_now)
             if abs(d_target) <= eps:
                 continue
+
+            desired_side = "BUY" if d_target > 0 else "SELL"
+            if open_orders:
+                has_opposite = any(
+                    str(order.get("side") or "").upper() != desired_side for order in open_orders
+                )
+                if has_opposite:
+                    cancel_actions = [
+                        {"type": "cancel", "order_id": order.get("order_id")}
+                        for order in open_orders
+                        if order.get("order_id")
+                    ]
+                    if cancel_actions:
+                        logger.info(
+                            "[REVERSE] token_id=%s side=%s cancel_open_orders=%s",
+                            token_id,
+                            desired_side,
+                            len(cancel_actions),
+                        )
+                        updated_orders = apply_actions(
+                            clob_client,
+                            cancel_actions,
+                            open_orders,
+                            now_ts,
+                            args.dry_run,
+                        )
+                        if updated_orders:
+                            state.setdefault("open_orders", {})[token_id] = updated_orders
+                            open_orders = updated_orders
+                        else:
+                            state.get("open_orders", {}).pop(token_id, None)
+                            open_orders = []
 
             if cooldown_sec > 0:
                 cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
