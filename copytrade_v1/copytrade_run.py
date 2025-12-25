@@ -555,7 +555,33 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
-            desired_side = "BUY" if d_target > 0 else "SELL"
+            if token_id in orderbooks:
+                ob = orderbooks[token_id]
+            else:
+                ob = get_orderbook(clob_client, token_id)
+
+            ref_price = _mid_price(ob)
+            if ref_price is None:
+                logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                continue
+
+            cap_shares = float("inf")
+            if max_position_usd_per_token > 0:
+                cap_shares = max_position_usd_per_token / ref_price
+
+            d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
+            my_target = my_shares + d_my
+            if my_target < 0:
+                my_target = 0.0
+            if my_target > cap_shares:
+                my_target = cap_shares
+            delta = my_target - my_shares
+            if abs(delta) <= eps:
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                continue
+
+            desired_side = "BUY" if delta > 0 else "SELL"
             if open_orders:
                 has_opposite = any(
                     str(order.get("side") or "").upper() != desired_side for order in open_orders
@@ -600,29 +626,6 @@ def main() -> None:
                     continue
 
             state.setdefault("target_last_event_ts", {})[token_id] = now_ts
-
-            if token_id in orderbooks:
-                ob = orderbooks[token_id]
-            else:
-                ob = get_orderbook(clob_client, token_id)
-
-            ref_price = _mid_price(ob)
-            if ref_price is None:
-                logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
-                _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                continue
-
-            d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
-            if max_position_usd_per_token > 0:
-                cap_shares = max_position_usd_per_token / ref_price
-            else:
-                cap_shares = float("inf")
-
-            my_target = my_shares + d_my
-            if my_target < 0:
-                my_target = 0.0
-            if my_target > cap_shares:
-                my_target = cap_shares
 
             if mode == "auto_usd":
                 delta_shares = abs(my_target - my_shares)
