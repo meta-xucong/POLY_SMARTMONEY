@@ -814,25 +814,25 @@ def main() -> None:
                                     now_ts,
                                     args.dry_run,
                                 )
-                            if updated_orders:
-                                state.setdefault("open_orders", {})[
-                                    token_id
-                                ] = updated_orders
-                                open_orders = updated_orders
-                            else:
-                                state.get("open_orders", {}).pop(token_id, None)
-                                open_orders = []
-                            _prune_order_ts_by_id(state)
-                            planned_total_notional = _calc_used_notional_total(
-                                my_by_token_id,
-                                state.get("open_orders", {}),
-                                state.get("last_mid_price_by_token_id", {}),
-                                max_position_usd_per_token,
-                            )
-                            if cooldown_sec > 0:
-                                state.setdefault("cooldown_until", {})[token_id] = (
-                                    now_ts + cooldown_sec
+                                if updated_orders:
+                                    state.setdefault("open_orders", {})[
+                                        token_id
+                                    ] = updated_orders
+                                    open_orders = updated_orders
+                                else:
+                                    state.get("open_orders", {}).pop(token_id, None)
+                                    open_orders = []
+                                _prune_order_ts_by_id(state)
+                                planned_total_notional = _calc_used_notional_total(
+                                    my_by_token_id,
+                                    state.get("open_orders", {}),
+                                    state.get("last_mid_price_by_token_id", {}),
+                                    max_position_usd_per_token,
                                 )
+                                if cooldown_sec > 0:
+                                    state.setdefault("cooldown_until", {})[token_id] = (
+                                        now_ts + cooldown_sec
+                                    )
                         open_orders_for_reconcile = [
                             order
                             for order in open_orders
