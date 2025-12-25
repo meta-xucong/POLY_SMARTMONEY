@@ -286,35 +286,6 @@ def main() -> None:
     while True:
         now_ts = int(time.time())
         ttl_sec = int(cfg.get("order_ttl_sec") or 0)
-        if ttl_sec > 0:
-            local_open_orders = state.get("open_orders", {})
-            if isinstance(local_open_orders, dict) and local_open_orders:
-                for token_id, orders in list(local_open_orders.items()):
-                    cancel_actions = []
-                    orders_for_actions = []
-                    for order in orders:
-                        ts = int(order.get("ts") or 0)
-                        if now_ts - ts > ttl_sec:
-                            order_id = order.get("order_id")
-                            if order_id:
-                                cancel_actions.append({"type": "cancel", "order_id": order_id})
-                                orders_for_actions.append(order)
-                            continue
-                        orders_for_actions.append(order)
-                    if cancel_actions:
-                        updated_orders = apply_actions(
-                            clob_client,
-                            cancel_actions,
-                            orders_for_actions,
-                            now_ts,
-                            args.dry_run,
-                        )
-                    else:
-                        updated_orders = orders_for_actions
-                    if updated_orders:
-                        state.setdefault("open_orders", {})[token_id] = updated_orders
-                    else:
-                        state.get("open_orders", {}).pop(token_id, None)
         try:
             remote_orders, ok, err = fetch_open_orders_norm(clob_client)
             if ok:
@@ -467,6 +438,7 @@ def main() -> None:
         target_mid_usd = (min_usd + max_usd) / 2.0
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
+        missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
         missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 2)
         debug_token_ids = {str(token_id) for token_id in (cfg.get("debug_token_ids") or [])}
         eps = float(cfg.get("delta_eps") or 1e-9)
@@ -561,19 +533,27 @@ def main() -> None:
             open_orders = state.get("open_orders", {}).get(token_id, [])
             open_orders_count = len(open_orders)
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
+            last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             treating_missing_as_zero = False
 
             if not t_now_present:
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
+                missing_timeout = (
+                    missing_timeout_sec > 0
+                    and last_seen_ts > 0
+                    and now_ts - last_seen_ts >= missing_timeout_sec
+                )
                 if (
-                    missing_streak >= missing_to_zero_rounds
+                    (missing_streak >= missing_to_zero_rounds or missing_timeout)
                     and t_last is not None
                     and float(t_last) > 0
                 ):
                     t_now_present = True
                     t_now = 0.0
                     treating_missing_as_zero = True
+                    state.setdefault("target_missing_streak", {})[token_id] = 0
+                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
                 missing = t_now is None
                 if (missing and (my_shares > 0 or open_orders_count > 0)) or (
                     token_id in debug_token_ids
