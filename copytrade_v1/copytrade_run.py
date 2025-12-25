@@ -582,14 +582,17 @@ def main() -> None:
                 continue
 
             desired_side = "BUY" if delta > 0 else "SELL"
+            open_orders_for_reconcile = open_orders
             if open_orders:
-                has_opposite = any(
-                    str(order.get("side") or "").upper() != desired_side for order in open_orders
-                )
-                if has_opposite:
+                opposite_orders = [
+                    order
+                    for order in open_orders
+                    if str(order.get("side") or "").upper() != desired_side
+                ]
+                if opposite_orders:
                     cancel_actions = [
                         {"type": "cancel", "order_id": order.get("order_id")}
-                        for order in open_orders
+                        for order in opposite_orders
                         if order.get("order_id")
                     ]
                     if cancel_actions:
@@ -612,6 +615,11 @@ def main() -> None:
                         else:
                             state.get("open_orders", {}).pop(token_id, None)
                             open_orders = []
+                open_orders_for_reconcile = [
+                    order
+                    for order in open_orders
+                    if str(order.get("side") or "").upper() == desired_side
+                ]
 
             if cooldown_sec > 0:
                 cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
@@ -637,7 +645,7 @@ def main() -> None:
                 my_target,
                 my_shares,
                 ob,
-                open_orders,
+                open_orders_for_reconcile,
                 now_ts,
                 cfg,
             )
