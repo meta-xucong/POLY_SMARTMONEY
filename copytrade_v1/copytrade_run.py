@@ -521,6 +521,12 @@ def main() -> None:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
                             else:
                                 state.get("open_orders", {}).pop(token_id, None)
+                            planned_total_notional = _calc_used_notional_total(
+                                my_by_token_id,
+                                state.get("open_orders", {}),
+                                state.get("last_mid_price_by_token_id", {}),
+                                max_position_usd_per_token,
+                            )
                             if cooldown_sec > 0:
                                 state.setdefault("cooldown_until", {})[token_id] = (
                                     now_ts + cooldown_sec
@@ -550,6 +556,12 @@ def main() -> None:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
                             else:
                                 state.get("open_orders", {}).pop(token_id, None)
+                            planned_total_notional = _calc_used_notional_total(
+                                my_by_token_id,
+                                state.get("open_orders", {}),
+                                state.get("last_mid_price_by_token_id", {}),
+                                max_position_usd_per_token,
+                            )
                             if cooldown_sec > 0:
                                 state.setdefault("cooldown_until", {})[token_id] = (
                                     now_ts + cooldown_sec
@@ -697,6 +709,12 @@ def main() -> None:
                         else:
                             state.get("open_orders", {}).pop(token_id, None)
                             open_orders = []
+                        planned_total_notional = _calc_used_notional_total(
+                            my_by_token_id,
+                            state.get("open_orders", {}),
+                            state.get("last_mid_price_by_token_id", {}),
+                            max_position_usd_per_token,
+                        )
                         if cooldown_sec > 0:
                             state.setdefault("cooldown_until", {})[token_id] = (
                                 now_ts + cooldown_sec
@@ -781,6 +799,12 @@ def main() -> None:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
             else:
                 state.get("open_orders", {}).pop(token_id, None)
+            planned_total_notional = _calc_used_notional_total(
+                my_by_token_id,
+                state.get("open_orders", {}),
+                state.get("last_mid_price_by_token_id", {}),
+                max_position_usd_per_token,
+            )
 
             if cooldown_sec > 0 and actions:
                 state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
