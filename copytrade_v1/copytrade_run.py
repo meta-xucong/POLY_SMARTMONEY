@@ -285,6 +285,36 @@ def main() -> None:
 
     while True:
         now_ts = int(time.time())
+        ttl_sec = int(cfg.get("order_ttl_sec") or 0)
+        if ttl_sec > 0:
+            local_open_orders = state.get("open_orders", {})
+            if isinstance(local_open_orders, dict) and local_open_orders:
+                for token_id, orders in list(local_open_orders.items()):
+                    cancel_actions = []
+                    orders_for_actions = []
+                    for order in orders:
+                        ts = int(order.get("ts") or 0)
+                        if now_ts - ts > ttl_sec:
+                            order_id = order.get("order_id")
+                            if order_id:
+                                cancel_actions.append({"type": "cancel", "order_id": order_id})
+                                orders_for_actions.append(order)
+                            continue
+                        orders_for_actions.append(order)
+                    if cancel_actions:
+                        updated_orders = apply_actions(
+                            clob_client,
+                            cancel_actions,
+                            orders_for_actions,
+                            now_ts,
+                            args.dry_run,
+                        )
+                    else:
+                        updated_orders = orders_for_actions
+                    if updated_orders:
+                        state.setdefault("open_orders", {})[token_id] = updated_orders
+                    else:
+                        state.get("open_orders", {}).pop(token_id, None)
         try:
             remote_orders = fetch_open_orders_norm(clob_client)
             remote_by_token: Dict[str, list[dict]] = {}
@@ -306,7 +336,7 @@ def main() -> None:
             clob_client,
             state.get("open_orders", {}),
             now_ts,
-            int(cfg.get("order_ttl_sec") or 0),
+            ttl_sec,
             args.dry_run,
         )
 
