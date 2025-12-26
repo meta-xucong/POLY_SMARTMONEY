@@ -581,6 +581,132 @@ class DataApiClient:
 
         return (action_list, info) if return_info else action_list
 
+    def fetch_activity_actions(
+        self,
+        user: str,
+        *,
+        start_time: Optional[dt.datetime] = None,
+        end_time: Optional[dt.datetime] = None,
+        page_size: int = 300,
+        max_offset: int = 10000,
+        return_info: bool = False,
+    ) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], Dict[str, object]]:
+        url = f"{self.host}/activity"
+        page_size = max(1, min(int(page_size), 500))
+        max_offset = max(0, min(int(max_offset), 10000))
+        start_ts_sec = _to_timestamp_int(start_time)
+        end_ts_sec = _to_timestamp_int(end_time)
+        ok = True
+        incomplete = False
+        hit_max_pages = False
+        last_error: Optional[str] = None
+        pages_fetched = 0
+        cursor_end_sec = (
+            end_ts_sec
+            if end_ts_sec is not None
+            else int(dt.datetime.now(tz=dt.timezone.utc).timestamp())
+        )
+        offset = 0
+        results: List[Dict[str, Any]] = []
+
+        while True:
+            params = {
+                "user": user,
+                "type": "TRADE",
+                "limit": page_size,
+                "offset": offset,
+                "sortBy": "TIMESTAMP",
+                "sortDirection": "DESC",
+                "end": int(cursor_end_sec),
+            }
+            if start_ts_sec is not None:
+                params["start"] = int(start_ts_sec)
+
+            resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
+            if resp is None:
+                error_msg = error_msg or "request_failed"
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, error_msg)
+                break
+
+            try:
+                payload = resp.json()
+            except Exception:
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_json")
+                break
+
+            raw_items = []
+            if isinstance(payload, list):
+                raw_items = payload
+            elif isinstance(payload, dict):
+                raw_items = payload.get("data") or payload.get("activity") or []
+            if not isinstance(raw_items, list):
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "invalid_payload")
+                break
+
+            if not raw_items:
+                break
+
+            min_ts_sec = None
+            for item in raw_items:
+                ts = _parse_timestamp(item.get("timestamp") or item.get("time") or item.get("createdAt"))
+                if ts is None:
+                    continue
+                ts_sec = int(ts.timestamp())
+                if start_ts_sec is not None and ts_sec < start_ts_sec:
+                    continue
+                if end_ts_sec is not None and ts_sec > end_ts_sec:
+                    continue
+                results.append(item)
+                if min_ts_sec is None or ts_sec < min_ts_sec:
+                    min_ts_sec = ts_sec
+
+            pages_fetched += 1
+            if len(raw_items) < page_size:
+                break
+
+            offset += len(raw_items)
+            if offset >= max_offset:
+                if min_ts_sec is None:
+                    hit_max_pages = True
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(last_error, "missing_timestamps_for_window_shift")
+                    break
+                if min_ts_sec >= cursor_end_sec:
+                    hit_max_pages = True
+                    incomplete = True
+                    ok = False
+                    last_error = _combine_error(
+                        last_error, f"hit_max_offset_same_end={max_offset}"
+                    )
+                    break
+                cursor_end_sec = int(min_ts_sec)
+                offset = 0
+
+            if start_ts_sec is not None and cursor_end_sec < start_ts_sec:
+                break
+
+            _sleep_with_jitter(BASE_PAGE_SLEEP)
+
+        info = {
+            "ok": ok,
+            "incomplete": incomplete,
+            "error_msg": last_error,
+            "hit_max_pages": hit_max_pages,
+            "pages_fetched": pages_fetched,
+            "cursor_end_sec": cursor_end_sec,
+            "total": len(results),
+            "limit": page_size,
+        }
+
+        return (results, info) if return_info else results
+
     def fetch_account_start_time_from_activity(
         self,
         user: str,
@@ -707,6 +833,9 @@ class DataApiClient:
             "error_msg": last_error,
             "hit_max_pages": hit_max_pages,
             "pages_fetched": pages_fetched,
+            "total": len(results),
+            "limit": page_size,
+            "max_pages": max_pages,
         }
 
         return (results, info) if return_info else results
