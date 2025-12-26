@@ -608,6 +608,7 @@ def main() -> None:
         reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
+        reconcile_set.update(state.get("topic_state", {}).keys())
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
@@ -815,7 +816,8 @@ def main() -> None:
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
-            if not action_seen and not t_now_present:
+            topic_active = topic_mode and phase in ("LONG", "EXITING")
+            if (not action_seen) and (not t_now_present) and (not topic_active):
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
                 missing_timeout = (
@@ -909,7 +911,7 @@ def main() -> None:
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
             should_update_last = t_now_present
-            if t_last is None and action_delta is None:
+            if t_last is None and (not action_seen) and (not topic_active):
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 should_probe = (
                     bool(state.get("bootstrapped"))
@@ -1128,7 +1130,7 @@ def main() -> None:
                     state["probed_token_ids"] = sorted(probed)
                 continue
 
-            if t_now is None and not action_seen:
+            if t_now is None and not action_seen and not topic_active:
                 continue
 
             if t_now is None:
