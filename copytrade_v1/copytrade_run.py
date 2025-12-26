@@ -319,6 +319,7 @@ def main() -> None:
     state.setdefault("target_missing_streak", {})
     state.setdefault("cooldown_until", {})
     state.setdefault("target_last_event_ts", {})
+    state.setdefault("topic_state", {})
     state.setdefault("target_actions_cursor_ms", 0)
     state.setdefault("last_mid_price_by_token_id", {})
     state.setdefault("order_ts_by_id", {})
@@ -347,6 +348,8 @@ def main() -> None:
         state["cooldown_until"] = {}
     if not isinstance(state.get("target_last_event_ts"), dict):
         state["target_last_event_ts"] = {}
+    if not isinstance(state.get("topic_state"), dict):
+        state["topic_state"] = {}
     if not isinstance(state.get("target_actions_cursor_ms"), (int, float)):
         state["target_actions_cursor_ms"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
@@ -413,10 +416,21 @@ def main() -> None:
         )
         _prune_order_ts_by_id(state)
 
-        actions_delta_by_token_id: Dict[str, float] = {}
+        has_buy_by_token: Dict[str, bool] = {}
+        has_sell_by_token: Dict[str, bool] = {}
+        buy_sum_by_token: Dict[str, float] = {}
         actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
         actions_cursor_ms = int(state.get("target_actions_cursor_ms") or 0)
+        def _record_action(token_id: str, side: str, size: float) -> None:
+            if not token_id or size <= 0:
+                return
+            if side == "BUY":
+                has_buy_by_token[token_id] = True
+                buy_sum_by_token[token_id] = buy_sum_by_token.get(token_id, 0.0) + size
+            elif side == "SELL":
+                has_sell_by_token[token_id] = True
+
         try:
             actions_list, actions_info = fetch_target_actions_since(
                 data_client,
@@ -441,13 +455,10 @@ def main() -> None:
 
             for action in actions_list:
                 token_id = action.get("token_id")
-                token_key = action.get("token_key")
                 side = str(action.get("side") or "").upper()
                 size = float(action.get("size") or 0.0)
                 if token_id:
-                    tid = str(token_id)
-                    delta = size if side == "BUY" else -size
-                    actions_delta_by_token_id[tid] = actions_delta_by_token_id.get(tid, 0.0) + delta
+                    _record_action(str(token_id), side, size)
             latest_action_ms = int(actions_info.get("latest_ms") or 0)
             if actions_info.get("ok") and not actions_info.get("incomplete"):
                 if latest_action_ms > actions_cursor_ms:
@@ -574,9 +585,8 @@ def main() -> None:
                 continue
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
-            delta = size if side == "BUY" else -size
             tid = str(token_id)
-            actions_delta_by_token_id[tid] = actions_delta_by_token_id.get(tid, 0.0) + delta
+            _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
@@ -597,7 +607,7 @@ def main() -> None:
         reconcile_set.update(state.get("target_last_shares", {}).keys())
         reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
-        reconcile_set.update(actions_delta_by_token_id.keys())
+        reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
@@ -640,6 +650,8 @@ def main() -> None:
         orphan_ignore_sec = int(cfg.get("orphan_ignore_sec") or 120)
         debug_token_ids = {str(token_id) for token_id in (cfg.get("debug_token_ids") or [])}
         eps = float(cfg.get("delta_eps") or 1e-9)
+        topic_mode = bool(cfg.get("topic_cycle_mode", True))
+        entry_settle_sec = int(cfg.get("topic_entry_settle_sec", 60))
 
         ema = state.get("sizing", {}).get("ema_delta_usd")
         if ema is None or ema <= 0:
@@ -754,9 +766,56 @@ def main() -> None:
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             treating_missing_as_zero = False
-            action_delta = actions_delta_by_token_id.get(token_id)
+            has_buy = bool(has_buy_by_token.get(token_id))
+            has_sell = bool(has_sell_by_token.get(token_id))
+            buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
+            action_seen = has_buy or has_sell
+            topic_state = state.setdefault("topic_state", {})
+            st = topic_state.get(token_id) or {"phase": "IDLE"}
+            phase = st.get("phase", "IDLE")
 
-            if action_delta is None and not t_now_present:
+            if topic_mode:
+                if phase == "IDLE" and has_buy:
+                    st = {
+                        "phase": "LONG",
+                        "first_buy_ts": now_ts,
+                        "first_sell_ts": 0,
+                        "entry_sized": False,
+                        "did_probe": False,
+                        "target_peak": float(t_now or 0.0),
+                        "entry_buy_accum": float(buy_sum),
+                        "desired_shares": 0.0,
+                    }
+                    topic_state[token_id] = st
+                    phase = "LONG"
+                    logger.info("[TOPIC] ENTER token_id=%s first_buy_ts=%s", token_id, now_ts)
+
+                if phase == "LONG":
+                    if t_now is not None:
+                        st["target_peak"] = max(
+                            float(st.get("target_peak") or 0.0),
+                            float(t_now),
+                        )
+                    if not st.get("entry_sized"):
+                        first_buy_ts = int(st.get("first_buy_ts") or now_ts)
+                        if now_ts - first_buy_ts <= entry_settle_sec:
+                            st["entry_buy_accum"] = float(
+                                st.get("entry_buy_accum") or 0.0
+                            ) + float(buy_sum)
+
+                if phase == "LONG" and has_sell:
+                    st["phase"] = "EXITING"
+                    st["first_sell_ts"] = now_ts
+                    topic_state[token_id] = st
+                    phase = "EXITING"
+                    logger.info("[TOPIC] EXIT token_id=%s first_sell_ts=%s", token_id, now_ts)
+
+                if phase == "EXITING" and my_shares <= eps and open_orders_count == 0:
+                    topic_state.pop(token_id, None)
+                    phase = "IDLE"
+                    logger.info("[TOPIC] RESET token_id=%s", token_id)
+
+            if not action_seen and not t_now_present:
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
                 missing_timeout = (
@@ -841,7 +900,7 @@ def main() -> None:
                 if not treating_missing_as_zero:
                     continue
 
-            if action_delta is not None:
+            if action_seen:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 if t_now_present:
                     state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
@@ -1069,11 +1128,17 @@ def main() -> None:
                     state["probed_token_ids"] = sorted(probed)
                 continue
 
-            if t_now is None and action_delta is None:
+            if t_now is None and not action_seen:
                 continue
 
-            d_target = action_delta if action_delta is not None else float(t_now) - float(t_last)
-            if abs(d_target) <= eps:
+            if t_now is None:
+                d_target = 0.0
+            elif t_last is None:
+                d_target = float(t_now)
+            else:
+                d_target = float(t_now) - float(t_last)
+            topic_active = topic_mode and phase in ("LONG", "EXITING")
+            if abs(d_target) <= eps and not topic_active:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
@@ -1116,6 +1181,46 @@ def main() -> None:
                 my_target = 0.0
             if my_target > cap_shares:
                 my_target = cap_shares
+
+            if topic_active:
+                probe_usd = float(cfg.get("probe_order_usd") or cfg.get("min_order_usd") or 5.0)
+                probe_shares = probe_usd / ref_price
+
+                if phase == "LONG":
+                    if not st.get("did_probe") and my_shares <= eps:
+                        my_target = min(cap_shares, my_shares + probe_shares)
+                        st["did_probe"] = True
+                        topic_state[token_id] = st
+                        logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
+
+                    if not st.get("entry_sized"):
+                        first_buy_ts = int(st.get("first_buy_ts") or now_ts)
+                        if now_ts - first_buy_ts >= entry_settle_sec:
+                            base = max(
+                                float(st.get("target_peak") or 0.0),
+                                float(st.get("entry_buy_accum") or 0.0),
+                            )
+                            ratio = float(cfg.get("follow_ratio") or 0.0)
+                            desired = 0.0
+                            if base > 0 and ratio > 0:
+                                desired = min(cap_shares, ratio * base)
+                            desired = max(desired, min(cap_shares, my_shares + probe_shares))
+                            st["desired_shares"] = float(desired)
+                            st["entry_sized"] = True
+                            topic_state[token_id] = st
+                            logger.info(
+                                "[TOPIC] SIZE token_id=%s desired=%s base=%s",
+                                token_id,
+                                desired,
+                                base,
+                            )
+
+                    desired_locked = float(st.get("desired_shares") or 0.0)
+                    if desired_locked > 0:
+                        my_target = max(my_shares, min(cap_shares, desired_locked))
+
+                elif phase == "EXITING":
+                    my_target = 0.0
             delta = my_target - my_shares
             if abs(delta) <= eps:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)

@@ -15,6 +15,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "target_missing_streak": {},
     "cooldown_until": {},
     "target_last_event_ts": {},
+    "topic_state": {},
     "target_actions_cursor_ts": 0,
     "target_actions_cursor_ms": 0,
     "seen_action_ids": [],
@@ -53,6 +54,8 @@ def load_state(path: str) -> Dict[str, Any]:
         state["cooldown_until"] = {}
     if "target_last_event_ts" not in state or not isinstance(state["target_last_event_ts"], dict):
         state["target_last_event_ts"] = {}
+    if "topic_state" not in state or not isinstance(state["topic_state"], dict):
+        state["topic_state"] = {}
     if "target_actions_cursor_ts" not in state or not isinstance(
         state["target_actions_cursor_ts"], (int, float)
     ):
