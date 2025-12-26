@@ -1,7 +1,7 @@
 {
   "target_address": "0x...",
   "my_address": "0x...",
-  "follow_ratio": 0.2,
+  "follow_ratio": 0.1,
 
   "poll_interval_sec": 20,
   "size_threshold": 0.0,
@@ -31,8 +31,8 @@
   "log_dir": "logs",
   "log_level": "INFO",
 
-  "max_notional_per_token": 500,
-  "max_notional_total": 2000,
+  "max_notional_per_token": 25,
+  "max_notional_total": 200,
 
   "blacklist_token_keys": []
 }
