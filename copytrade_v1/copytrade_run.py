@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 
-from ct_data import fetch_positions_norm
+from ct_data import fetch_positions_norm, fetch_target_actions_since
 from ct_exec import (
     apply_actions,
     cancel_expired_only,
@@ -296,6 +296,7 @@ def main() -> None:
     state.setdefault("target_missing_streak", {})
     state.setdefault("cooldown_until", {})
     state.setdefault("target_last_event_ts", {})
+    state.setdefault("target_actions_cursor_ts", 0)
     state.setdefault("last_mid_price_by_token_id", {})
     state.setdefault("order_ts_by_id", {})
     if not isinstance(state.get("open_orders"), dict):
@@ -322,6 +323,8 @@ def main() -> None:
         state["cooldown_until"] = {}
     if not isinstance(state.get("target_last_event_ts"), dict):
         state["target_last_event_ts"] = {}
+    if not isinstance(state.get("target_actions_cursor_ts"), (int, float)):
+        state["target_actions_cursor_ts"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
         state["last_mid_price_by_token_id"] = {}
     if not isinstance(state.get("order_ts_by_id"), dict):
@@ -334,6 +337,13 @@ def main() -> None:
     size_threshold = float(cfg.get("size_threshold") or 0)
     skip_closed = bool(cfg.get("skip_closed_markets", True))
     refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
+    positions_limit = int(cfg.get("positions_limit") or 500)
+    positions_max_pages = int(cfg.get("positions_max_pages") or 20)
+    actions_page_size = int(cfg.get("actions_page_size") or 300)
+    actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
+
+    if int(state.get("target_actions_cursor_ts") or 0) <= 0:
+        state["target_actions_cursor_ts"] = int(time.time())
 
     while True:
         now_ts = int(time.time())
@@ -377,11 +387,72 @@ def main() -> None:
         )
         _prune_order_ts_by_id(state)
 
+        actions_delta_by_token_id: Dict[str, float] = {}
+        actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
+        actions_list: list[Dict[str, object]] = []
+        actions_cursor_ts = int(state.get("target_actions_cursor_ts") or 0)
+        try:
+            actions_list, actions_info = fetch_target_actions_since(
+                data_client,
+                cfg["target_address"],
+                actions_cursor_ts,
+                page_size=actions_page_size,
+                max_offset=actions_max_offset,
+            )
+            latest_action_ts = actions_cursor_ts
+            for action in actions_list:
+                token_id = action.get("token_id")
+                token_key = action.get("token_key")
+                side = str(action.get("side") or "").upper()
+                size = float(action.get("size") or 0.0)
+                ts = action.get("timestamp")
+                ts_sec = int(ts.timestamp()) if ts else actions_cursor_ts
+                latest_action_ts = max(latest_action_ts, ts_sec)
+                if token_id:
+                    tid = str(token_id)
+                    delta = size if side == "BUY" else -size
+                    actions_delta_by_token_id[tid] = actions_delta_by_token_id.get(tid, 0.0) + delta
+            state["target_actions_cursor_ts"] = latest_action_ts
+        except Exception as exc:
+            logger.exception("[ERR] fetch target actions failed: %s", exc)
+
         target_pos, target_info = fetch_positions_norm(
             data_client,
             cfg["target_address"],
             size_threshold,
+            positions_limit=positions_limit,
+            positions_max_pages=positions_max_pages,
         )
+        if len(target_pos) >= positions_limit:
+            target_info["incomplete"] = True
+            logger.warning("[SAFE] target positions 可能被截断(len==limit)，仅撤单")
+
+        my_pos, my_info = fetch_positions_norm(
+            data_client,
+            cfg["my_address"],
+            0.0,
+            positions_limit=positions_limit,
+            positions_max_pages=positions_max_pages,
+        )
+        if len(my_pos) >= positions_limit:
+            my_info["incomplete"] = True
+            logger.warning("[SAFE] my positions 可能被截断(len==limit)，仅撤单")
+
+        logger.info(
+            "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
+            len(target_pos),
+            len(my_pos),
+            bool(target_info.get("incomplete")),
+            bool(my_info.get("incomplete")),
+        )
+        if target_info.get("incomplete"):
+            logger.info(
+                "[POS] target positions info limit=%s total=%s max_pages=%s",
+                target_info.get("limit"),
+                target_info.get("total"),
+                target_info.get("max_pages"),
+            )
+
         if not target_info.get("ok") or target_info.get("incomplete"):
             logger.warning("[SAFE] target positions 不完整，仅撤单")
             state["open_orders"] = cancel_expired_only(
@@ -395,11 +466,6 @@ def main() -> None:
             time.sleep(poll_interval)
             continue
 
-        my_pos, my_info = fetch_positions_norm(
-            data_client,
-            cfg["my_address"],
-            0.0,
-        )
         if not my_info.get("ok") or my_info.get("incomplete"):
             logger.warning("[SAFE] my positions 不完整，仅撤单")
             state["open_orders"] = cancel_expired_only(
@@ -439,6 +505,36 @@ def main() -> None:
             my_by_token_id[token_id] = float(pos["size"])
             token_key_by_token_id.setdefault(token_id, token_key)
 
+        for action in actions_list:
+            token_id = action.get("token_id")
+            token_key = action.get("token_key")
+            if token_id:
+                token_key_by_token_id.setdefault(str(token_id), str(token_key or ""))
+                continue
+            if not token_key:
+                continue
+            try:
+                token_id = resolve_token_id(
+                    token_key,
+                    {
+                        "token_key": token_key,
+                        "condition_id": action.get("condition_id"),
+                        "outcome_index": action.get("outcome_index"),
+                        "slug": None,
+                        "raw": action.get("raw") or {},
+                    },
+                    state["token_map"],
+                )
+            except Exception as exc:
+                logger.warning("[WARN] resolver 失败(actions): %s -> %s", token_key, exc)
+                continue
+            side = str(action.get("side") or "").upper()
+            size = float(action.get("size") or 0.0)
+            delta = size if side == "BUY" else -size
+            tid = str(token_id)
+            actions_delta_by_token_id[tid] = actions_delta_by_token_id.get(tid, 0.0) + delta
+            token_key_by_token_id.setdefault(tid, str(token_key))
+
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
         if not state.get("bootstrapped") and boot_sync_mode == "baseline_only":
             boot_token_ids = sorted(target_shares_now_by_token_id.keys())
@@ -457,6 +553,7 @@ def main() -> None:
         reconcile_set.update(state.get("target_last_shares", {}).keys())
         reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
+        reconcile_set.update(actions_delta_by_token_id.keys())
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
@@ -613,8 +710,9 @@ def main() -> None:
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             treating_missing_as_zero = False
+            action_delta = actions_delta_by_token_id.get(token_id)
 
-            if not t_now_present:
+            if action_delta is None and not t_now_present:
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
                 missing_timeout = (
@@ -699,12 +797,16 @@ def main() -> None:
                 if not treating_missing_as_zero:
                     continue
 
-            if not treating_missing_as_zero:
+            if action_delta is not None:
+                state.setdefault("target_missing_streak", {})[token_id] = 0
+                if t_now_present:
+                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+            elif not treating_missing_as_zero:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
             should_update_last = t_now_present
-            if t_last is None:
+            if t_last is None and action_delta is None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 should_probe = (
                     bool(state.get("bootstrapped"))
@@ -923,10 +1025,10 @@ def main() -> None:
                     state["probed_token_ids"] = sorted(probed)
                 continue
 
-            if t_now is None:
+            if t_now is None and action_delta is None:
                 continue
 
-            d_target = float(t_now) - float(t_last)
+            d_target = action_delta if action_delta is not None else float(t_now) - float(t_last)
             if abs(d_target) <= eps:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
@@ -939,6 +1041,7 @@ def main() -> None:
             ref_price = _mid_price(ob)
             if ref_price is None:
                 logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
+                logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
@@ -971,6 +1074,16 @@ def main() -> None:
                 my_target = cap_shares
             delta = my_target - my_shares
             if abs(delta) <= eps:
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                continue
+            deadband_shares = float(cfg.get("deadband_shares") or 0.0)
+            if abs(delta) <= deadband_shares:
+                logger.info(
+                    "[NOOP] token_id=%s reason=deadband delta=%s deadband=%s",
+                    token_id,
+                    delta,
+                    deadband_shares,
+                )
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
@@ -1045,10 +1158,13 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             filtered_actions = []
+            blocked_reasons: set[str] = set()
+            had_place_action = False
             for act in actions:
                 if act.get("type") != "place":
                     filtered_actions.append(act)
                     continue
+                had_place_action = True
                 side = str(act.get("side") or "")
                 price = float(act.get("price") or ref_price or 0.0)
                 size = float(act.get("size") or 0.0)
@@ -1078,11 +1194,15 @@ def main() -> None:
                         )
                     else:
                         logger.warning("[RISK] %s 拒绝: %s", token_key, reason)
+                    blocked_reasons.add(reason or "risk_check")
                     continue
                 filtered_actions.append(act)
                 if act.get("type") == "place" and str(side).upper() == "BUY":
                     planned_total_notional += abs(size) * price
             if not filtered_actions:
+                if had_place_action:
+                    reason_text = ",".join(sorted(blocked_reasons)) if blocked_reasons else "risk_check"
+                    logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             actions = filtered_actions

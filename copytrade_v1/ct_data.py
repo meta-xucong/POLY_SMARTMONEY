@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Dict, List, Tuple
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
@@ -28,11 +29,15 @@ def fetch_positions_norm(
     client: DataApiClient,
     user: str,
     size_threshold: float,
+    positions_limit: int = 500,
+    positions_max_pages: int = 20,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
-    positions, info = client.fetch_positions(
+    positions, info = fetch_positions_all(
+        client,
         user,
-        size_threshold=size_threshold,
-        return_info=True,
+        size_threshold,
+        positions_limit=positions_limit,
+        positions_max_pages=positions_max_pages,
     )
     normalized: List[Dict[str, object]] = []
     for pos in positions:
@@ -40,4 +45,145 @@ def fetch_positions_norm(
         if normalized_pos is None:
             continue
         normalized.append(normalized_pos)
+    info.setdefault("limit", positions_limit)
+    info.setdefault("max_pages", positions_max_pages)
+    info.setdefault("total", len(positions))
+    return normalized, info
+
+
+def fetch_positions_all(
+    client: DataApiClient,
+    user: str,
+    size_threshold: float,
+    *,
+    positions_limit: int = 500,
+    positions_max_pages: int = 20,
+) -> Tuple[List[Position], Dict[str, object]]:
+    positions, info = client.fetch_positions(
+        user,
+        size_threshold=size_threshold,
+        page_size=positions_limit,
+        max_pages=positions_max_pages,
+        return_info=True,
+    )
+    info.setdefault("limit", positions_limit)
+    info.setdefault("max_pages", positions_max_pages)
+    info.setdefault("total", len(positions))
+    return positions, info
+
+
+def _parse_timestamp(value: object) -> dt.datetime | None:
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            if value > 1e12:
+                value /= 1000.0
+            return dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = dt.datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                return parsed.replace(tzinfo=dt.timezone.utc)
+            return parsed
+    except Exception:
+        return None
+    return None
+
+
+def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
+    side = str(raw.get("side") or raw.get("action") or raw.get("type") or "").upper()
+    event_type = str(
+        raw.get("eventType")
+        or raw.get("event_type")
+        or raw.get("activityType")
+        or raw.get("activity_type")
+        or raw.get("type")
+        or ""
+    ).upper()
+    if side not in ("BUY", "SELL"):
+        return None
+    if event_type and event_type not in ("TRADE", "FILL", "BUY", "SELL"):
+        return None
+
+    size = raw.get("size") or raw.get("amount") or raw.get("quantity") or raw.get("fillSize")
+    try:
+        size_val = float(size or 0.0)
+    except Exception:
+        return None
+    if size_val <= 0:
+        return None
+
+    token_id = (
+        raw.get("tokenId")
+        or raw.get("token_id")
+        or raw.get("clobTokenId")
+        or raw.get("clob_token_id")
+        or raw.get("assetId")
+        or raw.get("asset_id")
+        or raw.get("outcomeTokenId")
+        or raw.get("outcome_token_id")
+    )
+    token_id_text = str(token_id).strip() if token_id is not None else ""
+    condition_id = raw.get("conditionId") or raw.get("condition_id") or raw.get("marketId")
+    outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
+    token_key = None
+    if condition_id is not None and outcome_index is not None:
+        try:
+            token_key = f"{condition_id}:{int(outcome_index)}"
+        except Exception:
+            token_key = None
+
+    ts = _parse_timestamp(raw.get("timestamp") or raw.get("time") or raw.get("createdAt"))
+    if ts is None:
+        return None
+
+    return {
+        "token_id": token_id_text or None,
+        "token_key": token_key,
+        "condition_id": str(condition_id) if condition_id is not None else None,
+        "outcome_index": int(outcome_index) if outcome_index is not None else None,
+        "side": side,
+        "size": size_val,
+        "timestamp": ts,
+        "raw": raw,
+    }
+
+
+def fetch_target_actions_since(
+    client: DataApiClient,
+    user: str,
+    since_ts: int,
+    *,
+    page_size: int = 300,
+    max_offset: int = 10000,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    start_time = dt.datetime.fromtimestamp(since_ts, tz=dt.timezone.utc)
+    end_time = dt.datetime.now(tz=dt.timezone.utc)
+    records, info = client.fetch_activity_actions(
+        user,
+        start_time=start_time,
+        end_time=end_time,
+        page_size=page_size,
+        max_offset=max_offset,
+        return_info=True,
+    )
+
+    normalized: List[Dict[str, object]] = []
+    for raw in records:
+        action = _normalize_action(raw)
+        if action is None:
+            continue
+        action_ts = int(action["timestamp"].timestamp())
+        if action_ts <= since_ts:
+            continue
+        normalized.append(action)
+
+    info.setdefault("limit", page_size)
+    info.setdefault("total", len(records))
+    info.setdefault("normalized", len(normalized))
     return normalized, info
