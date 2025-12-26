@@ -16,6 +16,8 @@ DEFAULT_STATE: Dict[str, Any] = {
     "cooldown_until": {},
     "target_last_event_ts": {},
     "target_actions_cursor_ts": 0,
+    "target_actions_cursor_ms": 0,
+    "seen_action_ids": [],
     "bootstrapped": False,
     "boot_token_ids": [],
     "probed_token_ids": [],
@@ -55,6 +57,17 @@ def load_state(path: str) -> Dict[str, Any]:
         state["target_actions_cursor_ts"], (int, float)
     ):
         state["target_actions_cursor_ts"] = 0
+    if "target_actions_cursor_ms" not in state or not isinstance(
+        state["target_actions_cursor_ms"], (int, float)
+    ):
+        state["target_actions_cursor_ms"] = 0
+    if (
+        int(state.get("target_actions_cursor_ms") or 0) <= 0
+        and int(state.get("target_actions_cursor_ts") or 0) > 0
+    ):
+        state["target_actions_cursor_ms"] = int(state["target_actions_cursor_ts"]) * 1000
+    if "seen_action_ids" not in state or not isinstance(state["seen_action_ids"], list):
+        state["seen_action_ids"] = []
     if "bootstrapped" not in state or not isinstance(state["bootstrapped"], bool):
         state["bootstrapped"] = False
     if "boot_token_ids" not in state or not isinstance(state["boot_token_ids"], list):

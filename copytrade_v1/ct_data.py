@@ -157,12 +157,12 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
 def fetch_target_actions_since(
     client: DataApiClient,
     user: str,
-    since_ts: int,
+    since_ms: int,
     *,
     page_size: int = 300,
     max_offset: int = 10000,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
-    start_time = dt.datetime.fromtimestamp(since_ts, tz=dt.timezone.utc)
+    start_time = dt.datetime.fromtimestamp(since_ms / 1000.0, tz=dt.timezone.utc)
     end_time = dt.datetime.now(tz=dt.timezone.utc)
     records, info = client.fetch_activity_actions(
         user,
@@ -174,16 +174,27 @@ def fetch_target_actions_since(
     )
 
     normalized: List[Dict[str, object]] = []
+    latest_ms = 0
     for raw in records:
         action = _normalize_action(raw)
         if action is None:
             continue
-        action_ts = int(action["timestamp"].timestamp())
-        if action_ts <= since_ts:
+        action_ms = int(action["timestamp"].timestamp() * 1000)
+        if action_ms <= since_ms:
             continue
+        latest_ms = max(latest_ms, action_ms)
         normalized.append(action)
 
+    incomplete = bool(info.get("incomplete"))
+    total_records = int(info.get("total") or len(records))
+    maxed_offset = bool(info.get("max_offset_reached") or info.get("reached_max_offset"))
+    if not incomplete and (maxed_offset or total_records >= max_offset):
+        incomplete = True
+
+    info.setdefault("ok", True)
     info.setdefault("limit", page_size)
-    info.setdefault("total", len(records))
+    info.setdefault("total", total_records)
     info.setdefault("normalized", len(normalized))
+    info["latest_ms"] = latest_ms
+    info["incomplete"] = incomplete
     return normalized, info

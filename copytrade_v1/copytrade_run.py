@@ -209,6 +209,29 @@ def _collect_order_ids(open_orders_by_token_id: Dict[str, list[dict]]) -> set[st
     return order_ids
 
 
+def _action_identity(action: Dict[str, object]) -> str:
+    raw = action.get("raw") or {}
+    if isinstance(raw, dict):
+        tx_hash = raw.get("txHash") or raw.get("tx_hash") or raw.get("transactionHash")
+        log_index = raw.get("logIndex") or raw.get("log_index")
+        fill_id = raw.get("fillId") or raw.get("fill_id")
+        if tx_hash and log_index is not None:
+            return f"tx:{tx_hash}:{log_index}"
+        if fill_id is not None:
+            return f"fill:{fill_id}"
+        if tx_hash:
+            return f"tx:{tx_hash}"
+    token_id = action.get("token_id") or ""
+    side = action.get("side") or ""
+    size = action.get("size") or ""
+    ts = action.get("timestamp")
+    action_ms = int(ts.timestamp() * 1000) if ts else 0
+    price = ""
+    if isinstance(raw, dict):
+        price = raw.get("price") or raw.get("fillPrice") or raw.get("avgPrice") or ""
+    return f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
+
+
 def _prune_order_ts_by_id(state: Dict[str, Any]) -> None:
     order_ts_by_id = state.get("order_ts_by_id")
     if not isinstance(order_ts_by_id, dict):
@@ -296,9 +319,10 @@ def main() -> None:
     state.setdefault("target_missing_streak", {})
     state.setdefault("cooldown_until", {})
     state.setdefault("target_last_event_ts", {})
-    state.setdefault("target_actions_cursor_ts", 0)
+    state.setdefault("target_actions_cursor_ms", 0)
     state.setdefault("last_mid_price_by_token_id", {})
     state.setdefault("order_ts_by_id", {})
+    state.setdefault("seen_action_ids", [])
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("token_map"), dict):
@@ -323,12 +347,14 @@ def main() -> None:
         state["cooldown_until"] = {}
     if not isinstance(state.get("target_last_event_ts"), dict):
         state["target_last_event_ts"] = {}
-    if not isinstance(state.get("target_actions_cursor_ts"), (int, float)):
-        state["target_actions_cursor_ts"] = 0
+    if not isinstance(state.get("target_actions_cursor_ms"), (int, float)):
+        state["target_actions_cursor_ms"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
         state["last_mid_price_by_token_id"] = {}
     if not isinstance(state.get("order_ts_by_id"), dict):
         state["order_ts_by_id"] = {}
+    if not isinstance(state.get("seen_action_ids"), list):
+        state["seen_action_ids"] = []
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -342,8 +368,8 @@ def main() -> None:
     actions_page_size = int(cfg.get("actions_page_size") or 300)
     actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
 
-    if int(state.get("target_actions_cursor_ts") or 0) <= 0:
-        state["target_actions_cursor_ts"] = int(time.time())
+    if int(state.get("target_actions_cursor_ms") or 0) <= 0:
+        state["target_actions_cursor_ms"] = int(time.time() * 1000)
 
     while True:
         now_ts = int(time.time())
@@ -390,29 +416,46 @@ def main() -> None:
         actions_delta_by_token_id: Dict[str, float] = {}
         actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
-        actions_cursor_ts = int(state.get("target_actions_cursor_ts") or 0)
+        actions_cursor_ms = int(state.get("target_actions_cursor_ms") or 0)
         try:
             actions_list, actions_info = fetch_target_actions_since(
                 data_client,
                 cfg["target_address"],
-                actions_cursor_ts,
+                actions_cursor_ms,
                 page_size=actions_page_size,
                 max_offset=actions_max_offset,
             )
-            latest_action_ts = actions_cursor_ts
+            seen_action_ids = state.setdefault("seen_action_ids", [])
+            seen_action_set = {str(item) for item in seen_action_ids}
+            filtered_actions: list[Dict[str, object]] = []
+            for action in actions_list:
+                action_id = _action_identity(action)
+                if action_id in seen_action_set:
+                    continue
+                filtered_actions.append(action)
+                seen_action_ids.append(action_id)
+                seen_action_set.add(action_id)
+            if len(seen_action_ids) > 2000:
+                del seen_action_ids[:-2000]
+            actions_list = filtered_actions
+
             for action in actions_list:
                 token_id = action.get("token_id")
                 token_key = action.get("token_key")
                 side = str(action.get("side") or "").upper()
                 size = float(action.get("size") or 0.0)
-                ts = action.get("timestamp")
-                ts_sec = int(ts.timestamp()) if ts else actions_cursor_ts
-                latest_action_ts = max(latest_action_ts, ts_sec)
                 if token_id:
                     tid = str(token_id)
                     delta = size if side == "BUY" else -size
                     actions_delta_by_token_id[tid] = actions_delta_by_token_id.get(tid, 0.0) + delta
-            state["target_actions_cursor_ts"] = latest_action_ts
+            latest_action_ms = int(actions_info.get("latest_ms") or 0)
+            if actions_info.get("ok") and not actions_info.get("incomplete"):
+                if latest_action_ms > actions_cursor_ms:
+                    state["target_actions_cursor_ms"] = latest_action_ms
+            else:
+                logger.warning(
+                    "[WARN] actions incomplete or failed; keep cursor_ms=%s", actions_cursor_ms
+                )
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
@@ -423,9 +466,10 @@ def main() -> None:
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
         )
-        if len(target_pos) >= positions_limit:
+        hard_cap = positions_limit * positions_max_pages
+        if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
-            logger.warning("[SAFE] target positions 可能被截断(len==limit)，仅撤单")
+            logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 仅撤单", hard_cap)
 
         my_pos, my_info = fetch_positions_norm(
             data_client,
@@ -434,9 +478,9 @@ def main() -> None:
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
         )
-        if len(my_pos) >= positions_limit:
+        if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
-            logger.warning("[SAFE] my positions 可能被截断(len==limit)，仅撤单")
+            logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 仅撤单", hard_cap)
 
         logger.info(
             "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
