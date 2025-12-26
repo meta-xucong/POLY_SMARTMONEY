@@ -3,6 +3,8 @@ from __future__ import annotations
 import datetime as dt
 from typing import Dict, List, Tuple
 
+import requests
+
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 from smartmoney_query.poly_martmoney_query.models import Position
 
@@ -164,13 +166,13 @@ def fetch_target_actions_since(
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     start_time = dt.datetime.fromtimestamp(since_ms / 1000.0, tz=dt.timezone.utc)
     end_time = dt.datetime.now(tz=dt.timezone.utc)
-    records, info = client.fetch_activity_actions(
+    records, info = _fetch_activity_actions(
+        client,
         user,
         start_time=start_time,
         end_time=end_time,
         page_size=page_size,
         max_offset=max_offset,
-        return_info=True,
     )
 
     normalized: List[Dict[str, object]] = []
@@ -198,3 +200,148 @@ def fetch_target_actions_since(
     info["latest_ms"] = latest_ms
     info["incomplete"] = incomplete
     return normalized, info
+
+
+def _fetch_activity_actions(
+    client: DataApiClient,
+    user: str,
+    *,
+    start_time: dt.datetime,
+    end_time: dt.datetime,
+    page_size: int,
+    max_offset: int,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    fetcher = getattr(client, "fetch_activity_actions", None)
+    if callable(fetcher):
+        return fetcher(
+            user,
+            start_time=start_time,
+            end_time=end_time,
+            page_size=page_size,
+            max_offset=max_offset,
+            return_info=True,
+        )
+    return _fetch_activity_actions_fallback(
+        client,
+        user,
+        start_time=start_time,
+        end_time=end_time,
+        page_size=page_size,
+        max_offset=max_offset,
+    )
+
+
+def _fetch_activity_actions_fallback(
+    client: DataApiClient,
+    user: str,
+    *,
+    start_time: dt.datetime,
+    end_time: dt.datetime,
+    page_size: int,
+    max_offset: int,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    host = getattr(client, "host", "https://data-api.polymarket.com").rstrip("/")
+    session = getattr(client, "session", None) or requests.Session()
+    url = f"{host}/activity"
+    page_size = max(1, min(int(page_size), 500))
+    max_offset = max(0, min(int(max_offset), 10000))
+    start_ts_sec = int(start_time.timestamp())
+    end_ts_sec = int(end_time.timestamp())
+    ok = True
+    incomplete = False
+    hit_max_pages = False
+    last_error = None
+    pages_fetched = 0
+    cursor_end_sec = end_ts_sec or int(dt.datetime.now(tz=dt.timezone.utc).timestamp())
+    offset = 0
+    results: List[Dict[str, object]] = []
+
+    while True:
+        params = {
+            "user": user,
+            "type": "TRADE",
+            "limit": page_size,
+            "offset": offset,
+            "sortBy": "TIMESTAMP",
+            "sortDirection": "DESC",
+            "end": int(cursor_end_sec),
+            "start": int(start_ts_sec),
+        }
+        try:
+            resp = session.get(url, params=params, timeout=15.0)
+            resp.raise_for_status()
+        except requests.RequestException as exc:
+            incomplete = True
+            ok = False
+            last_error = str(exc)
+            break
+
+        try:
+            payload = resp.json()
+        except Exception:
+            incomplete = True
+            ok = False
+            last_error = "invalid_json"
+            break
+
+        raw_items = []
+        if isinstance(payload, list):
+            raw_items = payload
+        elif isinstance(payload, dict):
+            raw_items = payload.get("data") or payload.get("activity") or []
+        if not isinstance(raw_items, list):
+            incomplete = True
+            ok = False
+            last_error = "invalid_payload"
+            break
+        if not raw_items:
+            break
+
+        min_ts_sec = None
+        for item in raw_items:
+            ts = _parse_timestamp(item.get("timestamp") or item.get("time") or item.get("createdAt"))
+            if ts is None:
+                continue
+            ts_sec = int(ts.timestamp())
+            if ts_sec < start_ts_sec or ts_sec > end_ts_sec:
+                continue
+            results.append(item)
+            if min_ts_sec is None or ts_sec < min_ts_sec:
+                min_ts_sec = ts_sec
+
+        pages_fetched += 1
+        if len(raw_items) < page_size:
+            break
+
+        offset += len(raw_items)
+        if offset >= max_offset:
+            if min_ts_sec is None:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = "missing_timestamps_for_window_shift"
+                break
+            if min_ts_sec >= cursor_end_sec:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = f"hit_max_offset_same_end={max_offset}"
+                break
+            cursor_end_sec = int(min_ts_sec)
+            offset = 0
+
+        if cursor_end_sec < start_ts_sec:
+            break
+
+    info = {
+        "ok": ok,
+        "incomplete": incomplete,
+        "error_msg": last_error,
+        "hit_max_pages": hit_max_pages,
+        "pages_fetched": pages_fetched,
+        "cursor_end_sec": cursor_end_sec,
+        "total": len(results),
+        "limit": page_size,
+        "source": "fallback_activity_http",
+    }
+    return results, info
