@@ -608,6 +608,7 @@ def main() -> None:
         reconcile_set.update(my_by_token_id)
         reconcile_set.update(state.get("open_orders", {}).keys())
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
+        reconcile_set.update(state.get("topic_state", {}).keys())
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
@@ -783,7 +784,7 @@ def main() -> None:
                         "entry_sized": False,
                         "did_probe": False,
                         "target_peak": float(t_now or 0.0),
-                        "entry_buy_accum": float(buy_sum),
+                        "entry_buy_accum": 0.0,
                         "desired_shares": 0.0,
                     }
                     topic_state[token_id] = st
@@ -815,7 +816,9 @@ def main() -> None:
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
-            if not action_seen and not t_now_present:
+            topic_active = topic_mode and phase in ("LONG", "EXITING")
+            probe_attempted = False
+            if (not action_seen) and (not t_now_present) and (not topic_active):
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
                 missing_timeout = (
@@ -909,7 +912,7 @@ def main() -> None:
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
             should_update_last = t_now_present
-            if t_last is None and action_delta is None:
+            if t_last is None and (not action_seen) and (not topic_active):
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 should_probe = (
                     bool(state.get("bootstrapped"))
@@ -1128,7 +1131,7 @@ def main() -> None:
                     state["probed_token_ids"] = sorted(probed)
                 continue
 
-            if t_now is None and not action_seen:
+            if t_now is None and not action_seen and not topic_active:
                 continue
 
             if t_now is None:
@@ -1189,8 +1192,7 @@ def main() -> None:
                 if phase == "LONG":
                     if not st.get("did_probe") and my_shares <= eps:
                         my_target = min(cap_shares, my_shares + probe_shares)
-                        st["did_probe"] = True
-                        topic_state[token_id] = st
+                        probe_attempted = True
                         logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
                     if not st.get("entry_sized"):
@@ -1356,6 +1358,14 @@ def main() -> None:
                 continue
             actions = filtered_actions
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+
+            did_place_buy = any(
+                act.get("type") == "place" and str(act.get("side") or "").upper() == "BUY"
+                for act in filtered_actions
+            )
+            if probe_attempted and did_place_buy and st.get("phase") == "LONG":
+                st["did_probe"] = True
+                topic_state[token_id] = st
 
             updated_orders = apply_actions(
                 clob_client,
