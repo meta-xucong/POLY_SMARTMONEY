@@ -1130,7 +1130,7 @@ def main() -> None:
                     state["probed_token_ids"] = sorted(probed)
                 continue
 
-            if t_now is None and not action_seen:
+            if t_now is None and not action_seen and not topic_active:
                 continue
 
             if t_now is None:
