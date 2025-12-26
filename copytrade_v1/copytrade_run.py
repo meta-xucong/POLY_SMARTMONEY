@@ -784,7 +784,7 @@ def main() -> None:
                         "entry_sized": False,
                         "did_probe": False,
                         "target_peak": float(t_now or 0.0),
-                        "entry_buy_accum": float(buy_sum),
+                        "entry_buy_accum": 0.0,
                         "desired_shares": 0.0,
                     }
                     topic_state[token_id] = st
@@ -817,6 +817,7 @@ def main() -> None:
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
             topic_active = topic_mode and phase in ("LONG", "EXITING")
+            probe_attempted = False
             if (not action_seen) and (not t_now_present) and (not topic_active):
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
@@ -1191,8 +1192,7 @@ def main() -> None:
                 if phase == "LONG":
                     if not st.get("did_probe") and my_shares <= eps:
                         my_target = min(cap_shares, my_shares + probe_shares)
-                        st["did_probe"] = True
-                        topic_state[token_id] = st
+                        probe_attempted = True
                         logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
                     if not st.get("entry_sized"):
@@ -1358,6 +1358,14 @@ def main() -> None:
                 continue
             actions = filtered_actions
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+
+            did_place_buy = any(
+                act.get("type") == "place" and str(act.get("side") or "").upper() == "BUY"
+                for act in filtered_actions
+            )
+            if probe_attempted and did_place_buy and st.get("phase") == "LONG":
+                st["did_probe"] = True
+                topic_state[token_id] = st
 
             updated_orders = apply_actions(
                 clob_client,
