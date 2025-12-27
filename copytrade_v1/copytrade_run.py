@@ -198,6 +198,64 @@ def _calc_used_notional_total(
     return pos_total + buy_orders_total
 
 
+def _shrink_on_risk_limit(
+    act: Dict[str, Any],
+    reason: Optional[str],
+    cfg: Dict[str, Any],
+    planned_total_notional: float,
+    token_key: str,
+    token_id: str,
+    logger: logging.Logger,
+) -> Optional[tuple[Dict[str, Any], float]]:
+    if reason not in ("max_notional_total", "max_notional_per_token"):
+        return None
+    side = str(act.get("side") or "").upper()
+    if side != "BUY":
+        return None
+    price = float(act.get("price") or 0.0)
+    size = float(act.get("size") or 0.0)
+    if price <= 0 or size <= 0:
+        return None
+
+    order_usd = abs(size) * price
+    min_usd = float(cfg.get("min_order_usd") or 0.0)
+    max_usd = float(cfg.get("max_order_usd") or 0.0)
+    cap_token = float(cfg.get("max_notional_per_token") or 0.0)
+    allowed_usd = order_usd
+
+    if reason == "max_notional_total":
+        max_total = float(cfg.get("max_notional_total") or 0.0)
+        cap_total_remaining = max_total - planned_total_notional if max_total > 0 else order_usd
+        allowed_usd = min(allowed_usd, cap_total_remaining)
+        if cap_token > 0:
+            allowed_usd = min(allowed_usd, cap_token)
+    elif reason == "max_notional_per_token":
+        if cap_token > 0:
+            allowed_usd = min(allowed_usd, cap_token)
+
+    if max_usd > 0:
+        allowed_usd = min(allowed_usd, max_usd)
+
+    if allowed_usd <= 0 or allowed_usd < min_usd:
+        return None
+    if allowed_usd >= order_usd * (1 - 1e-9):
+        return None
+
+    new_act = dict(act)
+    new_act["size"] = allowed_usd / price
+    logger.warning(
+        "[RISK_RESIZE] %s reason=%s token=%s side=%s old_usd=%s new_usd=%s planned_total=%s",
+        token_key,
+        reason,
+        token_id,
+        side,
+        order_usd,
+        allowed_usd,
+        planned_total_notional,
+    )
+    return new_act, allowed_usd
+
+
 def _collect_order_ids(open_orders_by_token_id: Dict[str, list[dict]]) -> set[str]:
     order_ids: set[str] = set()
     for orders in open_orders_by_token_id.values():
@@ -995,6 +1053,7 @@ def main() -> None:
                                 open_orders,
                                 now_ts,
                                 args.dry_run,
+                                cfg=cfg,
                             )
                             if updated_orders:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1051,6 +1110,20 @@ def main() -> None:
                             planned_total_notional=planned_total_notional,
                         )
                         if not ok:
+                            resized = _shrink_on_risk_limit(
+                                act,
+                                reason,
+                                cfg,
+                                planned_total_notional,
+                                token_key,
+                                token_id,
+                                logger,
+                            )
+                            if resized:
+                                resized_act, allowed_usd = resized
+                                filtered_actions.append(resized_act)
+                                planned_total_notional += allowed_usd
+                                continue
                             if reason == "max_notional_total":
                                 max_total = float(cfg.get("max_notional_total") or 0.0)
                                 order_notional = abs(size) * price
@@ -1082,6 +1155,7 @@ def main() -> None:
                         open_orders,
                         now_ts,
                         args.dry_run,
+                        cfg=cfg,
                     )
                     if updated_orders:
                         state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1256,6 +1330,7 @@ def main() -> None:
                         open_orders,
                         now_ts,
                         args.dry_run,
+                        cfg=cfg,
                     )
                     if updated_orders:
                         state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1335,6 +1410,20 @@ def main() -> None:
                     planned_total_notional=planned_total_notional,
                 )
                 if not ok:
+                    resized = _shrink_on_risk_limit(
+                        act,
+                        reason,
+                        cfg,
+                        planned_total_notional,
+                        token_key,
+                        token_id,
+                        logger,
+                    )
+                    if resized:
+                        resized_act, allowed_usd = resized
+                        filtered_actions.append(resized_act)
+                        planned_total_notional += allowed_usd
+                        continue
                     if reason == "max_notional_total":
                         max_total = float(cfg.get("max_notional_total") or 0.0)
                         order_notional = abs(size) * price
@@ -1379,6 +1468,7 @@ def main() -> None:
                 open_orders,
                 now_ts,
                 args.dry_run,
+                cfg=cfg,
             )
             if updated_orders:
                 state.setdefault("open_orders", {})[token_id] = updated_orders

@@ -36,5 +36,9 @@
   "max_notional_per_token": 25,
   "max_notional_total": 200,
 
+  "allow_partial": true,
+  "retry_on_insufficient_balance": true,
+  "retry_shrink_factor": 0.5,
+
   "blacklist_token_keys": []
 }

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import logging
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -334,14 +335,84 @@ def cancel_order(client: Any, order_id: str) -> Optional[object]:
     return None
 
 
-def place_order(client: Any, token_id: str, side: str, price: float, size: float) -> Dict[str, Any]:
+def _is_insufficient_balance(value: object) -> bool:
+    def _text_has_shortage(text: str) -> bool:
+        lowered = text.lower()
+        shortage_keywords = ("insufficient", "not enough")
+        balance_keywords = ("balance", "fund", "allowance")
+        return any(key in lowered for key in shortage_keywords) and any(
+            key in lowered for key in balance_keywords
+        )
+
+    if hasattr(value, "error_message"):
+        try:
+            if _is_insufficient_balance(getattr(value, "error_message")):
+                return True
+        except Exception:
+            pass
+    if hasattr(value, "response"):
+        try:
+            if _is_insufficient_balance(getattr(value, "response")):
+                return True
+        except Exception:
+            pass
+    if hasattr(value, "args"):
+        try:
+            for arg in getattr(value, "args", ()):
+                if _is_insufficient_balance(arg):
+                    return True
+        except Exception:
+            pass
+
+    if isinstance(value, dict):
+        for key in ("error", "message", "detail", "reason", "status"):
+            if key in value and _is_insufficient_balance(value[key]):
+                return True
+    try:
+        return _text_has_shortage(str(value))
+    except Exception:
+        return False
+
+
+def place_order(
+    client: Any,
+    token_id: str,
+    side: str,
+    price: float,
+    size: float,
+    allow_partial: bool = True,
+) -> Dict[str, Any]:
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY, SELL
 
     side_const = BUY if side.upper() == "BUY" else SELL
-    order_args = OrderArgs(token_id=str(token_id), side=side_const, price=float(price), size=float(size))
+    order_kwargs: Dict[str, Any] = {
+        "token_id": str(token_id),
+        "side": side_const,
+        "price": float(price),
+        "size": float(size),
+    }
+    allow_partial_key: Optional[str] = None
+    try:
+        params = inspect.signature(OrderArgs).parameters
+    except (TypeError, ValueError):
+        params = {}
+    if "allow_partial" in params:
+        allow_partial_key = "allow_partial"
+    elif "allowPartial" in params:
+        allow_partial_key = "allowPartial"
+    if allow_partial_key:
+        order_kwargs[allow_partial_key] = allow_partial
+
+    order_args = OrderArgs(**order_kwargs)
     signed = client.create_order(order_args)
-    response = client.post_order(signed, OrderType.GTC)
+    if allow_partial and allow_partial_key is None:
+        try:
+            response = client.post_order(signed, OrderType.GTC, allow_partial=True)
+        except TypeError:
+            response = client.post_order(signed, OrderType.GTC)
+    else:
+        response = client.post_order(signed, OrderType.GTC)
     order_id = _extract_order_id(response)
     result: Dict[str, Any] = {"response": response}
     if order_id:
@@ -355,6 +426,7 @@ def apply_actions(
     open_orders: List[Dict[str, Any]],
     now_ts: int,
     dry_run: bool,
+    cfg: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
     for action in actions:
@@ -386,17 +458,64 @@ def apply_actions(
                 }
             )
             continue
+        allow_partial = True
+        if cfg is not None:
+            allow_partial = bool(cfg.get("allow_partial", True))
+        size_for_record = float(action.get("size") or 0.0)
         try:
             response = place_order(
                 client,
                 token_id=str(action.get("token_id")),
                 side=str(action.get("side")),
                 price=float(action.get("price")),
-                size=float(action.get("size")),
+                size=size_for_record,
+                allow_partial=allow_partial,
             )
         except Exception as exc:
             logger.warning("place_order failed token_id=%s: %s", action.get("token_id"), exc)
-            continue
+            if not cfg or not cfg.get("retry_on_insufficient_balance"):
+                continue
+            side = str(action.get("side") or "").upper()
+            if side != "BUY":
+                continue
+            if not _is_insufficient_balance(exc):
+                continue
+            price = float(action.get("price") or 0.0)
+            size = float(action.get("size") or 0.0)
+            if price <= 0 or size <= 0:
+                continue
+            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+            shrink_factor = float(cfg.get("retry_shrink_factor") or 0.5)
+            old_usd = abs(size) * price
+            new_usd = max(min_order_usd, old_usd * shrink_factor)
+            if new_usd >= old_usd * (1 - 1e-9):
+                continue
+            new_size = new_usd / price
+            try:
+                response = place_order(
+                    client,
+                    token_id=str(action.get("token_id")),
+                    side=str(action.get("side")),
+                    price=price,
+                    size=new_size,
+                    allow_partial=allow_partial,
+                )
+            except Exception as retry_exc:
+                logger.warning(
+                    "[RETRY_BALANCE_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
+                    action.get("token_id"),
+                    old_usd,
+                    new_usd,
+                    retry_exc,
+                )
+                continue
+            size_for_record = new_size
+            logger.info(
+                "[RETRY_BALANCE_OK] token_id=%s old_usd=%s new_usd=%s",
+                action.get("token_id"),
+                old_usd,
+                new_usd,
+            )
         order_id = response.get("order_id")
         if order_id:
             updated.append(
@@ -404,7 +523,7 @@ def apply_actions(
                     "order_id": order_id,
                     "side": action.get("side"),
                     "price": action.get("price"),
-                    "size": action.get("size"),
+                    "size": size_for_record,
                     "ts": now_ts,
                 }
             )
