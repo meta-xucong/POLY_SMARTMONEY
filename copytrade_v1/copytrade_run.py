@@ -1278,8 +1278,13 @@ def main() -> None:
             if abs(delta) <= eps:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
+            open_orders_for_reconcile = [
+                order
+                for order in open_orders
+                if str(order.get("side") or "").upper() == desired_side
+            ]
             deadband_shares = float(cfg.get("deadband_shares") or 0.0)
-            if abs(delta) <= deadband_shares:
+            if abs(delta) <= deadband_shares and not open_orders_for_reconcile:
                 logger.info(
                     "[NOOP] token_id=%s reason=deadband delta=%s deadband=%s",
                     token_id,
@@ -1288,13 +1293,6 @@ def main() -> None:
                 )
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
-
-            open_orders_for_reconcile = open_orders
-            open_orders_for_reconcile = [
-                order
-                for order in open_orders
-                if str(order.get("side") or "").upper() == desired_side
-            ]
 
             state.setdefault("target_last_event_ts", {})[token_id] = now_ts
 
