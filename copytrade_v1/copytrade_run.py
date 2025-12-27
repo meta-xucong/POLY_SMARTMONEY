@@ -19,7 +19,6 @@ from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 from ct_data import fetch_positions_norm, fetch_target_actions_since
 from ct_exec import (
     apply_actions,
-    cancel_expired_only,
     fetch_open_orders_norm,
     get_orderbook,
     reconcile_one,
@@ -209,6 +208,51 @@ def _collect_order_ids(open_orders_by_token_id: Dict[str, list[dict]]) -> set[st
     return order_ids
 
 
+def _refresh_managed_order_ids(state: Dict[str, Any]) -> None:
+    managed_ids = _collect_order_ids(state.get("open_orders", {}))
+    state["managed_order_ids"] = sorted(managed_ids)
+
+
+def _intent_key(phase: str, desired_side: str, desired_shares: float) -> Dict[str, Any]:
+    return {
+        "phase": phase,
+        "desired_side": desired_side,
+        "desired_shares": float(desired_shares),
+    }
+
+
+def _update_intent_state(
+    state: Dict[str, Any],
+    token_id: str,
+    new_key: Dict[str, Any],
+    eps: float,
+    logger: logging.Logger,
+) -> tuple[bool, bool]:
+    intents = state.setdefault("intent_keys", {})
+    prev = intents.get(token_id)
+    reasons: list[str] = []
+    desired_down = False
+    if isinstance(prev, dict):
+        if prev.get("phase") != new_key.get("phase"):
+            reasons.append("phase_changed")
+        if prev.get("desired_side") != new_key.get("desired_side"):
+            reasons.append("side_changed")
+        prev_shares = float(prev.get("desired_shares") or 0.0)
+        if float(new_key.get("desired_shares") or 0.0) < prev_shares - eps:
+            reasons.append("desired_shares_down")
+            desired_down = True
+    intents[token_id] = new_key
+    if reasons:
+        logger.info(
+            "[INTENT] token_id=%s old=%s new=%s reasons=%s",
+            token_id,
+            prev,
+            new_key,
+            ",".join(reasons),
+        )
+    return bool(reasons), desired_down
+
+
 def _action_identity(action: Dict[str, object]) -> str:
     raw = action.get("raw") or {}
     if isinstance(raw, dict):
@@ -308,6 +352,9 @@ def main() -> None:
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
+    state.setdefault("open_orders_all", {})
+    state.setdefault("managed_order_ids", [])
+    state.setdefault("intent_keys", {})
     state.setdefault("token_map", {})
     state.setdefault("bootstrapped", False)
     state.setdefault("boot_token_ids", [])
@@ -326,6 +373,12 @@ def main() -> None:
     state.setdefault("seen_action_ids", [])
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
+    if not isinstance(state.get("open_orders_all"), dict):
+        state["open_orders_all"] = {}
+    if not isinstance(state.get("managed_order_ids"), list):
+        state["managed_order_ids"] = []
+    if not isinstance(state.get("intent_keys"), dict):
+        state["intent_keys"] = {}
     if not isinstance(state.get("token_map"), dict):
         state["token_map"] = {}
     if not isinstance(state.get("bootstrapped"), bool):
@@ -376,44 +429,41 @@ def main() -> None:
 
     while True:
         now_ts = int(time.time())
-        ttl_sec = int(cfg.get("order_ttl_sec") or 0)
+        managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         try:
             remote_orders, ok, err = fetch_open_orders_norm(clob_client)
             if ok:
                 remote_by_token: Dict[str, list[dict]] = {}
+                managed_by_token: Dict[str, list[dict]] = {}
                 order_ts_by_id = state.setdefault("order_ts_by_id", {})
                 remote_order_ids: set[str] = set()
                 for order in remote_orders:
                     order_id = str(order["order_id"])
                     ts = order.get("ts") or order_ts_by_id.get(order_id) or now_ts
-                    if order_id not in order_ts_by_id:
-                        order_ts_by_id[order_id] = int(ts)
                     remote_order_ids.add(order_id)
-                    remote_by_token.setdefault(order["token_id"], []).append(
-                        {
-                            "order_id": order_id,
-                            "side": order["side"],
-                            "price": order["price"],
-                            "size": order["size"],
-                            "ts": int(ts),
-                        }
-                    )
+                    order_payload = {
+                        "order_id": order_id,
+                        "side": order["side"],
+                        "price": order["price"],
+                        "size": order["size"],
+                        "ts": int(ts),
+                    }
+                    remote_by_token.setdefault(order["token_id"], []).append(order_payload)
+                    if order_id in managed_ids:
+                        if order_id not in order_ts_by_id:
+                            order_ts_by_id[order_id] = int(ts)
+                        managed_by_token.setdefault(order["token_id"], []).append(order_payload)
+                managed_ids &= remote_order_ids
                 for order_id in list(order_ts_by_id.keys()):
-                    if str(order_id) not in remote_order_ids:
+                    if str(order_id) not in managed_ids:
                         order_ts_by_id.pop(order_id, None)
-                state["open_orders"] = remote_by_token
+                state["open_orders_all"] = remote_by_token
+                state["open_orders"] = managed_by_token
+                state["managed_order_ids"] = sorted(managed_ids)
             else:
                 logger.warning("[WARN] sync open orders failed: %s", err)
         except Exception as exc:
             logger.exception("[ERR] sync open orders failed: %s", exc)
-
-        state["open_orders"] = cancel_expired_only(
-            clob_client,
-            state.get("open_orders", {}),
-            now_ts,
-            ttl_sec,
-            args.dry_run,
-        )
         _prune_order_ts_by_id(state)
 
         has_buy_by_token: Dict[str, bool] = {}
@@ -509,27 +559,13 @@ def main() -> None:
             )
 
         if not target_info.get("ok") or target_info.get("incomplete"):
-            logger.warning("[SAFE] target positions 不完整，仅撤单")
-            state["open_orders"] = cancel_expired_only(
-                clob_client,
-                state.get("open_orders", {}),
-                now_ts,
-                int(cfg.get("order_ttl_sec") or 0),
-                args.dry_run,
-            )
+            logger.warning("[SAFE] target positions 不完整，跳过本轮执行")
             save_state(args.state, state)
             time.sleep(poll_interval)
             continue
 
         if not my_info.get("ok") or my_info.get("incomplete"):
-            logger.warning("[SAFE] my positions 不完整，仅撤单")
-            state["open_orders"] = cancel_expired_only(
-                clob_client,
-                state.get("open_orders", {}),
-                now_ts,
-                int(cfg.get("order_ttl_sec") or 0),
-                args.dry_run,
-            )
+            logger.warning("[SAFE] my positions 不完整，跳过本轮执行")
             save_state(args.state, state)
             time.sleep(poll_interval)
             continue
@@ -684,35 +720,13 @@ def main() -> None:
                     continue
             if skip_closed:
                 if token_id in ignored:
-                    if token_id in state.get("open_orders", {}) and state["open_orders"].get(token_id):
-                        cancels = [
-                            {"type": "cancel", "order_id": o.get("order_id")}
-                            for o in state["open_orders"].get(token_id, [])
-                            if o.get("order_id")
-                        ]
-                        if cancels:
-                            updated_orders = apply_actions(
-                                clob_client,
-                                cancels,
-                                state["open_orders"].get(token_id, []),
-                                now_ts,
-                                args.dry_run,
-                            )
-                            if updated_orders:
-                                state.setdefault("open_orders", {})[token_id] = updated_orders
-                            else:
-                                state.get("open_orders", {}).pop(token_id, None)
-                            _prune_order_ts_by_id(state)
-                            planned_total_notional = _calc_used_notional_total(
-                                my_by_token_id,
-                                state.get("open_orders", {}),
-                                state.get("last_mid_price_by_token_id", {}),
-                                max_position_usd_per_token,
-                            )
-                            if cooldown_sec > 0:
-                                state.setdefault("cooldown_until", {})[token_id] = (
-                                    now_ts + cooldown_sec
-                                )
+                    ignored_orders = state.get("open_orders", {}).get(token_id, [])
+                    if ignored_orders:
+                        logger.info(
+                            "[SKIP] ignored token_id=%s open_orders=%s",
+                            token_id,
+                            len(ignored_orders),
+                        )
                     continue
 
                 cached = status_cache.get(token_id) or {}
@@ -720,35 +734,6 @@ def main() -> None:
 
                 if tradeable is False:
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
-                    if token_id in state.get("open_orders", {}):
-                        cancels = [
-                            {"type": "cancel", "order_id": o.get("order_id")}
-                            for o in state["open_orders"].get(token_id, [])
-                            if o.get("order_id")
-                        ]
-                        if cancels:
-                            updated_orders = apply_actions(
-                                clob_client,
-                                cancels,
-                                state["open_orders"].get(token_id, []),
-                                now_ts,
-                                args.dry_run,
-                            )
-                            if updated_orders:
-                                state.setdefault("open_orders", {})[token_id] = updated_orders
-                            else:
-                                state.get("open_orders", {}).pop(token_id, None)
-                            _prune_order_ts_by_id(state)
-                            planned_total_notional = _calc_used_notional_total(
-                                my_by_token_id,
-                                state.get("open_orders", {}),
-                                state.get("last_mid_price_by_token_id", {}),
-                                max_position_usd_per_token,
-                            )
-                            if cooldown_sec > 0:
-                                state.setdefault("cooldown_until", {})[token_id] = (
-                                    now_ts + cooldown_sec
-                                )
                     meta = cached.get("meta") or {}
                     slug = meta.get("slug") or ""
                     logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
@@ -868,38 +853,12 @@ def main() -> None:
                     and open_orders_count > 0
                     and missing_streak >= orphan_cancel_rounds
                 ):
-                    cancel_actions = [
-                        {"type": "cancel", "order_id": order.get("order_id")}
-                        for order in open_orders
-                        if order.get("order_id")
-                    ]
-                    if cancel_actions:
-                        logger.info(
-                            "[ORPHAN] token_id=%s canceled=%s missing_streak=%s",
-                            token_id,
-                            len(cancel_actions),
-                            missing_streak,
-                        )
-                        updated_orders = apply_actions(
-                            clob_client,
-                            cancel_actions,
-                            open_orders,
-                            now_ts,
-                            args.dry_run,
-                        )
-                        if updated_orders:
-                            state.setdefault("open_orders", {})[token_id] = updated_orders
-                        else:
-                            state.get("open_orders", {}).pop(token_id, None)
-                        _prune_order_ts_by_id(state)
-                    else:
-                        state.get("open_orders", {}).pop(token_id, None)
-                        _prune_order_ts_by_id(state)
-                    if orphan_ignore_sec > 0:
-                        state.setdefault("ignored_tokens", {})[token_id] = {
-                            "expires_at": now_ts + orphan_ignore_sec,
-                            "reason": "orphan_canceled",
-                        }
+                    logger.info(
+                        "[ORPHAN] token_id=%s missing_streak=%s open_orders=%s",
+                        token_id,
+                        missing_streak,
+                        open_orders_count,
+                    )
                 if not treating_missing_as_zero:
                     continue
 
@@ -926,43 +885,6 @@ def main() -> None:
                 has_buy_open = any(
                     str(order.get("side") or "").upper() == "BUY" for order in open_orders or []
                 )
-                if should_probe and has_buy_open and ttl_sec > 0:
-                    stale_buy_orders = [
-                        order
-                        for order in open_orders
-                        if str(order.get("side") or "").upper() == "BUY"
-                        and now_ts - int(order.get("ts") or now_ts) >= ttl_sec
-                    ]
-                    if stale_buy_orders:
-                        cancel_actions = [
-                            {"type": "cancel", "order_id": order.get("order_id")}
-                            for order in stale_buy_orders
-                            if order.get("order_id")
-                        ]
-                        if cancel_actions:
-                            logger.info(
-                                "[PROBE] token_id=%s stale_buy_cancel=%s",
-                                token_id,
-                                len(cancel_actions),
-                            )
-                            updated_orders = apply_actions(
-                                clob_client,
-                                cancel_actions,
-                                open_orders,
-                                now_ts,
-                                args.dry_run,
-                            )
-                            if updated_orders:
-                                state.setdefault("open_orders", {})[token_id] = updated_orders
-                                open_orders = updated_orders
-                            else:
-                                state.get("open_orders", {}).pop(token_id, None)
-                                open_orders = []
-                            _prune_order_ts_by_id(state)
-                            has_buy_open = any(
-                                str(order.get("side") or "").upper() == "BUY"
-                                for order in open_orders or []
-                            )
                 if should_probe and not has_buy_open:
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
@@ -995,57 +917,77 @@ def main() -> None:
                         continue
 
                     desired_side = "BUY"
+                    phase_for_intent = phase if topic_mode else "LONG"
+                    intent_key = _intent_key(phase_for_intent, desired_side, my_target)
+                    intent_changed, desired_down = _update_intent_state(
+                        state, token_id, intent_key, eps, logger
+                    )
                     open_orders_for_reconcile = open_orders
-                    if open_orders:
+                    if open_orders and intent_changed:
                         opposite_orders = [
                             order
                             for order in open_orders
                             if str(order.get("side") or "").upper() != desired_side
                         ]
-                        if opposite_orders:
-                            cancel_actions = [
-                                {"type": "cancel", "order_id": order.get("order_id")}
-                                for order in opposite_orders
-                                if order.get("order_id")
-                            ]
-                            if cancel_actions:
-                                logger.info(
-                                    "[REVERSE] token_id=%s side=%s cancel_open_orders=%s",
-                                    token_id,
-                                    desired_side,
-                                    len(cancel_actions),
-                                )
-                                updated_orders = apply_actions(
-                                    clob_client,
-                                    cancel_actions,
-                                    open_orders,
-                                    now_ts,
-                                    args.dry_run,
-                                )
-                                if updated_orders:
-                                    state.setdefault("open_orders", {})[
-                                        token_id
-                                    ] = updated_orders
-                                    open_orders = updated_orders
-                                else:
-                                    state.get("open_orders", {}).pop(token_id, None)
-                                    open_orders = []
-                                _prune_order_ts_by_id(state)
-                                planned_total_notional = _calc_used_notional_total(
-                                    my_by_token_id,
-                                    state.get("open_orders", {}),
-                                    state.get("last_mid_price_by_token_id", {}),
-                                    max_position_usd_per_token,
-                                )
-                                if cooldown_sec > 0:
-                                    state.setdefault("cooldown_until", {})[token_id] = (
-                                        now_ts + cooldown_sec
-                                    )
-                        open_orders_for_reconcile = [
+                        same_side_orders = [
                             order
                             for order in open_orders
                             if str(order.get("side") or "").upper() == desired_side
                         ]
+                        cancel_actions = []
+                        if opposite_orders:
+                            cancel_actions.extend(
+                                [
+                                    {"type": "cancel", "order_id": order.get("order_id")}
+                                    for order in opposite_orders
+                                    if order.get("order_id")
+                                ]
+                            )
+                        if desired_down or phase_for_intent == "EXITING":
+                            cancel_actions.extend(
+                                [
+                                    {"type": "cancel", "order_id": order.get("order_id")}
+                                    for order in same_side_orders
+                                    if order.get("order_id")
+                                ]
+                            )
+                        if cancel_actions:
+                            logger.info(
+                                "[CANCEL_INTENT] token_id=%s opposite=%s same_side=%s",
+                                token_id,
+                                len(opposite_orders),
+                                len(same_side_orders) if (desired_down or phase_for_intent == "EXITING") else 0,
+                            )
+                            updated_orders = apply_actions(
+                                clob_client,
+                                cancel_actions,
+                                open_orders,
+                                now_ts,
+                                args.dry_run,
+                            )
+                            if updated_orders:
+                                state.setdefault("open_orders", {})[token_id] = updated_orders
+                                open_orders = updated_orders
+                            else:
+                                state.get("open_orders", {}).pop(token_id, None)
+                                open_orders = []
+                            _prune_order_ts_by_id(state)
+                            _refresh_managed_order_ids(state)
+                            planned_total_notional = _calc_used_notional_total(
+                                my_by_token_id,
+                                state.get("open_orders", {}),
+                                state.get("last_mid_price_by_token_id", {}),
+                                max_position_usd_per_token,
+                            )
+                            if cooldown_sec > 0:
+                                state.setdefault("cooldown_until", {})[token_id] = (
+                                    now_ts + cooldown_sec
+                                )
+                    open_orders_for_reconcile = [
+                        order
+                        for order in open_orders
+                        if str(order.get("side") or "").upper() == desired_side
+                    ]
 
                     token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
                     actions = reconcile_one(
@@ -1114,6 +1056,7 @@ def main() -> None:
                     else:
                         state.get("open_orders", {}).pop(token_id, None)
                     _prune_order_ts_by_id(state)
+                    _refresh_managed_order_ids(state)
                     planned_total_notional = _calc_used_notional_total(
                         my_by_token_id,
                         state.get("open_orders", {}),
@@ -1224,6 +1167,82 @@ def main() -> None:
                 elif phase == "EXITING":
                     my_target = 0.0
             delta = my_target - my_shares
+            prev_intent = state.get("intent_keys", {}).get(token_id)
+            if delta > eps:
+                desired_side = "BUY"
+            elif delta < -eps:
+                desired_side = "SELL"
+            elif isinstance(prev_intent, dict) and prev_intent.get("desired_side"):
+                desired_side = str(prev_intent.get("desired_side")).upper()
+            else:
+                desired_side = "BUY"
+            phase_for_intent = phase if topic_mode else ("LONG" if desired_side == "BUY" else "EXITING")
+            intent_key = _intent_key(phase_for_intent, desired_side, my_target)
+            intent_changed, desired_down = _update_intent_state(
+                state, token_id, intent_key, eps, logger
+            )
+            if open_orders and intent_changed:
+                opposite_orders = [
+                    order
+                    for order in open_orders
+                    if str(order.get("side") or "").upper() != desired_side
+                ]
+                same_side_orders = [
+                    order
+                    for order in open_orders
+                    if str(order.get("side") or "").upper() == desired_side
+                ]
+                cancel_actions = []
+                if opposite_orders:
+                    cancel_actions.extend(
+                        [
+                            {"type": "cancel", "order_id": order.get("order_id")}
+                            for order in opposite_orders
+                            if order.get("order_id")
+                        ]
+                    )
+                if desired_down or phase_for_intent == "EXITING":
+                    cancel_actions.extend(
+                        [
+                            {"type": "cancel", "order_id": order.get("order_id")}
+                            for order in same_side_orders
+                            if order.get("order_id")
+                        ]
+                    )
+                if cancel_actions:
+                    logger.info(
+                        "[CANCEL_INTENT] token_id=%s opposite=%s same_side=%s",
+                        token_id,
+                        len(opposite_orders),
+                        len(same_side_orders)
+                        if (desired_down or phase_for_intent == "EXITING")
+                        else 0,
+                    )
+                    updated_orders = apply_actions(
+                        clob_client,
+                        cancel_actions,
+                        open_orders,
+                        now_ts,
+                        args.dry_run,
+                    )
+                    if updated_orders:
+                        state.setdefault("open_orders", {})[token_id] = updated_orders
+                        open_orders = updated_orders
+                    else:
+                        state.get("open_orders", {}).pop(token_id, None)
+                        open_orders = []
+                    _prune_order_ts_by_id(state)
+                    _refresh_managed_order_ids(state)
+                    planned_total_notional = _calc_used_notional_total(
+                        my_by_token_id,
+                        state.get("open_orders", {}),
+                        state.get("last_mid_price_by_token_id", {}),
+                        max_position_usd_per_token,
+                    )
+                    if cooldown_sec > 0:
+                        state.setdefault("cooldown_until", {})[token_id] = (
+                            now_ts + cooldown_sec
+                        )
             if abs(delta) <= eps:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
@@ -1238,56 +1257,12 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
-            desired_side = "BUY" if delta > 0 else "SELL"
             open_orders_for_reconcile = open_orders
-            if open_orders:
-                opposite_orders = [
-                    order
-                    for order in open_orders
-                    if str(order.get("side") or "").upper() != desired_side
-                ]
-                if opposite_orders:
-                    cancel_actions = [
-                        {"type": "cancel", "order_id": order.get("order_id")}
-                        for order in opposite_orders
-                        if order.get("order_id")
-                    ]
-                    if cancel_actions:
-                        logger.info(
-                            "[REVERSE] token_id=%s side=%s cancel_open_orders=%s",
-                            token_id,
-                            desired_side,
-                            len(cancel_actions),
-                        )
-                        updated_orders = apply_actions(
-                            clob_client,
-                            cancel_actions,
-                            open_orders,
-                            now_ts,
-                            args.dry_run,
-                        )
-                        if updated_orders:
-                            state.setdefault("open_orders", {})[token_id] = updated_orders
-                            open_orders = updated_orders
-                        else:
-                            state.get("open_orders", {}).pop(token_id, None)
-                            open_orders = []
-                        _prune_order_ts_by_id(state)
-                        planned_total_notional = _calc_used_notional_total(
-                            my_by_token_id,
-                            state.get("open_orders", {}),
-                            state.get("last_mid_price_by_token_id", {}),
-                            max_position_usd_per_token,
-                        )
-                        if cooldown_sec > 0:
-                            state.setdefault("cooldown_until", {})[token_id] = (
-                                now_ts + cooldown_sec
-                            )
-                open_orders_for_reconcile = [
-                    order
-                    for order in open_orders
-                    if str(order.get("side") or "").upper() == desired_side
-                ]
+            open_orders_for_reconcile = [
+                order
+                for order in open_orders
+                if str(order.get("side") or "").upper() == desired_side
+            ]
 
             state.setdefault("target_last_event_ts", {})[token_id] = now_ts
 
@@ -1379,6 +1354,7 @@ def main() -> None:
             else:
                 state.get("open_orders", {}).pop(token_id, None)
             _prune_order_ts_by_id(state)
+            _refresh_managed_order_ids(state)
             planned_total_notional = _calc_used_notional_total(
                 my_by_token_id,
                 state.get("open_orders", {}),
