@@ -19,10 +19,11 @@
   "probe_order_usd": 5,
   "follow_new_topics_only": false,
 
-  "order_ttl_sec": 90,
   "tick_size": 0.001,
 
   "maker_only": true,
+  "reprice_ticks": 1,
+  "reprice_cooldown_sec": 15,
 
   "cooldown_sec_per_token": 60,
   "missing_timeout_sec": 600,

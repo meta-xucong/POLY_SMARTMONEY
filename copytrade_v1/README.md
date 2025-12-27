@@ -2,7 +2,7 @@
 
 本目录提供基于 `copytrade_v1_blueprint.md` 的最小可运行版本，实现“仓位目标跟踪（Position Targeting）”的跟单脚本。
 
-> 重点：v1.0 仅跟踪目标仓位差，不做逐笔成交复刻；默认 maker-only 挂单，支持 TTL 过期撤挂重挂。
+> 重点：v1.0 仅跟踪目标仓位差，不做逐笔成交复刻；默认 maker-only 挂单，支持买一/卖一移动时撤单重挂。
 
 ## 1. 依赖与环境
 
@@ -35,9 +35,10 @@
   "deadband_shares": 3.0,
   "slice_min": 5,
   "slice_max": 25,
-  "order_ttl_sec": 90,
   "tick_size": 0.001,
   "maker_only": true,
+  "reprice_ticks": 1,
+  "reprice_cooldown_sec": 15,
   "max_notional_per_token": 500,
   "max_notional_total": 2000,
   "blacklist_token_keys": []
@@ -53,9 +54,10 @@
 - `size_threshold`：positions 拉取过滤阈值
 - `deadband_shares`：仓位差小于该值不纠偏
 - `slice_min/slice_max`：分批下单最小/最大份数
-- `order_ttl_sec`：挂单超时撤挂重挂
 - `tick_size`：价格最小跳动
 - `maker_only`：v1.0 默认只做 maker
+- `reprice_ticks`：买一/卖一移动触发撤单重挂的最小 tick 数
+- `reprice_cooldown_sec`：追价撤单的冷却时间（秒）
 - `max_notional_per_token`：单 token 最大名义金额
 - `max_notional_total`：总名义金额上限
 - `blacklist_token_keys`：黑名单（格式 `condition_id:outcome_index`）
@@ -102,8 +104,8 @@ python3 copytrade_run.py --dry-run
 3. 解析 `token_id`（基于 `condition_id`/`slug` 走 gamma-api）
 4. 对每个 token 执行 `reconcile_one`：
    - deadband 不交易
-   - TTL 过期撤单
-   - 每轮最多 1 笔挂单
+   - 买一/卖一移动触发撤单重挂
+   - 同侧仅保留 1 笔挂单
    - maker-only 挂单
 5. 持久化状态并进入下一轮
 

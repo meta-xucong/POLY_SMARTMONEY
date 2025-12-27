@@ -530,7 +530,7 @@ def main() -> None:
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
-            logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 仅撤单", hard_cap)
+            logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
         my_pos, my_info = fetch_positions_norm(
             data_client,
@@ -541,7 +541,7 @@ def main() -> None:
         )
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
-            logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 仅撤单", hard_cap)
+            logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
         logger.info(
             "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
