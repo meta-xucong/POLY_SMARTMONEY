@@ -126,18 +126,6 @@ def reconcile_one(
     if abs(delta) <= deadband:
         return actions
 
-    ttl_sec = int(cfg.get("order_ttl_sec") or 0)
-    remaining_orders: List[Dict[str, Any]] = []
-    for order in open_orders:
-        ts = int(order.get("ts") or 0)
-        if ttl_sec > 0 and now_ts - ts > ttl_sec:
-            actions.append({"type": "cancel", "order_id": order.get("order_id")})
-        else:
-            remaining_orders.append(order)
-
-    if remaining_orders:
-        return actions
-
     abs_delta = abs(delta)
 
     mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
@@ -175,12 +163,11 @@ def reconcile_one(
         if slice_min > 0 and abs_delta > slice_min and size < slice_min:
             size = slice_min
 
+    side = "BUY" if delta > 0 else "SELL"
+    price: Optional[float] = None
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
     tick_size = float(cfg.get("tick_size") or 0)
-
-    side = "BUY" if delta > 0 else "SELL"
-    price: Optional[float] = None
     if side == "BUY":
         if best_bid is not None:
             price = best_bid
@@ -221,6 +208,56 @@ def reconcile_one(
         size = min(size, my_shares)
 
     if size <= 0:
+        return actions
+
+    if open_orders:
+        active_order: Optional[Dict[str, Any]] = None
+        if side == "BUY":
+            active_order = max(open_orders, key=lambda order: float(order.get("price") or 0))
+        else:
+            active_order = min(open_orders, key=lambda order: float(order.get("price") or 0))
+        if active_order:
+            active_price = safe_float(active_order.get("price"))
+            active_size = safe_float(active_order.get("size")) or 0.0
+            last_ts = int(active_order.get("ts") or 0)
+            min_ticks = int(cfg.get("reprice_min_ticks") or 1)
+            cooldown_sec = int(cfg.get("reprice_cooldown_sec") or 0)
+            min_price_delta = tick_size * min_ticks if tick_size > 0 else 0.0
+            price_gap = abs(float(active_price or 0.0) - float(price))
+            cooldown_ok = cooldown_sec <= 0 or (now_ts - last_ts) >= cooldown_sec
+            if (
+                active_price is not None
+                and price_gap > 0
+                and price_gap >= min_price_delta
+                and cooldown_ok
+            ):
+                place_size = size
+                if active_size > 0:
+                    place_size = min(place_size, active_size)
+                if place_size > 0:
+                    logger.info(
+                        "[REPRICE] token_id=%s side=%s active_price=%s ideal_price=%s "
+                        "min_ticks=%s cooldown_sec=%s since_last=%s",
+                        token_id,
+                        side,
+                        active_price,
+                        price,
+                        min_ticks,
+                        cooldown_sec,
+                        now_ts - last_ts,
+                    )
+                    actions.append({"type": "cancel", "order_id": active_order.get("order_id")})
+                    actions.append(
+                        {
+                            "type": "place",
+                            "token_id": token_id,
+                            "side": side,
+                            "price": price,
+                            "size": place_size,
+                            "ts": now_ts,
+                        }
+                    )
+                    return actions
         return actions
 
     actions.append(

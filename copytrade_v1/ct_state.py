@@ -8,6 +8,9 @@ from typing import Any, Dict
 DEFAULT_STATE: Dict[str, Any] = {
     "token_map": {},
     "open_orders": {},
+    "open_orders_all": {},
+    "managed_order_ids": [],
+    "intent_keys": {},
     "last_mid_price_by_token_id": {},
     "last_sync_ts": 0,
     "target_last_shares": {},
@@ -40,6 +43,12 @@ def load_state(path: str) -> Dict[str, Any]:
         state["token_map"] = {}
     if "open_orders" not in state or not isinstance(state["open_orders"], dict):
         state["open_orders"] = {}
+    if "open_orders_all" not in state or not isinstance(state["open_orders_all"], dict):
+        state["open_orders_all"] = {}
+    if "managed_order_ids" not in state or not isinstance(state["managed_order_ids"], list):
+        state["managed_order_ids"] = []
+    if "intent_keys" not in state or not isinstance(state["intent_keys"], dict):
+        state["intent_keys"] = {}
     if "last_mid_price_by_token_id" not in state or not isinstance(
         state["last_mid_price_by_token_id"], dict
     ):
