@@ -218,31 +218,28 @@ def reconcile_one(
             active_order = min(open_orders, key=lambda order: float(order.get("price") or 0))
         if active_order:
             active_price = safe_float(active_order.get("price"))
-            active_size = safe_float(active_order.get("size")) or 0.0
             last_ts = int(active_order.get("ts") or 0)
-            min_ticks = int(cfg.get("reprice_min_ticks") or 1)
+            reprice_ticks = int(cfg.get("reprice_ticks") or cfg.get("reprice_min_ticks") or 1)
             cooldown_sec = int(cfg.get("reprice_cooldown_sec") or 0)
-            min_price_delta = tick_size * min_ticks if tick_size > 0 else 0.0
-            price_gap = abs(float(active_price or 0.0) - float(price))
             cooldown_ok = cooldown_sec <= 0 or (now_ts - last_ts) >= cooldown_sec
-            if (
-                active_price is not None
-                and price_gap > 0
-                and price_gap >= min_price_delta
-                and cooldown_ok
-            ):
-                place_size = size
-                if active_size > 0:
-                    place_size = min(place_size, active_size)
-                if place_size > 0:
+            if active_price is not None and tick_size > 0 and cooldown_ok:
+                if side == "BUY" and best_bid is not None:
+                    trigger = best_bid >= active_price + tick_size * reprice_ticks
+                elif side == "SELL" and best_ask is not None:
+                    trigger = best_ask <= active_price - tick_size * reprice_ticks
+                else:
+                    trigger = False
+                if trigger:
                     logger.info(
                         "[REPRICE] token_id=%s side=%s active_price=%s ideal_price=%s "
-                        "min_ticks=%s cooldown_sec=%s since_last=%s",
+                        "best_bid=%s best_ask=%s reprice_ticks=%s cooldown_sec=%s since_last=%s",
                         token_id,
                         side,
                         active_price,
                         price,
-                        min_ticks,
+                        best_bid,
+                        best_ask,
+                        reprice_ticks,
                         cooldown_sec,
                         now_ts - last_ts,
                     )
@@ -253,7 +250,7 @@ def reconcile_one(
                             "token_id": token_id,
                             "side": side,
                             "price": price,
-                            "size": place_size,
+                            "size": size,
                             "ts": now_ts,
                         }
                     )
@@ -410,37 +407,6 @@ def apply_actions(
     return updated
 
 
-def cancel_expired_only(
-    client: Any,
-    open_orders: Dict[str, List[Dict[str, Any]]],
-    now_ts: int,
-    ttl_sec: int,
-    dry_run: bool,
-) -> Dict[str, List[Dict[str, Any]]]:
-    updated: Dict[str, List[Dict[str, Any]]] = {}
-    for token_id, orders in open_orders.items():
-        keep: List[Dict[str, Any]] = []
-        for order in orders:
-            ts = int(order.get("ts") or 0)
-            if ttl_sec > 0 and now_ts - ts > ttl_sec:
-                order_id = order.get("order_id")
-                if order_id and not dry_run:
-                    try:
-                        cancel_order(client, str(order_id))
-                        continue
-                    except Exception as exc:
-                        logger.warning(
-                            "cancel_order failed(order_id=%s) in cancel_expired_only: %s",
-                            order_id,
-                            exc,
-                        )
-                        keep.append(order)
-                        continue
-                continue
-            keep.append(order)
-        if keep:
-            updated[token_id] = keep
-    return updated
 
 
 def _as_dict(obj: Any) -> Optional[Dict[str, Any]]:
