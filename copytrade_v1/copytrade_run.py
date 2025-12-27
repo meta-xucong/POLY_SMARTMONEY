@@ -371,6 +371,8 @@ def main() -> None:
     state.setdefault("last_mid_price_by_token_id", {})
     state.setdefault("order_ts_by_id", {})
     state.setdefault("seen_action_ids", [])
+    state.setdefault("last_reprice_ts_by_token", {})
+    state.setdefault("adopted_existing_orders", False)
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("open_orders_all"), dict):
@@ -411,6 +413,10 @@ def main() -> None:
         state["order_ts_by_id"] = {}
     if not isinstance(state.get("seen_action_ids"), list):
         state["seen_action_ids"] = []
+    if not isinstance(state.get("last_reprice_ts_by_token"), dict):
+        state["last_reprice_ts_by_token"] = {}
+    if not isinstance(state.get("adopted_existing_orders"), bool):
+        state["adopted_existing_orders"] = False
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -434,7 +440,6 @@ def main() -> None:
             remote_orders, ok, err = fetch_open_orders_norm(clob_client)
             if ok:
                 remote_by_token: Dict[str, list[dict]] = {}
-                managed_by_token: Dict[str, list[dict]] = {}
                 order_ts_by_id = state.setdefault("order_ts_by_id", {})
                 remote_order_ids: set[str] = set()
                 for order in remote_orders:
@@ -449,10 +454,36 @@ def main() -> None:
                         "ts": int(ts),
                     }
                     remote_by_token.setdefault(order["token_id"], []).append(order_payload)
-                    if order_id in managed_ids:
-                        if order_id not in order_ts_by_id:
-                            order_ts_by_id[order_id] = int(ts)
-                        managed_by_token.setdefault(order["token_id"], []).append(order_payload)
+                adopt_existing = bool(cfg.get("adopt_existing_orders_on_boot", False))
+                if adopt_existing and not state.get("adopted_existing_orders", False):
+                    if len(managed_ids) < 3:
+                        adoptable_ids: set[str] = set()
+                        for orders in remote_by_token.values():
+                            for order in orders:
+                                price = float(order.get("price") or 0.0)
+                                size = float(order.get("size") or 0.0)
+                                if price <= 0 or price > 1.0:
+                                    continue
+                                if size <= 0:
+                                    continue
+                                order_id = order.get("order_id")
+                                if order_id:
+                                    adoptable_ids.add(str(order_id))
+                        if adoptable_ids:
+                            logger.info(
+                                "[BOOT] adopt_existing_orders_on_boot: adopted=%s",
+                                len(adoptable_ids),
+                            )
+                            managed_ids |= adoptable_ids
+                    state["adopted_existing_orders"] = True
+                managed_by_token: Dict[str, list[dict]] = {}
+                for token_id, orders in remote_by_token.items():
+                    for order in orders:
+                        order_id = str(order["order_id"])
+                        if order_id in managed_ids:
+                            if order_id not in order_ts_by_id:
+                                order_ts_by_id[order_id] = int(order.get("ts") or now_ts)
+                            managed_by_token.setdefault(token_id, []).append(order)
                 managed_ids &= remote_order_ids
                 for order_id in list(order_ts_by_id.keys()):
                     if str(order_id) not in managed_ids:
@@ -998,6 +1029,7 @@ def main() -> None:
                         open_orders_for_reconcile,
                         now_ts,
                         cfg,
+                        state,
                     )
                     if not actions:
                         continue
@@ -1279,6 +1311,7 @@ def main() -> None:
                 open_orders_for_reconcile,
                 now_ts,
                 cfg,
+                state,
             )
             if not actions:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)

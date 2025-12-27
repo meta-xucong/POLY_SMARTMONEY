@@ -18,6 +18,7 @@
   "probe_buy_on_first_seen": true,
   "probe_order_usd": 5,
   "follow_new_topics_only": false,
+  "adopt_existing_orders_on_boot": false,
 
   "tick_size": 0.001,
 

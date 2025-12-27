@@ -119,11 +119,12 @@ def reconcile_one(
     open_orders: List[Dict[str, Any]],
     now_ts: int,
     cfg: Dict[str, Any],
+    state: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     deadband = float(cfg.get("deadband_shares") or 0)
     delta = desired_shares - my_shares
-    if abs(delta) <= deadband:
+    if abs(delta) <= deadband and not open_orders:
         return actions
 
     abs_delta = abs(delta)
@@ -218,10 +219,12 @@ def reconcile_one(
             active_order = min(open_orders, key=lambda order: float(order.get("price") or 0))
         if active_order:
             active_price = safe_float(active_order.get("price"))
-            last_ts = int(active_order.get("ts") or 0)
+            last_reprice_ts = int(
+                state.setdefault("last_reprice_ts_by_token", {}).get(token_id) or 0
+            )
             reprice_ticks = int(cfg.get("reprice_ticks") or cfg.get("reprice_min_ticks") or 1)
             cooldown_sec = int(cfg.get("reprice_cooldown_sec") or 0)
-            cooldown_ok = cooldown_sec <= 0 or (now_ts - last_ts) >= cooldown_sec
+            cooldown_ok = cooldown_sec <= 0 or (now_ts - last_reprice_ts) >= cooldown_sec
             if active_price is not None and tick_size > 0 and cooldown_ok:
                 if side == "BUY" and best_bid is not None:
                     trigger = best_bid >= active_price + tick_size * reprice_ticks
@@ -241,7 +244,7 @@ def reconcile_one(
                         best_ask,
                         reprice_ticks,
                         cooldown_sec,
-                        now_ts - last_ts,
+                        now_ts - last_reprice_ts,
                     )
                     actions.append({"type": "cancel", "order_id": active_order.get("order_id")})
                     actions.append(
@@ -254,6 +257,7 @@ def reconcile_one(
                             "ts": now_ts,
                         }
                     )
+                    state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
                     return actions
         return actions
 
