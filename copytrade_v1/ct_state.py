@@ -25,6 +25,8 @@ DEFAULT_STATE: Dict[str, Any] = {
     "bootstrapped": False,
     "boot_token_ids": [],
     "probed_token_ids": [],
+    "last_reprice_ts_by_token": {},
+    "adopted_existing_orders": False,
 }
 
 
@@ -86,6 +88,14 @@ def load_state(path: str) -> Dict[str, Any]:
         state["boot_token_ids"] = []
     if "probed_token_ids" not in state or not isinstance(state["probed_token_ids"], list):
         state["probed_token_ids"] = []
+    if "last_reprice_ts_by_token" not in state or not isinstance(
+        state["last_reprice_ts_by_token"], dict
+    ):
+        state["last_reprice_ts_by_token"] = {}
+    if "adopted_existing_orders" not in state or not isinstance(
+        state["adopted_existing_orders"], bool
+    ):
+        state["adopted_existing_orders"] = False
     return state
 
 
