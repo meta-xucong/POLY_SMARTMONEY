@@ -538,6 +538,8 @@ def main() -> None:
     if int(state.get("target_actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
 
+    missing_notice_tokens: set[str] = set()
+
     while True:
         now_ts = int(time.time())
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
@@ -1051,9 +1053,12 @@ def main() -> None:
                     treating_missing_as_zero = True
                     state.setdefault("target_missing_streak", {})[token_id] = 0
                 missing = t_now is None
-                if (missing and (my_shares > 0 or open_orders_count > 0)) or (
-                    token_id in debug_token_ids
-                ):
+                should_log_missing = (
+                    missing
+                    and (my_shares > 0 or open_orders_count > 0)
+                    and token_id not in missing_notice_tokens
+                )
+                if should_log_missing or (token_id in debug_token_ids):
                     legacy_desired = float(cfg.get("follow_ratio") or 0.0) * (
                         t_now or 0.0
                     )
@@ -1076,6 +1081,8 @@ def main() -> None:
                         legacy_desired,
                         legacy_delta,
                     )
+                    if should_log_missing:
+                        missing_notice_tokens.add(token_id)
                 if (
                     missing
                     and t_now is None
