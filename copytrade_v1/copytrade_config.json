@@ -28,10 +28,11 @@
   "maker_only": true,
   "reprice_ticks": 1,
   "reprice_cooldown_sec": 15,
+  "enable_reprice": false,
 
   "cooldown_sec_per_token": 60,
   "missing_timeout_sec": 600,
-  "missing_to_zero_rounds": 2,
+  "missing_to_zero_rounds": 0,
   "debug_token_ids": [],
   "log_dir": "logs",
   "log_level": "INFO",

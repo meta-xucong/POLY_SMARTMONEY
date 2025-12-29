@@ -13,6 +13,10 @@ logger = logging.getLogger(__name__)
 def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
     bid = orderbook.get("best_bid")
     ask = orderbook.get("best_ask")
+    if bid is not None and bid <= 0:
+        bid = None
+    if ask is not None and ask <= 0:
+        ask = None
     if bid is not None and ask is not None:
         return (bid + ask) / 2.0
     if bid is not None:
@@ -76,6 +80,10 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
         pass
 
     if best_ask is not None or best_bid is not None:
+        if best_ask is not None and best_ask <= 0:
+            best_ask = None
+        if best_bid is not None and best_bid <= 0:
+            best_bid = None
         return {"best_bid": best_bid, "best_ask": best_ask}
 
     try:
@@ -107,6 +115,10 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
 
         best_bid = _best(bids, pick_max=True)
         best_ask = _best(asks, pick_max=False)
+        if best_ask is not None and best_ask <= 0:
+            best_ask = None
+        if best_bid is not None and best_bid <= 0:
+            best_bid = None
         return {"best_bid": best_bid, "best_ask": best_ask}
     except Exception:
         return {"best_bid": None, "best_ask": None}
@@ -213,13 +225,16 @@ def reconcile_one(
         size = min(size, my_shares)
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
-    if min_shares > 0 and mode != "auto_usd" and size < min_shares:
+    if min_shares > 0 and size < min_shares:
         return actions
 
     if size <= 0:
         return actions
 
     if open_orders:
+        enable_reprice = bool(cfg.get("enable_reprice", False))
+        if not enable_reprice:
+            return actions
         active_order: Optional[Dict[str, Any]] = None
         if side == "BUY":
             active_order = max(open_orders, key=lambda order: float(order.get("price") or 0))
