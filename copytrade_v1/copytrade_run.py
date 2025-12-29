@@ -169,6 +169,10 @@ def init_clob_client():
 def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
     bid = orderbook.get("best_bid")
     ask = orderbook.get("best_ask")
+    if bid is not None and bid <= 0:
+        bid = None
+    if ask is not None and ask <= 0:
+        ask = None
     if bid is not None and ask is not None:
         return (bid + ask) / 2.0
     if bid is not None:
@@ -607,6 +611,7 @@ def main() -> None:
         has_buy_by_token: Dict[str, bool] = {}
         has_sell_by_token: Dict[str, bool] = {}
         buy_sum_by_token: Dict[str, float] = {}
+        sell_sum_by_token: Dict[str, float] = {}
         actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
         actions_cursor_ms = int(state.get("target_actions_cursor_ms") or 0)
@@ -619,6 +624,7 @@ def main() -> None:
                 buy_sum_by_token[token_id] = buy_sum_by_token.get(token_id, 0.0) + size
             elif side == "SELL":
                 has_sell_by_token[token_id] = True
+                sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
 
         try:
             actions_list, actions_info = fetch_target_actions_since(
@@ -862,7 +868,7 @@ def main() -> None:
         max_notional_total = float(cfg.get("max_notional_total") or 0.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
-        missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 2)
+        missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 0)
         orphan_cancel_rounds = int(cfg.get("orphan_cancel_rounds") or 3)
         orphan_ignore_sec = int(cfg.get("orphan_ignore_sec") or 120)
         debug_token_ids = {str(token_id) for token_id in (cfg.get("debug_token_ids") or [])}
@@ -983,10 +989,10 @@ def main() -> None:
             open_orders_count = len(open_orders)
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
-            treating_missing_as_zero = False
             has_buy = bool(has_buy_by_token.get(token_id))
             has_sell = bool(has_sell_by_token.get(token_id))
             buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
+            sell_sum = float(sell_sum_by_token.get(token_id, 0.0))
             action_seen = has_buy or has_sell
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
@@ -1043,15 +1049,6 @@ def main() -> None:
                     and last_seen_ts > 0
                     and now_ts - last_seen_ts >= missing_timeout_sec
                 )
-                if (
-                    (missing_streak >= missing_to_zero_rounds or missing_timeout)
-                    and t_last is not None
-                    and float(t_last) > 0
-                ):
-                    t_now_present = True
-                    t_now = 0.0
-                    treating_missing_as_zero = True
-                    state.setdefault("target_missing_streak", {})[token_id] = 0
                 missing = t_now is None
                 should_log_missing = (
                     missing
@@ -1062,7 +1059,6 @@ def main() -> None:
                     legacy_desired = float(cfg.get("follow_ratio") or 0.0) * (
                         t_now or 0.0
                     )
-                    legacy_delta = legacy_desired - my_shares
                     logger.info(
                         "[DBG] token_id=%s missing=%s missing_streak=%s t_now=%s t_last=%s "
                         "my_shares=%s open_orders_count=%s",
@@ -1074,21 +1070,11 @@ def main() -> None:
                         my_shares,
                         open_orders_count,
                     )
-                    logger.info(
-                        "[DBG] token_id=%s legacy_desired=%s legacy_delta=%s "
-                        "old logic would SELL → churn risk",
-                        token_id,
-                        legacy_desired,
-                        legacy_delta,
-                    )
+                    logger.info("[DBG] token_id=%s legacy_desired=%s", token_id, legacy_desired)
                     if should_log_missing:
                         missing_notice_tokens.add(token_id)
-                if (
-                    missing
-                    and t_now is None
-                    and my_shares == 0
-                    and open_orders_count > 0
-                    and missing_streak >= orphan_cancel_rounds
+                if open_orders_count > 0 and missing and (
+                    missing_timeout or (missing_streak >= orphan_cancel_rounds)
                 ):
                     logger.info(
                         "[ORPHAN] token_id=%s missing_streak=%s open_orders=%s",
@@ -1096,14 +1082,49 @@ def main() -> None:
                         missing_streak,
                         open_orders_count,
                     )
-                if not treating_missing_as_zero:
-                    continue
+                    cancel_actions = [
+                        {"type": "cancel", "order_id": order.get("order_id")}
+                        for order in open_orders
+                        if order.get("order_id")
+                    ]
+                    if cancel_actions:
+                        updated_orders = apply_actions(
+                            clob_client,
+                            cancel_actions,
+                            open_orders,
+                            now_ts,
+                            args.dry_run,
+                            cfg=cfg,
+                        )
+                        if updated_orders:
+                            state.setdefault("open_orders", {})[token_id] = updated_orders
+                        else:
+                            state.get("open_orders", {}).pop(token_id, None)
+                        _prune_order_ts_by_id(state)
+                        _refresh_managed_order_ids(state)
+                        (
+                            planned_total_notional,
+                            planned_by_token_usd,
+                            order_info_by_id,
+                        ) = _calc_used_notional_totals(
+                            my_by_token_id,
+                            state.get("open_orders", {}),
+                            state.get("last_mid_price_by_token_id", {}),
+                            max_position_usd_per_token,
+                        )
+                        if orphan_ignore_sec > 0:
+                            state.setdefault("ignored_tokens", {})[token_id] = {
+                                "ts": now_ts,
+                                "reason": "missing_orphan_cancel",
+                                "expires_at": now_ts + orphan_ignore_sec,
+                            }
+                continue
 
             if action_seen:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 if t_now_present:
                     state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
-            elif not treating_missing_as_zero:
+            elif t_now_present:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
 
@@ -1142,8 +1163,13 @@ def main() -> None:
                         )
                         continue
                     ref_price = _mid_price(ob)
-                    if ref_price is None:
-                        logger.warning("[WARN] 无法获取盘口(探针): token_id=%s", token_id)
+                    if ref_price is None or ref_price <= 0:
+                        logger.warning(
+                            "[WARN] 无效盘口(探针): token_id=%s best_bid=%s best_ask=%s",
+                            token_id,
+                            best_bid,
+                            best_ask,
+                        )
                         continue
 
                     state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(
@@ -1431,7 +1457,13 @@ def main() -> None:
                 continue
 
             if t_now is None:
-                d_target = 0.0
+                action_delta = buy_sum - sell_sum
+                if action_seen and abs(action_delta) > eps:
+                    d_target = action_delta
+                else:
+                    if not topic_active:
+                        continue
+                    d_target = 0.0
             elif t_last is None:
                 d_target = float(t_now)
             else:
@@ -1458,8 +1490,13 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             ref_price = _mid_price(ob)
-            if ref_price is None:
-                logger.warning("[WARN] 无法获取盘口: token_id=%s", token_id)
+            if ref_price is None or ref_price <= 0:
+                logger.warning(
+                    "[WARN] 无效盘口: token_id=%s best_bid=%s best_ask=%s",
+                    token_id,
+                    best_bid,
+                    best_ask,
+                )
                 logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
