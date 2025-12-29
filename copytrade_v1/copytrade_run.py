@@ -84,8 +84,15 @@ def _shorten_address(address: str) -> str:
     return f"{text[:6]}..{text[-4:]}"
 
 
-def _setup_logging(cfg: Dict[str, Any], target_address: str) -> logging.Logger:
-    log_dir = Path(cfg.get("log_dir") or "logs")
+def _setup_logging(
+    cfg: Dict[str, Any],
+    target_address: str,
+    base_dir: Path,
+) -> logging.Logger:
+    log_dir_value = cfg.get("log_dir") or "logs"
+    log_dir = Path(log_dir_value)
+    if not log_dir.is_absolute():
+        log_dir = base_dir / log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     pid = os.getpid()
@@ -421,7 +428,7 @@ def main() -> None:
         ],
     )
 
-    logger = _setup_logging(cfg, cfg["target_address"])
+    logger = _setup_logging(cfg, cfg["target_address"], Path(args.config).parent)
 
     state = load_state(args.state)
     run_start_ms = int(time.time() * 1000)
