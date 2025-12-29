@@ -140,6 +140,7 @@ def reconcile_one(
             return actions
 
         min_usd = float(cfg.get("min_order_usd") or 5.0)
+        min_shares = float(cfg.get("min_order_shares") or 0.0)
         max_usd = float(cfg.get("max_order_usd") or 25.0)
         if max_usd < min_usd:
             max_usd = min_usd
@@ -150,6 +151,8 @@ def reconcile_one(
         order_usd = delta_usd * k
         if order_usd < min_usd:
             order_usd = min_usd
+        if min_shares > 0:
+            order_usd = max(order_usd, min_shares * ref_price)
         if order_usd > max_usd:
             order_usd = max_usd
 
@@ -208,6 +211,10 @@ def reconcile_one(
     allow_short = bool(cfg.get("allow_short"))
     if side == "SELL" and not allow_short:
         size = min(size, my_shares)
+
+    min_shares = float(cfg.get("min_order_shares") or 0.0)
+    if min_shares > 0 and mode != "auto_usd" and size < min_shares:
+        return actions
 
     if size <= 0:
         return actions
@@ -485,12 +492,17 @@ def apply_actions(
             if price <= 0 or size <= 0:
                 continue
             min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
             shrink_factor = float(cfg.get("retry_shrink_factor") or 0.5)
             old_usd = abs(size) * price
             new_usd = max(min_order_usd, old_usd * shrink_factor)
+            if min_order_shares > 0:
+                new_usd = max(new_usd, min_order_shares * price)
             if new_usd >= old_usd * (1 - 1e-9):
                 continue
             new_size = new_usd / price
+            if min_order_shares > 0 and new_size + 1e-12 < min_order_shares:
+                continue
             try:
                 response = place_order(
                     client,

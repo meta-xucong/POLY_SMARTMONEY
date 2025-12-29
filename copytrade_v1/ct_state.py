@@ -22,8 +22,12 @@ DEFAULT_STATE: Dict[str, Any] = {
     "target_actions_cursor_ts": 0,
     "target_actions_cursor_ms": 0,
     "seen_action_ids": [],
+    "run_start_ms": 0,
+    "boot_run_start_ms": 0,
     "bootstrapped": False,
     "boot_token_ids": [],
+    "boot_token_keys": [],
+    "target_last_shares_by_token_key": {},
     "probed_token_ids": [],
     "last_reprice_ts_by_token": {},
     "adopted_existing_orders": False,
@@ -82,10 +86,20 @@ def load_state(path: str) -> Dict[str, Any]:
         state["target_actions_cursor_ms"] = int(state["target_actions_cursor_ts"]) * 1000
     if "seen_action_ids" not in state or not isinstance(state["seen_action_ids"], list):
         state["seen_action_ids"] = []
+    if "run_start_ms" not in state or not isinstance(state["run_start_ms"], (int, float)):
+        state["run_start_ms"] = 0
+    if "boot_run_start_ms" not in state or not isinstance(state["boot_run_start_ms"], (int, float)):
+        state["boot_run_start_ms"] = 0
     if "bootstrapped" not in state or not isinstance(state["bootstrapped"], bool):
         state["bootstrapped"] = False
     if "boot_token_ids" not in state or not isinstance(state["boot_token_ids"], list):
         state["boot_token_ids"] = []
+    if "boot_token_keys" not in state or not isinstance(state["boot_token_keys"], list):
+        state["boot_token_keys"] = []
+    if "target_last_shares_by_token_key" not in state or not isinstance(
+        state["target_last_shares_by_token_key"], dict
+    ):
+        state["target_last_shares_by_token_key"] = {}
     if "probed_token_ids" not in state or not isinstance(state["probed_token_ids"], list):
         state["probed_token_ids"] = []
     if "last_reprice_ts_by_token" not in state or not isinstance(

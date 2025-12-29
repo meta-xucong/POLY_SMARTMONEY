@@ -11,6 +11,7 @@ def risk_check(
     cfg: Dict[str, object],
     side: Optional[str] = None,
     planned_total_notional: Optional[float] = None,
+    planned_token_notional: Optional[float] = None,
 ) -> Tuple[bool, str]:
     blacklist = cfg.get("blacklist_token_keys") or []
     if token_key in blacklist:
@@ -18,8 +19,10 @@ def risk_check(
 
     max_per_token = float(cfg.get("max_notional_per_token") or 0)
     order_notional = abs(order_shares) * ref_price if ref_price else 0.0
-    if max_per_token > 0 and order_notional > max_per_token:
-        return False, "max_notional_per_token"
+    if max_per_token > 0:
+        base = float(planned_token_notional or 0.0)
+        if base + order_notional > max_per_token:
+            return False, "max_notional_per_token"
 
     max_total = float(cfg.get("max_notional_total") or 0)
     if max_total > 0 and planned_total_notional is not None and side is not None:
