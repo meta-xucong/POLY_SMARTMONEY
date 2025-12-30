@@ -1839,7 +1839,6 @@ def main() -> None:
 
             if cooldown_active:
                 logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
-                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
             did_place_buy = any(
