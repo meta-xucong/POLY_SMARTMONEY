@@ -548,6 +548,8 @@ def main() -> None:
     positions_max_pages = int(cfg.get("positions_max_pages") or 20)
     actions_page_size = int(cfg.get("actions_page_size") or 300)
     actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
+    heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
+    last_heartbeat_ts = 0
 
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
@@ -678,6 +680,8 @@ def main() -> None:
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
+        has_new_actions = bool(actions_list)
+
         target_pos, target_info = fetch_positions_norm(
             data_client,
             cfg["target_address"],
@@ -701,20 +705,25 @@ def main() -> None:
             my_info["incomplete"] = True
             logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
-        logger.info(
-            "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
-            len(target_pos),
-            len(my_pos),
-            bool(target_info.get("incomplete")),
-            bool(my_info.get("incomplete")),
+        should_log_heartbeat = has_new_actions or (
+            now_ts - last_heartbeat_ts >= heartbeat_interval_sec
         )
-        if target_info.get("incomplete"):
+        if should_log_heartbeat:
             logger.info(
-                "[POS] target positions info limit=%s total=%s max_pages=%s",
-                target_info.get("limit"),
-                target_info.get("total"),
-                target_info.get("max_pages"),
+                "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
+                len(target_pos),
+                len(my_pos),
+                bool(target_info.get("incomplete")),
+                bool(my_info.get("incomplete")),
             )
+            if target_info.get("incomplete"):
+                logger.info(
+                    "[POS] target positions info limit=%s total=%s max_pages=%s",
+                    target_info.get("limit"),
+                    target_info.get("total"),
+                    target_info.get("max_pages"),
+                )
+            last_heartbeat_ts = now_ts
 
         if not target_info.get("ok") or target_info.get("incomplete"):
             logger.warning("[SAFE] target positions 不完整，跳过本轮执行")
