@@ -1494,7 +1494,6 @@ def main() -> None:
             else:
                 ob = get_orderbook(clob_client, token_id)
                 orderbooks[token_id] = ob
-                orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
