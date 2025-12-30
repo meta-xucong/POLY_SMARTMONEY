@@ -155,6 +155,8 @@ def reconcile_one(
         return actions
 
     abs_delta = abs(delta)
+    phase = (state.get("topic_state", {}).get(token_id) or {}).get("phase")
+    is_exiting = phase == "EXITING"
 
     mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
     size: float = 0.0
@@ -229,6 +231,9 @@ def reconcile_one(
 
     if mode == "auto_usd" and target_order_usd is not None:
         size = target_order_usd / price
+
+    if is_exiting and side == "SELL" and bool(cfg.get("exit_full_sell", True)):
+        size = abs_delta
 
     max_shares_cap = float(cfg.get("max_order_shares_cap") or 5000.0)
     if size > max_shares_cap:

@@ -63,6 +63,13 @@ def _is_placeholder_addr(value: Optional[str]) -> bool:
     return False
 
 
+def _is_pure_reprice(actions: Optional[list[dict]]) -> bool:
+    if not actions or len(actions) != 2:
+        return False
+    first, second = actions
+    return first.get("type") == "cancel" and second.get("type") == "place"
+
+
 def _is_evm_address(value: Optional[str]) -> bool:
     if not value:
         return False
@@ -1045,6 +1052,7 @@ def main() -> None:
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
+            is_exiting = phase == "EXITING"
             topic_active = topic_mode and phase in ("LONG", "EXITING")
             probe_attempted = False
             if (not action_seen) and (not t_now_present) and (not topic_active):
@@ -1251,7 +1259,8 @@ def main() -> None:
                                 if (desired_down or phase_for_intent == "EXITING")
                                 else 0,
                             )
-                            if cooldown_active:
+                            ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
+                            if cooldown_active and not ignore_cd:
                                 logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                             else:
                                 updated_orders = apply_actions(
@@ -1280,7 +1289,7 @@ def main() -> None:
                                     state.get("last_mid_price_by_token_id", {}),
                                     max_position_usd_per_token,
                                 )
-                                if cooldown_sec > 0:
+                                if cooldown_sec > 0 and not ignore_cd:
                                     state.setdefault("cooldown_until", {})[token_id] = (
                                         now_ts + cooldown_sec
                                     )
@@ -1430,7 +1439,9 @@ def main() -> None:
                     actions = filtered_actions
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
-                    if cooldown_active:
+                    is_reprice = _is_pure_reprice(actions)
+                    ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
+                    if cooldown_active and (not ignore_cd) and (not is_reprice):
                         logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
                         continue
 
@@ -1459,10 +1470,12 @@ def main() -> None:
                         max_position_usd_per_token,
                     )
 
-                    if cooldown_sec > 0 and actions:
+                    if cooldown_sec > 0 and actions and (not ignore_cd) and (not is_reprice):
                         state.setdefault("cooldown_until", {})[token_id] = (
                             now_ts + cooldown_sec
                         )
+                    if is_reprice:
+                        state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
 
                     probed = set(state.get("probed_token_ids", []))
                     probed.add(token_id)
@@ -1640,7 +1653,8 @@ def main() -> None:
                         if (desired_down or phase_for_intent == "EXITING")
                         else 0,
                     )
-                    if cooldown_active:
+                    ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
+                    if cooldown_active and not ignore_cd:
                         logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                     else:
                         updated_orders = apply_actions(
@@ -1669,7 +1683,7 @@ def main() -> None:
                             state.get("last_mid_price_by_token_id", {}),
                             max_position_usd_per_token,
                         )
-                        if cooldown_sec > 0:
+                        if cooldown_sec > 0 and not ignore_cd:
                             state.setdefault("cooldown_until", {})[token_id] = (
                                 now_ts + cooldown_sec
                             )
@@ -1836,7 +1850,9 @@ def main() -> None:
             actions = filtered_actions
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
-            if cooldown_active:
+            is_reprice = _is_pure_reprice(actions)
+            ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
+            if cooldown_active and (not ignore_cd) and (not is_reprice):
                 logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
                 continue
 
@@ -1873,8 +1889,10 @@ def main() -> None:
                 max_position_usd_per_token,
             )
 
-            if cooldown_sec > 0 and actions:
+            if cooldown_sec > 0 and actions and (not ignore_cd) and (not is_reprice):
                 state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
+            if is_reprice:
+                state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
 
             _maybe_update_target_last(state, token_id, t_now, should_update_last)
 
