@@ -195,7 +195,12 @@ def _calc_used_notional_totals(
     for token_id, shares in my_by_token_id.items():
         mid = float(mid_cache.get(token_id, 0.0))
         if mid <= 0:
-            mid = 0.5
+            # 保守上界：Polymarket price in [0,1]
+            mid = 1.0
+        if mid < 0:
+            mid = 0.0
+        elif mid > 1.0:
+            mid = 1.0
         usd = abs(shares) * mid
         by_token[token_id] = by_token.get(token_id, 0.0) + usd
         total += usd
@@ -644,8 +649,9 @@ def main() -> None:
                 filtered_actions.append(action)
                 seen_action_ids.append(action_id)
                 seen_action_set.add(action_id)
-            if len(seen_action_ids) > 2000:
-                del seen_action_ids[:-2000]
+            max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
+            if len(seen_action_ids) > max_seen:
+                del seen_action_ids[:-max_seen]
             actions_list = filtered_actions
 
             for action in actions_list:
@@ -1488,6 +1494,7 @@ def main() -> None:
             else:
                 ob = get_orderbook(clob_client, token_id)
                 orderbooks[token_id] = ob
+                orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
@@ -1504,7 +1511,6 @@ def main() -> None:
                 best_bid = ob.get("best_bid")
                 best_ask = ob.get("best_ask")
                 if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                    _maybe_update_target_last(state, token_id, t_now, should_update_last)
                     continue
             ref_price = _mid_price(ob)
             if ref_price is None or ref_price <= 0:
@@ -1515,7 +1521,6 @@ def main() -> None:
                     best_ask,
                 )
                 logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
-                _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
 
