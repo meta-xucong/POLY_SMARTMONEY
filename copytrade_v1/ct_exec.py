@@ -65,17 +65,17 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
     try:
         price = client.get_price(tid, side="BUY")
         if isinstance(price, dict):
-            best_ask = safe_float(price.get("price"))
+            best_bid = safe_float(price.get("price"))
         else:
-            best_ask = safe_float(price)
+            best_bid = safe_float(price)
     except Exception:
         pass
     try:
         price = client.get_price(tid, side="SELL")
         if isinstance(price, dict):
-            best_bid = safe_float(price.get("price"))
+            best_ask = safe_float(price.get("price"))
         else:
-            best_bid = safe_float(price)
+            best_ask = safe_float(price)
     except Exception:
         pass
 
@@ -84,7 +84,11 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
             best_ask = None
         if best_bid is not None and best_bid <= 0:
             best_bid = None
-        return {"best_bid": best_bid, "best_ask": best_ask}
+        if best_ask is not None and best_bid is not None and best_bid > best_ask:
+            best_ask = None
+            best_bid = None
+        else:
+            return {"best_bid": best_bid, "best_ask": best_ask}
 
     try:
         book = client.get_order_book(tid)
