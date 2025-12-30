@@ -27,8 +27,10 @@
 
   "maker_only": true,
   "reprice_ticks": 1,
-  "reprice_cooldown_sec": 15,
-  "enable_reprice": false,
+  "reprice_cooldown_sec": 5,
+  "enable_reprice": true,
+  "exit_full_sell": true,
+  "exit_ignore_cooldown": true,
 
   "cooldown_sec_per_token": 60,
   "missing_timeout_sec": 600,
