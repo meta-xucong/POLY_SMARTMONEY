@@ -123,6 +123,8 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
             best_ask = None
         if best_bid is not None and best_bid <= 0:
             best_bid = None
+        if best_bid is not None and best_ask is not None and best_bid > best_ask:
+            return {"best_bid": None, "best_ask": None}
         return {"best_bid": best_bid, "best_ask": best_ask}
     except Exception:
         return {"best_bid": None, "best_ask": None}

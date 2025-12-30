@@ -1487,6 +1487,7 @@ def main() -> None:
                 ob = orderbooks[token_id]
             else:
                 ob = get_orderbook(clob_client, token_id)
+                orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
@@ -1505,8 +1506,6 @@ def main() -> None:
                 if best_bid is not None and best_ask is not None and best_bid > best_ask:
                     _maybe_update_target_last(state, token_id, t_now, should_update_last)
                     continue
-                _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                continue
             ref_price = _mid_price(ob)
             if ref_price is None or ref_price <= 0:
                 logger.warning(
