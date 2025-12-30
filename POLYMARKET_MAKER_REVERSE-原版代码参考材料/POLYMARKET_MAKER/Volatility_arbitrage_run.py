@@ -2800,10 +2800,12 @@ def main(run_config: Optional[Dict[str, Any]] = None):
                 "[STATE] 卖出流程已完成或剩余低于最小下单量，切换为等待买入/空闲状态。"
             )
             wait_after_sell_sec = 300.0
-            heartbeat_interval = 60.0
+            heartbeat_interval = 600.0
             pause_deadline = time.time() + wait_after_sell_sec
             heartbeat_tick = 1
-            heartbeat_total = int(wait_after_sell_sec // heartbeat_interval)
+            heartbeat_total = max(
+                1, int(math.ceil(wait_after_sell_sec / heartbeat_interval))
+            )
             remote_sync_errors = 0
             while True:
                 remaining_wait = pause_deadline - time.time()
