@@ -84,11 +84,11 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
             best_ask = None
         if best_bid is not None and best_bid <= 0:
             best_bid = None
-        if best_ask is not None and best_bid is not None and best_bid > best_ask:
+        if best_ask is not None and best_bid is not None:
+            if best_bid <= best_ask:
+                return {"best_bid": best_bid, "best_ask": best_ask}
             best_ask = None
             best_bid = None
-        else:
-            return {"best_bid": best_bid, "best_ask": best_ask}
 
     try:
         book = client.get_order_book(tid)
@@ -117,13 +117,21 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
                 return None
             return max(prices) if pick_max else min(prices)
 
-        best_bid = _best(bids, pick_max=True)
-        best_ask = _best(asks, pick_max=False)
-        if best_ask is not None and best_ask <= 0:
-            best_ask = None
-        if best_bid is not None and best_bid <= 0:
-            best_bid = None
-        if best_bid is not None and best_ask is not None and best_bid > best_ask:
+        book_bid = _best(bids, pick_max=True)
+        book_ask = _best(asks, pick_max=False)
+        if book_ask is not None and book_ask <= 0:
+            book_ask = None
+        if book_bid is not None and book_bid <= 0:
+            book_bid = None
+
+        if best_bid is None:
+            best_bid = book_bid
+        if best_ask is None:
+            best_ask = book_ask
+
+        if best_bid is None or best_ask is None:
+            return {"best_bid": None, "best_ask": None}
+        if best_bid > best_ask:
             return {"best_bid": None, "best_ask": None}
         return {"best_bid": best_bid, "best_ask": best_ask}
     except Exception:
