@@ -468,6 +468,7 @@ def apply_actions(
     now_ts: int,
     dry_run: bool,
     cfg: Optional[Dict[str, Any]] = None,
+    state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
     for action in actions:
@@ -518,6 +519,18 @@ def apply_actions(
                 continue
             side = str(action.get("side") or "").upper()
             if side != "BUY":
+                if _is_insufficient_balance(exc) and state is not None:
+                    backoff_sec = int(cfg.get("place_fail_backoff_sec") or 0)
+                    if backoff_sec > 0:
+                        token_id = str(action.get("token_id") or "")
+                        until = now_ts + backoff_sec
+                        state.setdefault("place_fail_until", {})[token_id] = until
+                        logger.warning(
+                            "[PLACE_BACKOFF] token_id=%s side=%s until=%s reason=insufficient",
+                            token_id,
+                            side,
+                            until,
+                        )
                 continue
             if not _is_insufficient_balance(exc):
                 continue

@@ -47,6 +47,7 @@
   "allow_partial": true,
   "retry_on_insufficient_balance": true,
   "retry_shrink_factor": 0.5,
+  "place_fail_backoff_sec": 300,
 
   "blacklist_token_keys": []
 }
