@@ -412,6 +412,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--my", dest="my_address")
     parser.add_argument("--ratio", type=float, dest="follow_ratio")
     parser.add_argument("--poll", type=int, dest="poll_interval_sec")
+    parser.add_argument("--poll-exit", type=int, dest="poll_interval_sec_exiting")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -419,7 +420,13 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
-    for key in ("target_address", "my_address", "follow_ratio", "poll_interval_sec"):
+    for key in (
+        "target_address",
+        "my_address",
+        "follow_ratio",
+        "poll_interval_sec",
+        "poll_interval_sec_exiting",
+    ):
         arg_val = getattr(args, key, None)
         if arg_val is not None:
             cfg[key] = arg_val
