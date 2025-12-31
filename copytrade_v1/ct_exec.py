@@ -265,6 +265,47 @@ def reconcile_one(
         return actions
 
     if open_orders:
+        if is_exiting and side == "SELL" and bool(cfg.get("exit_full_sell", True)):
+            eps = 1e-9
+            total_open = 0.0
+            for order in open_orders:
+                try:
+                    total_open += float(order.get("size") or order.get("original_size") or 0.0)
+                except Exception:
+                    continue
+            if len(open_orders) != 1 or total_open < (abs_delta - eps):
+                actions = []
+                for order in open_orders:
+                    order_id = order.get("order_id") or order.get("id")
+                    if order_id:
+                        actions.append(
+                            {
+                                "type": "cancel",
+                                "order_id": order_id,
+                                "token_id": token_id,
+                                "ts": now_ts,
+                            }
+                        )
+                actions.append(
+                    {
+                        "type": "place",
+                        "token_id": token_id,
+                        "side": "SELL",
+                        "price": price,
+                        "size": abs_delta,
+                        "ts": now_ts,
+                        "_exit_consolidate": True,
+                    }
+                )
+                state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
+                logger.info(
+                    "[EXIT_CONSOLIDATE] token_id=%s remaining=%s open_orders=%s open_total=%s",
+                    token_id,
+                    abs_delta,
+                    len(open_orders),
+                    total_open,
+                )
+                return actions
         enable_reprice = bool(cfg.get("enable_reprice", False))
         if not enable_reprice:
             return actions
@@ -619,6 +660,16 @@ def apply_actions(
                                             "ts": now_ts,
                                         }
                                     )
+                                    if state is not None:
+                                        token_id = str(action.get("token_id") or "")
+                                        place_fail_until = state.get("place_fail_until")
+                                        if isinstance(place_fail_until, dict):
+                                            place_fail_until.pop(token_id, None)
+                                        logger.info(
+                                            "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear "
+                                            "place_fail_until",
+                                            token_id,
+                                        )
                                 continue
                     _bump_backoff(token_id, "sell_insufficient", str(exc))
                 continue
@@ -672,6 +723,13 @@ def apply_actions(
                 for key_prefix in ("sell_insufficient", "sell_insufficient_shrink"):
                     state.get("fail_counts", {}).pop(f"{key_prefix}:{token_id}", None)
                     state.get("place_fail_lastlog", {}).pop(f"{key_prefix}:{token_id}", None)
+                place_fail_until = state.get("place_fail_until")
+                if isinstance(place_fail_until, dict):
+                    place_fail_until.pop(token_id, None)
+                logger.info(
+                    "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear place_fail_until",
+                    token_id,
+                )
             updated.append(
                 {
                     "order_id": order_id,
