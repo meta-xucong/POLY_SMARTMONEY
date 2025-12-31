@@ -21,7 +21,12 @@ def risk_check(
     order_notional = abs(order_shares) * ref_price if ref_price else 0.0
 
     side_u = str(side).upper() if side is not None else ""
-    allow_short = bool(cfg.get("allow_short"))
+    allow_short = bool(cfg.get("allow_short", False))
+    if side_u == "SELL":
+        if my_shares > 0:
+            return True, "ok"
+        if not allow_short:
+            return False, "short_disabled"
     apply_token_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
     if max_per_token > 0 and apply_token_cap:
         base = float(planned_token_notional or 0.0)

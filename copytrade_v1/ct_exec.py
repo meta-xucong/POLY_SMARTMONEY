@@ -245,6 +245,20 @@ def reconcile_one(
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
     if min_shares > 0 and size < min_shares:
+        if is_exiting and side == "SELL":
+            logger.info(
+                "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; treat as exited",
+                token_id,
+                my_shares,
+                min_shares,
+            )
+            state.setdefault("dust_exits", {})[token_id] = {
+                "ts": now_ts,
+                "shares": my_shares,
+            }
+            topic_state = state.get("topic_state")
+            if isinstance(topic_state, dict):
+                topic_state.pop(token_id, None)
         return actions
 
     if size <= 0:
@@ -268,6 +282,8 @@ def reconcile_one(
             cooldown_sec = int(cfg.get("reprice_cooldown_sec") or 0)
             cooldown_ok = cooldown_sec <= 0 or (now_ts - last_reprice_ts) >= cooldown_sec
             if active_price is not None and tick_size > 0 and cooldown_ok:
+                if price is not None and abs(price - active_price) < tick_size / 2:
+                    return actions
                 if side == "BUY" and best_bid is not None:
                     trigger = best_bid >= active_price + tick_size * reprice_ticks
                 elif side == "SELL" and best_ask is not None:
@@ -471,6 +487,35 @@ def apply_actions(
     state: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
+
+    def _short_msg(value: object, limit: int = 160) -> str:
+        text = str(value)
+        if len(text) <= limit:
+            return text
+        return f"{text[: limit - 3]}..."
+
+    def _bump_backoff(token_id: str, kind: str, msg: str) -> None:
+        if state is None or cfg is None:
+            return
+        key = f"{kind}:{token_id}"
+        fail_counts = state.setdefault("fail_counts", {})
+        fail_counts[key] = int(fail_counts.get(key) or 0) + 1
+        base = float(cfg.get("place_fail_backoff_base_sec") or 2)
+        cap = float(cfg.get("place_fail_backoff_cap_sec") or 60)
+        wait = min(cap, base * (2 ** (fail_counts[key] - 1)))
+        until = now_ts + wait
+        state.setdefault("place_fail_until", {})[token_id] = int(until)
+        lastlog = state.setdefault("place_fail_lastlog", {}).get(key, 0)
+        if now_ts - int(lastlog or 0) >= 5:
+            logger.warning(
+                "[BACKOFF] token_id=%s kind=%s fail_count=%s wait=%.1fs msg=%s",
+                token_id,
+                kind,
+                fail_counts[key],
+                wait,
+                _short_msg(msg),
+            )
+            state["place_fail_lastlog"][key] = now_ts
     for action in actions:
         if action.get("type") == "cancel":
             order_id = action.get("order_id")
@@ -520,17 +565,62 @@ def apply_actions(
             side = str(action.get("side") or "").upper()
             if side != "BUY":
                 if _is_insufficient_balance(exc) and state is not None:
-                    backoff_sec = int(cfg.get("place_fail_backoff_sec") or 0)
-                    if backoff_sec > 0:
-                        token_id = str(action.get("token_id") or "")
-                        until = now_ts + backoff_sec
-                        state.setdefault("place_fail_until", {})[token_id] = until
-                        logger.warning(
-                            "[PLACE_BACKOFF] token_id=%s side=%s until=%s reason=insufficient",
-                            token_id,
-                            side,
-                            until,
-                        )
+                    token_id = str(action.get("token_id") or "")
+                    refresh_tokens = state.setdefault("force_refresh_tokens", [])
+                    if token_id and token_id not in refresh_tokens:
+                        refresh_tokens.append(token_id)
+                    price = float(action.get("price") or 0.0)
+                    size = float(action.get("size") or 0.0)
+                    if price > 0 and size > 0:
+                        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+                        min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+                        shrink_factor = float(cfg.get("retry_shrink_factor") or 0.5)
+                        old_usd = abs(size) * price
+                        new_usd = max(min_order_usd, old_usd * shrink_factor)
+                        if min_order_shares > 0:
+                            new_usd = max(new_usd, min_order_shares * price)
+                        if new_usd < old_usd * (1 - 1e-9):
+                            new_size = new_usd / price
+                            if min_order_shares <= 0 or new_size + 1e-12 >= min_order_shares:
+                                try:
+                                    response = place_order(
+                                        client,
+                                        token_id=str(action.get("token_id")),
+                                        side=str(action.get("side")),
+                                        price=price,
+                                        size=new_size,
+                                        allow_partial=allow_partial,
+                                    )
+                                except Exception as retry_exc:
+                                    logger.warning(
+                                        "[RETRY_SELL_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
+                                        action.get("token_id"),
+                                        old_usd,
+                                        new_usd,
+                                        retry_exc,
+                                    )
+                                    _bump_backoff(token_id, "sell_insufficient", str(retry_exc))
+                                    continue
+                                size_for_record = new_size
+                                logger.info(
+                                    "[RETRY_SELL_OK] token_id=%s old_usd=%s new_usd=%s",
+                                    action.get("token_id"),
+                                    old_usd,
+                                    new_usd,
+                                )
+                                order_id = response.get("order_id")
+                                if order_id:
+                                    updated.append(
+                                        {
+                                            "order_id": order_id,
+                                            "side": action.get("side"),
+                                            "price": action.get("price"),
+                                            "size": size_for_record,
+                                            "ts": now_ts,
+                                        }
+                                    )
+                                continue
+                    _bump_backoff(token_id, "sell_insufficient", str(exc))
                 continue
             if not _is_insufficient_balance(exc):
                 continue
@@ -577,6 +667,11 @@ def apply_actions(
             )
         order_id = response.get("order_id")
         if order_id:
+            if state is not None:
+                token_id = str(action.get("token_id") or "")
+                for key_prefix in ("sell_insufficient", "sell_insufficient_shrink"):
+                    state.get("fail_counts", {}).pop(f"{key_prefix}:{token_id}", None)
+                    state.get("place_fail_lastlog", {}).pop(f"{key_prefix}:{token_id}", None)
             updated.append(
                 {
                     "order_id": order_id,
