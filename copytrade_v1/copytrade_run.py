@@ -486,6 +486,7 @@ def main() -> None:
     state.setdefault("seen_action_ids", [])
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
+    state.setdefault("place_fail_until", {})
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("open_orders_all"), dict):
@@ -536,6 +537,8 @@ def main() -> None:
         state["last_reprice_ts_by_token"] = {}
     if not isinstance(state.get("adopted_existing_orders"), bool):
         state["adopted_existing_orders"] = False
+    if not isinstance(state.get("place_fail_until"), dict):
+        state["place_fail_until"] = {}
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -920,11 +923,19 @@ def main() -> None:
             open_orders = state.get("open_orders", {}).get(token_id, [])
             cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
             cooldown_active = cooldown_sec > 0 and now_ts < cooldown_until
+            place_fail_until = int(state.get("place_fail_until", {}).get(token_id) or 0)
+            place_backoff_active = place_fail_until > 0 and now_ts < place_fail_until
             if cooldown_active:
                 logger.info(
                     "[COOLDOWN] token_id=%s until=%s",
                     token_id,
                     cooldown_until,
+                )
+            if place_backoff_active:
+                logger.info(
+                    "[PLACE_BACKOFF] token_id=%s until=%s",
+                    token_id,
+                    place_fail_until,
                 )
 
             if skip_closed:
@@ -960,6 +971,7 @@ def main() -> None:
                                 now_ts,
                                 args.dry_run,
                                 cfg=cfg,
+                                state=state,
                             )
                             if updated_orders:
                                 state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1118,6 +1130,7 @@ def main() -> None:
                             now_ts,
                             args.dry_run,
                             cfg=cfg,
+                            state=state,
                         )
                         if updated_orders:
                             state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1279,6 +1292,7 @@ def main() -> None:
                                     now_ts,
                                     args.dry_run,
                                     cfg=cfg,
+                                    state=state,
                                 )
                                 if updated_orders:
                                     state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1449,6 +1463,15 @@ def main() -> None:
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
                     is_reprice = _is_pure_reprice(actions)
+                    if place_backoff_active and any(
+                        act.get("type") == "place" for act in actions
+                    ):
+                        logger.info(
+                            "[SKIP] token_id=%s reason=place_backoff until=%s",
+                            token_id,
+                            place_fail_until,
+                        )
+                        continue
                     ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
                     if cooldown_active and (not ignore_cd) and (not is_reprice):
                         logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
@@ -1461,6 +1484,7 @@ def main() -> None:
                         now_ts,
                         args.dry_run,
                         cfg=cfg,
+                        state=state,
                     )
                     if updated_orders:
                         state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1673,6 +1697,7 @@ def main() -> None:
                             now_ts,
                             args.dry_run,
                             cfg=cfg,
+                            state=state,
                         )
                         if updated_orders:
                             state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -1860,6 +1885,14 @@ def main() -> None:
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
             is_reprice = _is_pure_reprice(actions)
+            if place_backoff_active and any(act.get("type") == "place" for act in actions):
+                logger.info(
+                    "[SKIP] token_id=%s reason=place_backoff until=%s",
+                    token_id,
+                    place_fail_until,
+                )
+                _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                continue
             ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
             if cooldown_active and (not ignore_cd) and (not is_reprice):
                 logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
@@ -1880,6 +1913,7 @@ def main() -> None:
                 now_ts,
                 args.dry_run,
                 cfg=cfg,
+                state=state,
             )
             if updated_orders:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
