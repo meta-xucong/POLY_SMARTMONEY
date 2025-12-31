@@ -544,6 +544,7 @@ def main() -> None:
     clob_client = init_clob_client()
 
     poll_interval = int(cfg.get("poll_interval_sec") or 20)
+    poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
     size_threshold = float(cfg.get("size_threshold") or 0)
     skip_closed = bool(cfg.get("skip_closed_markets", True))
     refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
@@ -560,6 +561,14 @@ def main() -> None:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
 
     missing_notice_tokens: set[str] = set()
+
+    def _get_poll_interval() -> int:
+        topic_state = state.get("topic_state", {})
+        if isinstance(topic_state, dict):
+            for st in topic_state.values():
+                if (st or {}).get("phase") == "EXITING":
+                    return poll_interval_exiting
+        return poll_interval
 
     while True:
         now_ts = int(time.time())
@@ -731,13 +740,13 @@ def main() -> None:
         if not target_info.get("ok") or target_info.get("incomplete"):
             logger.warning("[SAFE] target positions 不完整，跳过本轮执行")
             save_state(args.state, state)
-            time.sleep(poll_interval)
+            time.sleep(_get_poll_interval())
             continue
 
         if not my_info.get("ok") or my_info.get("incomplete"):
             logger.warning("[SAFE] my positions 不完整，跳过本轮执行")
             save_state(args.state, state)
-            time.sleep(poll_interval)
+            time.sleep(_get_poll_interval())
             continue
 
         token_key_by_token_id: Dict[str, str] = {
@@ -845,7 +854,7 @@ def main() -> None:
                 state["target_actions_cursor_ms"],
             )
             save_state(args.state, state)
-            time.sleep(poll_interval)
+            time.sleep(_get_poll_interval())
             continue
 
         reconcile_set: Set[str] = set(target_shares_now_by_token_id)
@@ -1067,6 +1076,29 @@ def main() -> None:
                     topic_state[token_id] = st
                     phase = "EXITING"
                     logger.info("[TOPIC] EXIT token_id=%s first_sell_ts=%s", token_id, now_ts)
+
+                if phase == "EXITING":
+                    min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+                    dust_eps = float(cfg.get("dust_exit_eps") or 0.0)
+                    desired_shares = float(st.get("desired_shares") or 0.0)
+                    is_dust = False
+                    if desired_shares <= eps and my_shares > eps:
+                        if dust_eps > 0 and my_shares <= dust_eps:
+                            is_dust = True
+                        elif min_order_shares > 0 and my_shares < min_order_shares:
+                            is_dust = True
+                    if is_dust:
+                        state.setdefault("dust_exits", {})[token_id] = {
+                            "ts": now_ts,
+                            "shares": my_shares,
+                        }
+                        topic_state.pop(token_id, None)
+                        phase = "IDLE"
+                        logger.info(
+                            "[TOPIC] DUST_RESET token_id=%s remaining=%s",
+                            token_id,
+                            my_shares,
+                        )
 
                 if phase == "EXITING" and my_shares <= eps and open_orders_count == 0:
                     topic_state.pop(token_id, None)
@@ -1949,7 +1981,7 @@ def main() -> None:
 
         state["last_sync_ts"] = now_ts
         save_state(args.state, state)
-        time.sleep(poll_interval)
+        time.sleep(_get_poll_interval())
 
 
 if __name__ == "__main__":
