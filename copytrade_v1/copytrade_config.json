@@ -27,7 +27,7 @@
 
   "maker_only": true,
   "reprice_ticks": 1,
-  "reprice_cooldown_sec": 5,
+  "reprice_cooldown_sec": 3,
   "enable_reprice": true,
   "exit_full_sell": true,
   "exit_ignore_cooldown": true,

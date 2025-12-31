@@ -22,19 +22,17 @@ def risk_check(
 
     side_u = str(side).upper() if side is not None else ""
     allow_short = bool(cfg.get("allow_short"))
-    apply_token_cap = (
-        side_u == "BUY" or (side_u == "SELL" and allow_short) or side_u == ""
-    )
+    apply_token_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
     if max_per_token > 0 and apply_token_cap:
         base = float(planned_token_notional or 0.0)
         if base + order_notional > max_per_token:
             return False, "max_notional_per_token"
 
     max_total = float(cfg.get("max_notional_total") or 0)
-    if max_total > 0 and planned_total_notional is not None and side is not None:
-        if str(side).upper() == "BUY":
-            delta = abs(order_shares) * ref_price
-            if planned_total_notional + delta > max_total:
-                return False, "max_notional_total"
+    apply_total_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
+    if max_total > 0 and planned_total_notional is not None and apply_total_cap:
+        delta = abs(order_shares) * ref_price
+        if planned_total_notional + delta > max_total:
+            return False, "max_notional_total"
 
     return True, "ok"
