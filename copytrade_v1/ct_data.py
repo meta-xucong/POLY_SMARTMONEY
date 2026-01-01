@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 from typing import Dict, List, Tuple
 
 import requests
@@ -27,13 +28,152 @@ def _normalize_position(pos: Position) -> Dict[str, object] | None:
     }
 
 
+def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
+    condition_id = raw.get("conditionId") or raw.get("condition_id") or raw.get("marketId")
+    outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
+
+    if condition_id is None or outcome_index is None:
+        return None
+    try:
+        idx = int(outcome_index)
+    except Exception:
+        return None
+
+    size = raw.get("size") or raw.get("shares") or raw.get("positionSize")
+    avg_price = raw.get("avgPrice") or raw.get("avg_price") or raw.get("averagePrice") or 0.0
+    try:
+        size_f = float(size or 0.0)
+        avg_f = float(avg_price or 0.0)
+    except Exception:
+        return None
+
+    slug = raw.get("slug") or raw.get("marketSlug")
+    title = raw.get("title") or raw.get("question") or raw.get("marketTitle")
+    end_date = raw.get("endDate") or raw.get("end_date")
+
+    token_key = f"{condition_id}:{idx}"
+    return {
+        "token_key": token_key,
+        "condition_id": str(condition_id),
+        "outcome_index": idx,
+        "size": size_f,
+        "avg_price": avg_f,
+        "slug": slug,
+        "title": title,
+        "end_date": end_date,
+        "raw": raw,
+    }
+
+
+def _fetch_positions_norm_http(
+    client: DataApiClient,
+    user: str,
+    size_threshold: float,
+    *,
+    positions_limit: int,
+    positions_max_pages: int,
+    refresh_sec: int | None,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    host = getattr(client, "host", "https://data-api.polymarket.com").rstrip("/")
+    url = f"{host}/positions"
+
+    session = requests.Session()
+
+    page_size = max(1, min(int(positions_limit), 500))
+    max_pages = max(1, int(positions_max_pages))
+
+    if refresh_sec and refresh_sec > 0:
+        cb = int(time.time() // int(refresh_sec))
+    else:
+        cb = int(time.time())
+
+    ok = True
+    incomplete = False
+    last_error = None
+    pages = 0
+    offset = 0
+    out: List[Dict[str, object]] = []
+
+    while pages < max_pages:
+        params = {
+            "user": user,
+            "limit": page_size,
+            "offset": offset,
+            "sizeThreshold": size_threshold,
+            "_cb": cb,
+        }
+        headers = {"Cache-Control": "no-cache"}
+
+        try:
+            resp = session.get(url, params=params, headers=headers, timeout=15.0)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
+            ok = False
+            incomplete = True
+            last_error = str(exc)
+            break
+
+        items = None
+        if isinstance(payload, list):
+            items = payload
+        elif isinstance(payload, dict):
+            items = payload.get("data") or payload.get("positions") or payload.get("results") or []
+        if not isinstance(items, list):
+            ok = False
+            incomplete = True
+            last_error = "invalid_positions_payload"
+            break
+
+        if not items:
+            break
+
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            norm = _normalize_position_raw(raw)
+            if norm:
+                out.append(norm)
+
+        pages += 1
+        if len(items) < page_size:
+            break
+        offset += len(items)
+
+    info = {
+        "ok": ok,
+        "incomplete": incomplete,
+        "error_msg": last_error,
+        "pages_fetched": pages,
+        "limit": page_size,
+        "max_pages": max_pages,
+        "total": len(out),
+        "source": "http_positions",
+        "cache_bucket": cb,
+        "refresh_sec": refresh_sec,
+    }
+    return out, info
+
+
 def fetch_positions_norm(
     client: DataApiClient,
     user: str,
     size_threshold: float,
     positions_limit: int = 500,
     positions_max_pages: int = 20,
+    *,
+    refresh_sec: int | None = None,
+    force_http: bool = False,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    if force_http:
+        return _fetch_positions_norm_http(
+            client,
+            user,
+            size_threshold,
+            positions_limit=positions_limit,
+            positions_max_pages=positions_max_pages,
+            refresh_sec=refresh_sec,
+        )
     positions, info = fetch_positions_all(
         client,
         user,
