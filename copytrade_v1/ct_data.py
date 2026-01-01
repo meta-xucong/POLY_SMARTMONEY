@@ -152,6 +152,13 @@ def _fetch_positions_norm_http(
     last_headers = None
     last_status = None
     last_url = None
+    cache_disable_ctx = None
+    try:
+        import requests_cache  # noqa: F401
+
+        cache_disable_ctx = getattr(session, "cache_disabled", None)
+    except Exception:
+        cache_disable_ctx = None
 
     while pages < max_pages:
         params = {
@@ -161,10 +168,18 @@ def _fetch_positions_norm_http(
             "sizeThreshold": size_threshold,
             "_cb": cb,
         }
-        headers = {"Cache-Control": "no-cache"}
+        headers = {
+            "Cache-Control": "no-cache, no-store, max-age=0, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
 
         try:
-            resp = session.get(url, params=params, headers=headers, timeout=15.0)
+            if callable(cache_disable_ctx):
+                with cache_disable_ctx():
+                    resp = session.get(url, params=params, headers=headers, timeout=15.0)
+            else:
+                resp = session.get(url, params=params, headers=headers, timeout=15.0)
             resp.raise_for_status()
             payload = resp.json()
         except Exception as exc:
