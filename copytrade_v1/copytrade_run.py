@@ -558,6 +558,16 @@ def main() -> None:
     positions_limit = int(cfg.get("positions_limit") or 500)
     positions_max_pages = int(cfg.get("positions_max_pages") or 20)
     target_positions_refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
+    log_cache_headers = bool(cfg.get("log_positions_cache_headers"))
+    header_keys = cfg.get("positions_cache_header_keys") or [
+        "Age",
+        "CF-Cache-Status",
+        "X-Cache",
+        "Via",
+        "Cache-Control",
+    ]
+    target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
+    my_positions_force_http = bool(cfg.get("my_positions_force_http"))
     actions_page_size = int(cfg.get("actions_page_size") or 300)
     actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
     heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
@@ -710,6 +720,8 @@ def main() -> None:
             positions_max_pages=positions_max_pages,
             refresh_sec=target_positions_refresh_sec,
             force_http=True,
+            cache_bust_mode=target_cache_bust_mode,
+            header_keys=header_keys,
         )
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
@@ -722,6 +734,10 @@ def main() -> None:
             0.0,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
+            refresh_sec=target_positions_refresh_sec if my_positions_force_http else None,
+            force_http=my_positions_force_http,
+            cache_bust_mode=target_cache_bust_mode,
+            header_keys=header_keys,
         )
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
@@ -732,11 +748,18 @@ def main() -> None:
         )
         if should_log_heartbeat:
             logger.info(
-                "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s",
+                "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s | "
+                "t_src=%s t_cb=%s t_rsec=%s t_mode=%s t_http=%s t_hit=%s",
                 len(target_pos),
                 len(my_pos),
                 bool(target_info.get("incomplete")),
                 bool(my_info.get("incomplete")),
+                target_info.get("source"),
+                target_info.get("cache_bucket"),
+                target_info.get("refresh_sec"),
+                target_info.get("cache_bust_mode"),
+                target_info.get("http_status"),
+                target_info.get("cache_hit_hint"),
             )
             if target_info.get("incomplete"):
                 logger.info(
@@ -744,6 +767,15 @@ def main() -> None:
                     target_info.get("limit"),
                     target_info.get("total"),
                     target_info.get("max_pages"),
+                )
+            if log_cache_headers:
+                logger.info(
+                    "[POS] target cache_headers_first=%s",
+                    target_info.get("cache_headers_first"),
+                )
+                logger.info(
+                    "[POS] target cache_headers_last=%s",
+                    target_info.get("cache_headers_last"),
                 )
             last_heartbeat_ts = now_ts
 
