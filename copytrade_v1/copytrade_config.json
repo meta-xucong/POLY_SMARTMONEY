@@ -6,6 +6,7 @@
   "poll_interval_sec": 20,
   "poll_interval_sec_exiting": 3,
   "size_threshold": 0.0,
+  "target_positions_refresh_sec": 25,
 
   "deadband_shares": 3.0,
 

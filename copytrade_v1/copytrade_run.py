@@ -557,6 +557,7 @@ def main() -> None:
     refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
     positions_limit = int(cfg.get("positions_limit") or 500)
     positions_max_pages = int(cfg.get("positions_max_pages") or 20)
+    target_positions_refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
     actions_page_size = int(cfg.get("actions_page_size") or 300)
     actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
     heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
@@ -707,6 +708,8 @@ def main() -> None:
             size_threshold,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
+            refresh_sec=target_positions_refresh_sec,
+            force_http=True,
         )
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
