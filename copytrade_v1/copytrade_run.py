@@ -711,6 +711,7 @@ def main() -> None:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
         has_new_actions = bool(actions_list)
+        target_cache_mode = "nonce" if has_new_actions else target_cache_bust_mode
 
         target_pos, target_info = fetch_positions_norm(
             data_client,
@@ -720,7 +721,7 @@ def main() -> None:
             positions_max_pages=positions_max_pages,
             refresh_sec=target_positions_refresh_sec,
             force_http=True,
-            cache_bust_mode=target_cache_bust_mode,
+            cache_bust_mode=target_cache_mode,
             header_keys=header_keys,
         )
         hard_cap = positions_limit * positions_max_pages
