@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import random
 import time
 from typing import Dict, List, Tuple
 
@@ -65,6 +66,50 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
     }
 
 
+def _make_cb(refresh_sec: int | None, mode: str) -> int:
+    mode = (mode or "bucket").lower()
+    if mode == "bucket":
+        if refresh_sec and refresh_sec > 0:
+            return int(time.time() // int(refresh_sec))
+        return int(time.time())
+    if mode == "sec":
+        return int(time.time())
+    if mode == "ms":
+        return int(time.time() * 1000)
+    if mode == "nonce":
+        return random.randint(1, 2_147_483_647)
+    return int(time.time())
+
+
+def _pick_headers(h: dict | None, keys: list[str]) -> dict:
+    if not h:
+        return {}
+    out = {}
+    for k in keys:
+        v = h.get(k) or h.get(k.lower())
+        if v is not None:
+            out[k] = str(v)
+    return out
+
+
+def _cache_hit_hint(h: dict) -> str | None:
+    if not h:
+        return None
+    age = h.get("Age") or h.get("age")
+    cf = (h.get("CF-Cache-Status") or h.get("cf-cache-status") or "").upper()
+    xcache = (h.get("X-Cache") or h.get("x-cache") or "").upper()
+    try:
+        if age is not None and float(age) > 0:
+            return f"age={age}"
+    except Exception:
+        pass
+    if "HIT" in cf:
+        return f"cf={cf}"
+    if "HIT" in xcache:
+        return f"xcache={xcache}"
+    return None
+
+
 def _fetch_positions_norm_http(
     client: DataApiClient,
     user: str,
@@ -73,6 +118,8 @@ def _fetch_positions_norm_http(
     positions_limit: int,
     positions_max_pages: int,
     refresh_sec: int | None,
+    cache_bust_mode: str = "bucket",
+    header_keys: list[str] | None = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     host = getattr(client, "host", "https://data-api.polymarket.com").rstrip("/")
     url = f"{host}/positions"
@@ -81,11 +128,19 @@ def _fetch_positions_norm_http(
 
     page_size = max(1, min(int(positions_limit), 500))
     max_pages = max(1, int(positions_max_pages))
+    header_keys = header_keys or [
+        "Age",
+        "CF-Cache-Status",
+        "X-Cache",
+        "Via",
+        "Cache-Control",
+        "ETag",
+        "Last-Modified",
+        "Date",
+        "Server",
+    ]
 
-    if refresh_sec and refresh_sec > 0:
-        cb = int(time.time() // int(refresh_sec))
-    else:
-        cb = int(time.time())
+    cb = _make_cb(refresh_sec, cache_bust_mode)
 
     ok = True
     incomplete = False
@@ -93,6 +148,10 @@ def _fetch_positions_norm_http(
     pages = 0
     offset = 0
     out: List[Dict[str, object]] = []
+    first_headers = None
+    last_headers = None
+    last_status = None
+    last_url = None
 
     while pages < max_pages:
         params = {
@@ -113,6 +172,12 @@ def _fetch_positions_norm_http(
             incomplete = True
             last_error = str(exc)
             break
+
+        if pages == 0:
+            first_headers = dict(resp.headers)
+        last_headers = dict(resp.headers)
+        last_status = resp.status_code
+        last_url = resp.url
 
         items = None
         if isinstance(payload, list):
@@ -151,7 +216,15 @@ def _fetch_positions_norm_http(
         "source": "http_positions",
         "cache_bucket": cb,
         "refresh_sec": refresh_sec,
+        "cache_bust_mode": cache_bust_mode,
+        "http_status": last_status,
+        "request_url": last_url,
+        "cache_headers_first": _pick_headers(first_headers, header_keys),
+        "cache_headers_last": _pick_headers(last_headers, header_keys),
     }
+    info["cache_hit_hint"] = _cache_hit_hint(info["cache_headers_first"]) or _cache_hit_hint(
+        info["cache_headers_last"]
+    )
     return out, info
 
 
@@ -164,6 +237,8 @@ def fetch_positions_norm(
     *,
     refresh_sec: int | None = None,
     force_http: bool = False,
+    cache_bust_mode: str = "bucket",
+    header_keys: list[str] | None = None,
 ) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
     if force_http:
         return _fetch_positions_norm_http(
@@ -173,6 +248,8 @@ def fetch_positions_norm(
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
             refresh_sec=refresh_sec,
+            cache_bust_mode=cache_bust_mode,
+            header_keys=header_keys,
         )
     positions, info = fetch_positions_all(
         client,
