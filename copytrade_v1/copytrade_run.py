@@ -1085,7 +1085,7 @@ def main() -> None:
             phase = st.get("phase", "IDLE")
 
             if topic_mode:
-                if phase == "IDLE" and has_buy and not buy_blocked_by_boot:
+                if phase == "IDLE" and has_buy:
                     st = {
                         "phase": "LONG",
                         "first_buy_ts": now_ts,
@@ -1442,10 +1442,6 @@ def main() -> None:
                         price = float(act.get("price") or ref_price or 0.0)
                         size = float(act.get("size") or 0.0)
                         if price <= 0 or size <= 0:
-                            continue
-
-                        if side == "BUY" and buy_blocked_by_boot:
-                            blocked_reasons.add("boot_ignore")
                             continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
@@ -1867,10 +1863,6 @@ def main() -> None:
                 price = float(act.get("price") or ref_price or 0.0)
                 size = float(act.get("size") or 0.0)
                 if price <= 0 or size <= 0:
-                    continue
-
-                if side == "BUY" and buy_blocked_by_boot:
-                    blocked_reasons.add("boot_ignore")
                     continue
 
                 planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
