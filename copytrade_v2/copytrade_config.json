@@ -62,6 +62,9 @@
   "max_notional_total": 120,
 
   "allow_partial": true,
+  "taker_enabled": true,
+  "taker_spread_threshold": 0.01,
+  "taker_order_type": "FAK",
   "dedupe_place": true,
   "dedupe_place_price_eps": 0.000001,
   "dedupe_place_size_rel_eps": 0.000001,
