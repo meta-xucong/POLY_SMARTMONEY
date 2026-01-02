@@ -61,6 +61,10 @@
   "max_notional_total": 100,
 
   "allow_partial": true,
+  "dedupe_place": true,
+  "dedupe_place_price_eps": 0.000001,
+  "dedupe_place_size_rel_eps": 0.000001,
+  "order_visibility_grace_sec": 180,
   "retry_on_insufficient_balance": true,
   "retry_shrink_factor": 0.5,
   "place_fail_backoff_base_sec": 2,
