@@ -714,19 +714,40 @@ def main() -> None:
                     for token_id, orders in prev_managed.items()
                 }
 
-                fresh_managed: Dict[str, list[dict]] = {}
-                for token_id, orders in remote_by_token.items():
-                    for order in orders:
-                        order_id = str(order.get("order_id") or "")
-                        if not order_id:
-                            continue
-                        if order_id in managed_ids:
-                            if order_id not in order_ts_by_id:
-                                order_ts_by_id[order_id] = int(order.get("ts") or now_ts)
-                            fresh_managed.setdefault(token_id, []).append(order)
+                # Merge remote visibility into ledger WITHOUT dropping unseen managed orders.
+                # This makes order_visibility_grace_sec effective even when remote is partially consistent.
+                managed_index: Dict[str, tuple[str, int]] = {}
+                for t_id, orders in managed_by_token.items():
+                    for i, o in enumerate(orders or []):
+                        oid = str(o.get("order_id") or "")
+                        if oid:
+                            managed_index[oid] = (str(t_id), i)
 
-                for token_id, orders in fresh_managed.items():
-                    managed_by_token[token_id] = orders
+                for t_id, orders in remote_by_token.items():
+                    for order in orders or []:
+                        oid = str(order.get("order_id") or "")
+                        if not oid or oid not in managed_ids:
+                            continue
+
+                        if oid not in order_ts_by_id:
+                            order_ts_by_id[oid] = int(order.get("ts") or now_ts)
+                        order["ts"] = int(order.get("ts") or order_ts_by_id.get(oid) or now_ts)
+
+                        hit = managed_index.get(oid)
+                        if hit:
+                            t0, i0 = hit
+                            # Update the existing ledger order in-place (do NOT overwrite the whole token list)
+                            try:
+                                managed_by_token[t0][i0].update(order)
+                            except Exception:
+                                # Fallback if index drifted for any reason
+                                t_id_s = str(t_id)
+                                managed_by_token.setdefault(t_id_s, []).append(dict(order))
+                                managed_index[oid] = (t_id_s, len(managed_by_token[t_id_s]) - 1)
+                        else:
+                            t_id_s = str(t_id)
+                            managed_by_token.setdefault(t_id_s, []).append(dict(order))
+                            managed_index[oid] = (t_id_s, len(managed_by_token[t_id_s]) - 1)
 
                 grace_sec = int(cfg.get("order_visibility_grace_sec") or 180)
                 pruned = 0
@@ -1527,10 +1548,8 @@ def main() -> None:
                                     state.get("last_mid_price_by_token_id", {}),
                                     max_position_usd_per_token,
                                 )
-                                if cooldown_sec > 0 and not ignore_cd:
-                                    state.setdefault("cooldown_until", {})[token_id] = (
-                                        now_ts + cooldown_sec
-                                    )
+                                # NOTE: cancel-intent should NOT extend cooldown.
+                                # Cooldown is applied only on successful place actions.
                     open_orders_for_reconcile = [
                         order
                         for order in open_orders
@@ -1986,10 +2005,8 @@ def main() -> None:
                             state.get("last_mid_price_by_token_id", {}),
                             max_position_usd_per_token,
                         )
-                        if cooldown_sec > 0 and not ignore_cd:
-                            state.setdefault("cooldown_until", {})[token_id] = (
-                                now_ts + cooldown_sec
-                            )
+                        # NOTE: cancel-intent should NOT extend cooldown.
+                        # Cooldown is applied only on successful place actions.
             if abs(delta) <= eps:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
