@@ -705,21 +705,70 @@ def main() -> None:
                             )
                             managed_ids |= adoptable_ids
                     state["adopted_existing_orders"] = True
-                managed_by_token: Dict[str, list[dict]] = {}
+                # --- begin: ORDSYNC ledger-first (fix eventual consistency) ---
+                prev_managed = state.get("open_orders")
+                if not isinstance(prev_managed, dict):
+                    prev_managed = {}
+                managed_by_token: Dict[str, list[dict]] = {
+                    str(token_id): [dict(order) for order in (orders or [])]
+                    for token_id, orders in prev_managed.items()
+                }
+
+                fresh_managed: Dict[str, list[dict]] = {}
                 for token_id, orders in remote_by_token.items():
                     for order in orders:
-                        order_id = str(order["order_id"])
+                        order_id = str(order.get("order_id") or "")
+                        if not order_id:
+                            continue
                         if order_id in managed_ids:
                             if order_id not in order_ts_by_id:
                                 order_ts_by_id[order_id] = int(order.get("ts") or now_ts)
-                            managed_by_token.setdefault(token_id, []).append(order)
-                managed_ids &= remote_order_ids
+                            fresh_managed.setdefault(token_id, []).append(order)
+
+                for token_id, orders in fresh_managed.items():
+                    managed_by_token[token_id] = orders
+
+                grace_sec = int(cfg.get("order_visibility_grace_sec") or 180)
+                pruned = 0
+
+                for token_id, orders in list(managed_by_token.items()):
+                    kept: list[dict] = []
+                    for order in orders or []:
+                        order_id = str(order.get("order_id") or "")
+                        if not order_id or order_id not in managed_ids:
+                            continue
+
+                        ts = int(order.get("ts") or order_ts_by_id.get(order_id) or now_ts)
+                        order["ts"] = ts
+
+                        if order_id not in remote_order_ids and (now_ts - ts) > grace_sec:
+                            pruned += 1
+                            continue
+
+                        kept.append(order)
+
+                    if kept:
+                        managed_by_token[token_id] = kept
+                    else:
+                        managed_by_token.pop(token_id, None)
+
+                managed_ids = _collect_order_ids(managed_by_token)
+
                 for order_id in list(order_ts_by_id.keys()):
                     if str(order_id) not in managed_ids:
                         order_ts_by_id.pop(order_id, None)
+
                 state["open_orders_all"] = remote_by_token
                 state["open_orders"] = managed_by_token
                 state["managed_order_ids"] = sorted(managed_ids)
+
+                if pruned:
+                    logger.info(
+                        "[ORDSYNC] pruned_missing_after_grace=%s grace_sec=%s",
+                        pruned,
+                        grace_sec,
+                    )
+                # --- end: ORDSYNC ledger-first ---
             else:
                 logger.warning("[WARN] sync open orders failed: %s", err)
         except Exception as exc:

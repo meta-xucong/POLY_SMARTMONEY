@@ -586,6 +586,46 @@ def apply_actions(
                 }
             )
             continue
+        if cfg is not None and bool(cfg.get("dedupe_place", True)):
+            token_id = str(action.get("token_id") or "")
+            want_side = str(action.get("side") or "")
+            try:
+                want_price = float(action.get("price") or 0.0)
+            except Exception:
+                want_price = 0.0
+            try:
+                want_size = float(action.get("size") or 0.0)
+            except Exception:
+                want_size = 0.0
+
+            eps_p = float(cfg.get("dedupe_place_price_eps") or 1e-6)
+            eps_rel = float(cfg.get("dedupe_place_size_rel_eps") or 1e-6)
+
+            dup = False
+            for order in updated:
+                try:
+                    if str(order.get("side") or "") != want_side:
+                        continue
+                    order_price = float(order.get("price") or 0.0)
+                    if abs(order_price - want_price) > eps_p:
+                        continue
+                    order_size = float(order.get("size") or 0.0)
+                    if want_size > 0 and abs(order_size - want_size) > max(
+                        1e-9, eps_rel * want_size
+                    ):
+                        continue
+                    logger.info(
+                        "[DEDUP] token_id=%s skip duplicate place (order_id=%s)",
+                        token_id,
+                        order.get("order_id"),
+                    )
+                    dup = True
+                    break
+                except Exception:
+                    continue
+
+            if dup:
+                continue
         allow_partial = True
         if cfg is not None:
             allow_partial = bool(cfg.get("allow_partial", True))
