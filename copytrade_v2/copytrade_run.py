@@ -496,6 +496,7 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
+    arg_overrides: Dict[str, Any] = {}
     for key in (
         "target_address",
         "my_address",
@@ -506,6 +507,7 @@ def main() -> None:
         arg_val = getattr(args, key, None)
         if arg_val is not None:
             cfg[key] = arg_val
+            arg_overrides[key] = arg_val
 
     cfg["my_address"] = _resolve_addr(
         "my_address",
@@ -658,27 +660,129 @@ def main() -> None:
     data_client = DataApiClient()
     clob_client = init_clob_client()
 
-    poll_interval = int(cfg.get("poll_interval_sec") or 20)
-    poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
-    size_threshold = float(cfg.get("size_threshold") or 0)
-    skip_closed = bool(cfg.get("skip_closed_markets", True))
-    refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
-    positions_limit = int(cfg.get("positions_limit") or 500)
-    positions_max_pages = int(cfg.get("positions_max_pages") or 20)
-    target_positions_refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
-    log_cache_headers = bool(cfg.get("log_positions_cache_headers"))
-    header_keys = cfg.get("positions_cache_header_keys") or [
+    poll_interval = 20
+    poll_interval_exiting = 20
+    size_threshold = 0.0
+    skip_closed = True
+    refresh_sec = 300
+    positions_limit = 500
+    positions_max_pages = 20
+    target_positions_refresh_sec = 25
+    log_cache_headers = False
+    header_keys: list[str] = [
         "Age",
         "CF-Cache-Status",
         "X-Cache",
         "Via",
         "Cache-Control",
     ]
-    target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
-    my_positions_force_http = bool(cfg.get("my_positions_force_http"))
-    actions_page_size = int(cfg.get("actions_page_size") or 300)
-    actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
-    heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
+    target_cache_bust_mode = "bucket"
+    my_positions_force_http = False
+    actions_page_size = 300
+    actions_max_offset = 10000
+    heartbeat_interval_sec = 600
+    config_reload_sec = 600
+    last_config_reload_ts = time.time()
+    last_config_mtime: Optional[float] = None
+    resolved_target_address = cfg["target_address"]
+    resolved_my_address = cfg["my_address"]
+
+    def _apply_overrides(payload: Dict[str, Any]) -> None:
+        for key, value in arg_overrides.items():
+            payload[key] = value
+
+    def _apply_cfg_settings() -> None:
+        nonlocal (
+            poll_interval,
+            poll_interval_exiting,
+            size_threshold,
+            skip_closed,
+            refresh_sec,
+            positions_limit,
+            positions_max_pages,
+            target_positions_refresh_sec,
+            log_cache_headers,
+            header_keys,
+            target_cache_bust_mode,
+            my_positions_force_http,
+            actions_page_size,
+            actions_max_offset,
+            heartbeat_interval_sec,
+            config_reload_sec,
+        )
+        poll_interval = int(cfg.get("poll_interval_sec") or 20)
+        poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
+        size_threshold = float(cfg.get("size_threshold") or 0)
+        skip_closed = bool(cfg.get("skip_closed_markets", True))
+        refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
+        positions_limit = int(cfg.get("positions_limit") or 500)
+        positions_max_pages = int(cfg.get("positions_max_pages") or 20)
+        target_positions_refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
+        log_cache_headers = bool(cfg.get("log_positions_cache_headers"))
+        header_keys = cfg.get("positions_cache_header_keys") or [
+            "Age",
+            "CF-Cache-Status",
+            "X-Cache",
+            "Via",
+            "Cache-Control",
+        ]
+        target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
+        my_positions_force_http = bool(cfg.get("my_positions_force_http"))
+        actions_page_size = int(cfg.get("actions_page_size") or 300)
+        actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
+        heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
+        config_reload_sec = int(cfg.get("config_reload_sec") or 600)
+
+    def _refresh_log_level() -> None:
+        level_name = str(cfg.get("log_level") or "INFO").upper()
+        level = logging._nameToLevel.get(level_name, logging.INFO)
+        root_logger = logging.getLogger()
+        root_logger.setLevel(level)
+        for handler in root_logger.handlers:
+            handler.setLevel(level)
+
+    def _reload_config(reason: str) -> None:
+        nonlocal cfg, last_config_reload_ts, last_config_mtime
+        try:
+            new_cfg = _load_config(Path(args.config))
+        except Exception as exc:
+            logger.warning("[CFG] reload failed (%s): %s", reason, exc)
+            last_config_reload_ts = time.time()
+            return
+        _apply_overrides(new_cfg)
+        new_target = new_cfg.get("target_address")
+        new_my = new_cfg.get("my_address")
+        if new_target and str(new_target).strip() != str(resolved_target_address).strip():
+            logger.warning(
+                "[CFG] target_address 变更将被忽略，需要重启: %s -> %s",
+                resolved_target_address,
+                new_target,
+            )
+            new_cfg["target_address"] = resolved_target_address
+        if new_my and str(new_my).strip() != str(resolved_my_address).strip():
+            logger.warning(
+                "[CFG] my_address 变更将被忽略，需要重启: %s -> %s",
+                resolved_my_address,
+                new_my,
+            )
+            new_cfg["my_address"] = resolved_my_address
+        cfg = new_cfg
+        state["follow_ratio"] = cfg.get("follow_ratio")
+        _apply_cfg_settings()
+        _refresh_log_level()
+        last_config_reload_ts = time.time()
+        try:
+            last_config_mtime = Path(args.config).stat().st_mtime
+        except Exception:
+            last_config_mtime = None
+        logger.info("[CFG] reloaded (%s)", reason)
+
+    _apply_cfg_settings()
+    _refresh_log_level()
+    try:
+        last_config_mtime = Path(args.config).stat().st_mtime
+    except Exception:
+        last_config_mtime = None
     last_heartbeat_ts = 0
 
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
@@ -698,6 +802,16 @@ def main() -> None:
 
     while True:
         now_ts = int(time.time())
+        now_wall = time.time()
+        if now_wall - last_config_reload_ts >= max(config_reload_sec, 1):
+            reason = "interval"
+            try:
+                mtime = Path(args.config).stat().st_mtime
+                if last_config_mtime is None or mtime != last_config_mtime:
+                    reason = "mtime"
+            except Exception:
+                reason = "interval"
+            _reload_config(reason)
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         try:
             remote_orders, ok, err = fetch_open_orders_norm(clob_client)
