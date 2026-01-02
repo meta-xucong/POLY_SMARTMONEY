@@ -1744,10 +1744,13 @@ def main() -> None:
                         max_position_usd_per_token,
                     )
 
+                    has_any_place_final = any(
+                        act.get("type") == "place" for act in actions
+                    )
                     if (
                         cooldown_sec > 0
                         and actions
-                        and has_any_place
+                        and has_any_place_final
                         and (not ignore_cd)
                         and (not is_reprice)
                     ):
@@ -2225,7 +2228,14 @@ def main() -> None:
                 max_position_usd_per_token,
             )
 
-            if cooldown_sec > 0 and actions and has_any_place and (not ignore_cd) and (not is_reprice):
+            has_any_place_final = any(act.get("type") == "place" for act in actions)
+            if (
+                cooldown_sec > 0
+                and actions
+                and has_any_place_final
+                and (not ignore_cd)
+                and (not is_reprice)
+            ):
                 state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
             if is_reprice:
                 state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
