@@ -2,6 +2,14 @@
   "target_address": "0x...",
   "my_address": "0x...",
   "follow_ratio": 0.1,
+  "lowp_guard_enabled": true,
+  "lowp_price_threshold": 0.08,
+  "lowp_follow_ratio_mult": 0.25,
+
+  "lowp_min_order_usd": 1,
+  "lowp_max_order_usd": 5,
+  "lowp_probe_order_usd": 1,
+  "lowp_max_notional_per_token": 5,
 
   "poll_interval_sec": 20,
   "poll_interval_sec_exiting": 3,
