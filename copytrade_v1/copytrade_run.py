@@ -36,6 +36,17 @@ DEFAULT_CONFIG_PATH = Path(__file__).with_name("copytrade_config.json")
 DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
 
 
+def _state_path_for_target(state_path: Path, target_address: str) -> Path:
+    """Derive per-target state file path when user didn't explicitly provide one."""
+    addr = str(target_address or "").strip().lower()
+    if addr.startswith("0x") and len(addr) >= 10:
+        fname = f"state_{addr[2:6]}_{addr[-4:]}.json"
+    else:
+        safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", addr)[:32] or "unknown"
+        fname = f"state_{safe}.json"
+    return state_path.with_name(fname)
+
+
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
@@ -482,9 +493,41 @@ def main() -> None:
         ],
     )
 
+    # Per-target state file: if user didn't specify a custom --state, derive one from target address.
+    orig_state_path = args.state
+    try:
+        sp = Path(args.state)
+        if sp.name == "state.json":
+            args.state = str(_state_path_for_target(sp, cfg["target_address"]))
+    except Exception:
+        args.state = orig_state_path
+
     logger = _setup_logging(cfg, cfg["target_address"], Path(args.config).parent)
+    if args.state != orig_state_path:
+        logger.info("[STATE] per-target state: %s -> %s", orig_state_path, args.state)
 
     state = load_state(args.state)
+    # Safety: if user accidentally reuses a state file across targets, reset bootstrap-related fields.
+    prev_target = str(state.get("target") or "").lower().strip()
+    cur_target = str(cfg.get("target_address") or "").lower().strip()
+    if prev_target and cur_target and prev_target != cur_target:
+        logger.warning(
+            "[STATE] state target mismatch (state=%s cfg=%s); resetting bootstrap fields",
+            prev_target,
+            cur_target,
+        )
+        state["bootstrapped"] = False
+        state["boot_token_ids"] = []
+        state["boot_token_keys"] = []
+        state["target_last_shares_by_token_key"] = {}
+        state["target_last_shares"] = {}
+        state["target_last_seen_ts"] = {}
+        state["target_missing_streak"] = {}
+        state["topic_state"] = {}
+        state["open_orders"] = {}
+        state["open_orders_all"] = []
+        state["seen_action_ids"] = []
+        state["target_actions_cursor_ms"] = 0
     run_start_ms = int(time.time() * 1000)
     state["run_start_ms"] = run_start_ms
     logger.info("[STATE] path=%s run_start_ms=%s", args.state, run_start_ms)
@@ -823,6 +866,59 @@ def main() -> None:
             time.sleep(_get_poll_interval())
             continue
 
+        boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+        fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
+        boot_needed = boot_sync_mode == "baseline_only" and (
+            (not state.get("bootstrapped"))
+            or (
+                fresh_boot
+                and int(state.get("boot_run_start_ms") or 0)
+                != int(state.get("run_start_ms") or 0)
+            )
+        )
+        if boot_needed:
+            boot_by_key: Dict[str, float] = {}
+            boot_keys: list[str] = []
+            for pos in target_pos:
+                token_key = str(pos.get("token_key") or "").strip()
+                if not token_key:
+                    continue
+                size = float(pos.get("size") or 0.0)
+                boot_by_key[token_key] = size
+                boot_keys.append(token_key)
+            boot_keys = sorted(set(boot_keys))
+            state["boot_token_keys"] = boot_keys
+            state["target_last_shares_by_token_key"] = boot_by_key
+
+            boot_token_ids: list[str] = []
+            token_map = state.get("token_map", {}) if isinstance(state.get("token_map"), dict) else {}
+            for token_key in boot_keys:
+                token_id = token_map.get(token_key)
+                if token_id:
+                    boot_token_ids.append(token_id)
+                    state.setdefault("target_last_shares", {})[token_id] = float(
+                        boot_by_key.get(token_key) or 0.0
+                    )
+                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+                    state.setdefault("target_missing_streak", {})[token_id] = 0
+            state["boot_token_ids"] = sorted(set(boot_token_ids))
+
+            state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+            state["seen_action_ids"] = []
+            state["topic_state"] = {}
+            state["probed_token_ids"] = []
+            state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
+            state["bootstrapped"] = True
+            logger.info(
+                "[BOOT] baseline_only: baseline_keys=%s baseline_ids=%s cursor_ms=%s",
+                len(boot_keys),
+                len(state["boot_token_ids"]),
+                state["target_actions_cursor_ms"],
+            )
+            save_state(args.state, state)
+            time.sleep(_get_poll_interval())
+            continue
+
         token_key_by_token_id: Dict[str, str] = {
             token_id: token_key for token_key, token_id in state.get("token_map", {}).items()
         }
@@ -877,59 +973,6 @@ def main() -> None:
             tid = str(token_id)
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
-
-        boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-        fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
-        boot_needed = boot_sync_mode == "baseline_only" and (
-            (not state.get("bootstrapped"))
-            or (
-                fresh_boot
-                and int(state.get("boot_run_start_ms") or 0)
-                != int(state.get("run_start_ms") or 0)
-            )
-        )
-        if boot_needed:
-            boot_by_key: Dict[str, float] = {}
-            boot_keys: list[str] = []
-            for pos in target_pos:
-                token_key = str(pos.get("token_key") or "").strip()
-                if not token_key:
-                    continue
-                size = float(pos.get("size") or 0.0)
-                boot_by_key[token_key] = size
-                boot_keys.append(token_key)
-            boot_keys = sorted(set(boot_keys))
-            state["boot_token_keys"] = boot_keys
-            state["target_last_shares_by_token_key"] = boot_by_key
-
-            boot_token_ids: list[str] = []
-            token_map = state.get("token_map", {}) if isinstance(state.get("token_map"), dict) else {}
-            for token_key in boot_keys:
-                token_id = token_map.get(token_key)
-                if token_id:
-                    boot_token_ids.append(token_id)
-                    state.setdefault("target_last_shares", {})[token_id] = float(
-                        boot_by_key.get(token_key) or 0.0
-                    )
-                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
-                    state.setdefault("target_missing_streak", {})[token_id] = 0
-            state["boot_token_ids"] = sorted(set(boot_token_ids))
-
-            state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
-            state["seen_action_ids"] = []
-            state["topic_state"] = {}
-            state["probed_token_ids"] = []
-            state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
-            state["bootstrapped"] = True
-            logger.info(
-                "[BOOT] baseline_only: baseline_keys=%s baseline_ids=%s cursor_ms=%s",
-                len(boot_keys),
-                len(state["boot_token_ids"]),
-                state["target_actions_cursor_ms"],
-            )
-            save_state(args.state, state)
-            time.sleep(_get_poll_interval())
-            continue
 
         reconcile_set: Set[str] = set(target_shares_now_by_token_id)
         reconcile_set.update(state.get("target_last_shares", {}).keys())
