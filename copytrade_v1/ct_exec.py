@@ -323,9 +323,13 @@ def reconcile_one(
             cooldown_sec = int(cfg.get("reprice_cooldown_sec") or 0)
             cooldown_ok = cooldown_sec <= 0 or (now_ts - last_reprice_ts) >= cooldown_sec
             if active_price is not None and tick_size > 0 and cooldown_ok:
-                if price is not None and abs(price - active_price) < tick_size / 2:
+                ideal_price = price
+                if ideal_price is not None and abs(ideal_price - active_price) < tick_size / 2:
                     return actions
-                trigger = price is not None and abs(price - active_price) >= tick_size * reprice_ticks
+                moved_ticks = None
+                if ideal_price is not None:
+                    moved_ticks = abs(ideal_price - active_price) / tick_size
+                trigger = moved_ticks is not None and moved_ticks >= (reprice_ticks - 1e-9)
                 if trigger:
                     logger.info(
                         "[REPRICE] token_id=%s side=%s active_price=%s ideal_price=%s "
@@ -333,7 +337,7 @@ def reconcile_one(
                         token_id,
                         side,
                         active_price,
-                        price,
+                        ideal_price,
                         best_bid,
                         best_ask,
                         reprice_ticks,
