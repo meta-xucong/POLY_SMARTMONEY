@@ -13,6 +13,7 @@
 
   "poll_interval_sec": 20,
   "poll_interval_sec_exiting": 3,
+  "config_reload_sec": 600,
   "size_threshold": 0.0,
   "target_positions_refresh_sec": 25,
   "log_positions_cache_headers": true,
