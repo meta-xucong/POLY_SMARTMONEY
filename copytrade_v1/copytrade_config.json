@@ -4,7 +4,7 @@
   "follow_ratio": 0.1,
   "lowp_guard_enabled": true,
   "lowp_price_threshold": 0.08,
-  "lowp_follow_ratio_mult": 0.25,
+  "lowp_follow_ratio_mult": 0.05,
 
   "lowp_min_order_usd": 1,
   "lowp_max_order_usd": 5,
