@@ -1094,9 +1094,11 @@ def main() -> None:
                     continue
 
             tid = str(token_id)
+            token_map[token_key] = tid
             my_by_token_id[tid] = size
             token_key_by_token_id.setdefault(tid, token_key)
 
+        resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         for action in actions_list:
             token_id = action.get("token_id")
             token_key = action.get("token_key")
@@ -1105,6 +1107,18 @@ def main() -> None:
                 continue
             if not token_key:
                 continue
+            token_id = token_map.get(str(token_key)) or _extract_token_id_from_raw(action.get("raw") or {})
+            if token_id:
+                tid = str(token_id)
+                token_map[str(token_key)] = tid
+                token_key_by_token_id.setdefault(tid, str(token_key))
+                side = str(action.get("side") or "").upper()
+                size = float(action.get("size") or 0.0)
+                _record_action(tid, side, size)
+                continue
+            if resolve_budget <= 0:
+                continue
+            resolve_budget -= 1
             try:
                 token_id = resolve_token_id(
                     token_key,
@@ -1115,7 +1129,7 @@ def main() -> None:
                         "slug": None,
                         "raw": action.get("raw") or {},
                     },
-                    state["token_map"],
+                    token_map,
                 )
             except Exception as exc:
                 logger.warning("[WARN] resolver 失败(actions): %s -> %s", token_key, exc)
@@ -1123,6 +1137,7 @@ def main() -> None:
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             tid = str(token_id)
+            token_map[str(token_key)] = tid
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
 
