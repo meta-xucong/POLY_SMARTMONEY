@@ -129,9 +129,9 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
         if best_ask is None:
             best_ask = book_ask
 
-        if best_bid is None or best_ask is None:
-            return {"best_bid": None, "best_ask": None}
-        if best_bid > best_ask:
+        # NOTE: Allow single-sided books (one side temporarily missing) instead of treating as empty.
+        # This avoids "orderbook_empty" NOOPs that can freeze existing orders at stale prices.
+        if best_bid is not None and best_ask is not None and best_bid > best_ask:
             return {"best_bid": None, "best_ask": None}
         return {"best_bid": best_bid, "best_ask": best_ask}
     except Exception:
