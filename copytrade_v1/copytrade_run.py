@@ -75,10 +75,19 @@ def _is_placeholder_addr(value: Optional[str]) -> bool:
 
 
 def _is_pure_reprice(actions: Optional[list[dict]]) -> bool:
-    if not actions or len(actions) != 2:
+    if not actions:
         return False
-    first, second = actions
-    return first.get("type") == "cancel" and second.get("type") == "place"
+    places = [action for action in actions if action.get("type") == "place"]
+    if len(places) != 1:
+        return False
+    if not bool(places[0].get("_reprice")):
+        return False
+    for action in actions:
+        action_type = action.get("type")
+        if action_type in ("cancel", "place"):
+            continue
+        return False
+    return True
 
 
 def _is_evm_address(value: Optional[str]) -> bool:

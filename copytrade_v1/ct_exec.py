@@ -325,12 +325,7 @@ def reconcile_one(
             if active_price is not None and tick_size > 0 and cooldown_ok:
                 if price is not None and abs(price - active_price) < tick_size / 2:
                     return actions
-                if side == "BUY" and best_bid is not None:
-                    trigger = best_bid >= active_price + tick_size * reprice_ticks
-                elif side == "SELL" and best_ask is not None:
-                    trigger = best_ask <= active_price - tick_size * reprice_ticks
-                else:
-                    trigger = False
+                trigger = price is not None and abs(price - active_price) >= tick_size * reprice_ticks
                 if trigger:
                     logger.info(
                         "[REPRICE] token_id=%s side=%s active_price=%s ideal_price=%s "
@@ -345,7 +340,10 @@ def reconcile_one(
                         cooldown_sec,
                         now_ts - last_reprice_ts,
                     )
-                    actions.append({"type": "cancel", "order_id": active_order.get("order_id")})
+                    for order in open_orders:
+                        order_id = order.get("order_id") or order.get("id")
+                        if order_id:
+                            actions.append({"type": "cancel", "order_id": order_id})
                     actions.append(
                         {
                             "type": "place",
@@ -354,6 +352,7 @@ def reconcile_one(
                             "price": price,
                             "size": size,
                             "ts": now_ts,
+                            "_reprice": True,
                         }
                     )
                     state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
