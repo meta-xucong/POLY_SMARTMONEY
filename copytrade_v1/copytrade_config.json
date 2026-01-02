@@ -25,6 +25,7 @@
   "boot_sync_mode": "baseline_only",
   "fresh_boot_on_start": true,
   "ignore_boot_tokens": false,
+  "ignore_boot_tokens_scope": "probe_only",
   "probe_buy_on_first_seen": true,
   "probe_order_usd": 5,
   "follow_new_topics_only": false,

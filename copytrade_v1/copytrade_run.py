@@ -1057,8 +1057,20 @@ def main() -> None:
             t_now = target_shares_now_by_token_id.get(token_id) if t_now_present else None
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
             boot_key_set = set(state.get("boot_token_keys", []))
-            buy_blocked_by_boot = bool(cfg.get("ignore_boot_tokens", True)) and (
-                token_key in boot_key_set
+            is_boot_token = token_key in boot_key_set
+
+            ignore_boot_tokens = bool(cfg.get("ignore_boot_tokens", True))
+            boot_scope = str(cfg.get("ignore_boot_tokens_scope") or "probe_only").lower()
+            # scope 说明：
+            # - "probe_only"（默认）：仅阻止 boot token 的 probe（防开机误买），允许后续增量 BUY 跟单
+            # - "all"：旧行为，boot token 的 BUY 也阻止（不推荐）
+            probe_blocked_by_boot = (
+                ignore_boot_tokens
+                and is_boot_token
+                and boot_scope in ("probe_only", "probe", "all", "full")
+            )
+            buy_blocked_by_boot = (
+                ignore_boot_tokens and is_boot_token and boot_scope in ("all", "full")
             )
             t_last = state.get("target_last_shares", {}).get(token_id)
             if t_last is None:
@@ -1244,15 +1256,13 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 should_probe = (
                     bool(state.get("bootstrapped"))
-                    and token_key not in set(state.get("boot_token_keys", []))
+                    and (not probe_blocked_by_boot)
                     and bool(cfg.get("probe_buy_on_first_seen", True))
                     and t_now is not None
                     and float(t_now) > 0
                     and token_id not in set(state.get("probed_token_ids", []))
                     and my_shares <= 0
                 )
-                if buy_blocked_by_boot:
-                    should_probe = False
                 has_buy_open = any(
                     str(order.get("side") or "").upper() == "BUY" for order in open_orders or []
                 )
