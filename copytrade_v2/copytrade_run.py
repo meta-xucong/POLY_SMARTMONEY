@@ -434,6 +434,31 @@ def _action_identity(action: Dict[str, object]) -> str:
     return f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
 
 
+def _extract_token_id_from_raw(raw: object) -> Optional[str]:
+    """从 position/raw 中快速提取 token_id（只读字段，不做任何网络请求）。"""
+    if not isinstance(raw, dict):
+        return None
+    id_keys = (
+        "tokenId",
+        "token_id",
+        "clobTokenId",
+        "clob_token_id",
+        "assetId",
+        "asset_id",
+        "outcomeTokenId",
+        "outcome_token_id",
+        "id",
+    )
+    for key in id_keys:
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def _prune_order_ts_by_id(state: Dict[str, Any]) -> None:
     order_ts_by_id = state.get("order_ts_by_id")
     if not isinstance(order_ts_by_id, dict):
@@ -958,10 +983,17 @@ def main() -> None:
         if boot_needed:
             boot_by_key: Dict[str, float] = {}
             boot_keys: list[str] = []
+            token_map = (
+                state.get("token_map", {}) if isinstance(state.get("token_map"), dict) else {}
+            )
+            state["token_map"] = token_map
             for pos in target_pos:
                 token_key = str(pos.get("token_key") or "").strip()
                 if not token_key:
                     continue
+                raw_id = _extract_token_id_from_raw(pos.get("raw") or {})
+                if raw_id:
+                    token_map.setdefault(token_key, str(raw_id))
                 size = float(pos.get("size") or 0.0)
                 boot_by_key[token_key] = size
                 boot_keys.append(token_key)
@@ -970,7 +1002,6 @@ def main() -> None:
             state["target_last_shares_by_token_key"] = boot_by_key
 
             boot_token_ids: list[str] = []
-            token_map = state.get("token_map", {}) if isinstance(state.get("token_map"), dict) else {}
             for token_key in boot_keys:
                 token_id = token_map.get(token_key)
                 if token_id:
@@ -998,31 +1029,73 @@ def main() -> None:
             time.sleep(_get_poll_interval())
             continue
 
+        token_map = state.get("token_map", {})
+        if not isinstance(token_map, dict):
+            token_map = {}
+            state["token_map"] = token_map
+
         token_key_by_token_id: Dict[str, str] = {
-            token_id: token_key for token_key, token_id in state.get("token_map", {}).items()
+            str(token_id): str(token_key) for token_key, token_id in token_map.items()
         }
 
+        # Build target shares maps without doing full gamma resolver (avoid freezing on huge accounts).
+        # Fast-path: use cached token_map or token_id embedded in pos["raw"].
         target_shares_now_by_token_id: Dict[str, float] = {}
+        target_shares_now_by_token_key: Dict[str, float] = {}
+        unresolved_target = 0
+        resolved_by_cache = 0
+        resolved_by_raw = 0
         for pos in target_pos:
-            token_key = pos["token_key"]
-            try:
-                token_id = resolve_token_id(token_key, pos, state["token_map"])
-            except Exception as exc:
-                logger.warning("[WARN] resolver 失败: %s -> %s", token_key, exc)
+            token_key = str(pos.get("token_key") or "")
+            if not token_key:
                 continue
-            target_shares_now_by_token_id[token_id] = float(pos["size"])
-            token_key_by_token_id[token_id] = token_key
+            size = float(pos.get("size") or 0.0)
+            target_shares_now_by_token_key[token_key] = size
 
+            token_id = token_map.get(token_key)
+            if token_id:
+                resolved_by_cache += 1
+            else:
+                token_id = _extract_token_id_from_raw(pos.get("raw") or {})
+                if token_id:
+                    token_map[token_key] = str(token_id)
+                    resolved_by_raw += 1
+                else:
+                    unresolved_target += 1
+                    continue
+
+            tid = str(token_id)
+            target_shares_now_by_token_id[tid] = size
+            token_key_by_token_id[tid] = token_key
+
+        if unresolved_target:
+            logger.info(
+                "[POSMAP] target idmap cache=%d raw=%d pending=%d total=%d",
+                resolved_by_cache,
+                resolved_by_raw,
+                unresolved_target,
+                len(target_pos),
+            )
+
+        # My positions are usually small; still prefer fast-path and fall back to resolver if needed.
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
-            token_key = pos["token_key"]
-            try:
-                token_id = resolve_token_id(token_key, pos, state["token_map"])
-            except Exception as exc:
-                logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
+            token_key = str(pos.get("token_key") or "")
+            if not token_key:
                 continue
-            my_by_token_id[token_id] = float(pos["size"])
-            token_key_by_token_id.setdefault(token_id, token_key)
+            size = float(pos.get("size") or 0.0)
+
+            token_id = token_map.get(token_key) or _extract_token_id_from_raw(pos.get("raw") or {})
+            if not token_id:
+                try:
+                    token_id = resolve_token_id(token_key, pos, token_map)
+                except Exception as exc:
+                    logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
+                    continue
+
+            tid = str(token_id)
+            my_by_token_id[tid] = size
+            token_key_by_token_id.setdefault(tid, token_key)
 
         for action in actions_list:
             token_id = action.get("token_id")
@@ -1209,6 +1282,11 @@ def main() -> None:
             t_now_present = token_id in target_shares_now_by_token_id
             t_now = target_shares_now_by_token_id.get(token_id) if t_now_present else None
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
+            if (not t_now_present) and isinstance(target_shares_now_by_token_key, dict):
+                alt = target_shares_now_by_token_key.get(token_key)
+                if alt is not None:
+                    t_now_present = True
+                    t_now = float(alt)
             boot_key_set = set(state.get("boot_token_keys", []))
             is_boot_token = token_key in boot_key_set
 
