@@ -189,6 +189,37 @@ def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
     return None
 
 
+def _is_lowp_token(cfg: Dict[str, Any], ref_price: float) -> bool:
+    if not bool(cfg.get("lowp_guard_enabled", False)):
+        return False
+    thr = float(cfg.get("lowp_price_threshold") or 0.0)
+    return ref_price > 0 and thr > 0 and ref_price <= thr
+
+
+def _lowp_cfg(cfg: Dict[str, Any], is_lowp: bool) -> Dict[str, Any]:
+    if not is_lowp:
+        return cfg
+    out = dict(cfg)
+    mapping = {
+        "min_order_usd": "lowp_min_order_usd",
+        "max_order_usd": "lowp_max_order_usd",
+        "probe_order_usd": "lowp_probe_order_usd",
+        "max_notional_per_token": "lowp_max_notional_per_token",
+    }
+    for base_key, lowp_key in mapping.items():
+        if lowp_key in cfg and cfg.get(lowp_key) is not None:
+            out[base_key] = cfg.get(lowp_key)
+    return out
+
+
+def _lowp_buy_ratio(cfg: Dict[str, Any], is_lowp: bool) -> float:
+    base = float(cfg.get("follow_ratio") or 0.0)
+    if not is_lowp:
+        return base
+    mult = float(cfg.get("lowp_follow_ratio_mult") or 1.0)
+    return base * mult
+
+
 def _calc_used_notional_totals(
     my_by_token_id: Dict[str, float],
     open_orders_by_token_id: Dict[str, list[dict]],
@@ -1306,11 +1337,15 @@ def main() -> None:
                     state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(
                         ref_price
                     )
+                    is_lowp = _is_lowp_token(cfg, float(ref_price))
+                    cfg_lowp = _lowp_cfg(cfg, is_lowp)
                     probe_usd = float(
-                        cfg.get("probe_order_usd") or cfg.get("min_order_usd") or 5.0
+                        cfg_lowp.get("probe_order_usd")
+                        or cfg_lowp.get("min_order_usd")
+                        or 5.0
                     )
                     if probe_usd <= 0:
-                        probe_usd = float(cfg.get("min_order_usd") or 5.0)
+                        probe_usd = float(cfg_lowp.get("min_order_usd") or 5.0)
                     probe_shares = probe_usd / ref_price
 
                     cap_shares = float("inf")
@@ -1408,6 +1443,7 @@ def main() -> None:
                     ]
 
                     token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
+                    cfg_for_reconcile = cfg_lowp if (is_lowp and desired_side == "BUY") else cfg
                     actions = reconcile_one(
                         token_id,
                         my_target,
@@ -1415,7 +1451,7 @@ def main() -> None:
                         ob,
                         open_orders_for_reconcile,
                         now_ts,
-                        cfg,
+                        cfg_for_reconcile,
                         state,
                     )
                     if not actions:
@@ -1455,12 +1491,13 @@ def main() -> None:
                             continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                        cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
                         ok, reason = risk_check(
                             token_key,
                             size,
                             my_shares,
                             price,
-                            cfg,
+                            cfg_for_action,
                             side=side,
                             planned_total_notional=planned_total_notional,
                             planned_token_notional=planned_token_notional,
@@ -1470,10 +1507,10 @@ def main() -> None:
                                 act,
                                 max_notional_total,
                                 planned_total_notional,
-                                max_notional_per_token,
+                                float(cfg_for_action.get("max_notional_per_token") or 0.0),
                                 planned_token_notional,
-                                float(cfg.get("min_order_usd") or 0.0),
-                                float(cfg.get("min_order_shares") or 0.0),
+                                float(cfg_for_action.get("min_order_usd") or 0.0),
+                                float(cfg_for_action.get("min_order_shares") or 0.0),
                                 token_key,
                                 token_id,
                                 logger,
@@ -1496,7 +1533,7 @@ def main() -> None:
                                 size,
                                 my_shares,
                                 price,
-                                cfg,
+                                cfg_for_action,
                                 side=side,
                                 planned_total_notional=planned_total_notional,
                                 planned_token_notional=planned_token_notional,
@@ -1649,12 +1686,31 @@ def main() -> None:
                 logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 continue
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
+            is_lowp = _is_lowp_token(cfg, float(ref_price))
+            cfg_lowp = _lowp_cfg(cfg, is_lowp)
+            ratio_base = float(cfg.get("follow_ratio") or 0.0)
+            ratio_buy = _lowp_buy_ratio(cfg, is_lowp)
+            if is_lowp and (t_now is not None) and (t_last is not None):
+                if float(t_now) - float(t_last) > 0:
+                    logger.info(
+                        "[LOWP] token_id=%s ref_price=%.4f ratio=%.4f->%.4f "
+                        "cap_token=%.2f->%.2f min/max_usd=%s/%s",
+                        token_id,
+                        float(ref_price),
+                        ratio_base,
+                        ratio_buy,
+                        float(cfg.get("max_notional_per_token") or 0.0),
+                        float(cfg_lowp.get("max_notional_per_token") or 0.0),
+                        cfg_lowp.get("min_order_usd"),
+                        cfg_lowp.get("max_order_usd"),
+                    )
 
             cap_shares = float("inf")
             if max_position_usd_per_token > 0:
                 cap_shares = max_position_usd_per_token / ref_price
 
-            d_my = float(cfg.get("follow_ratio") or 0.0) * d_target
+            use_ratio = ratio_buy if d_target > 0 else ratio_base
+            d_my = use_ratio * d_target
             if d_target > 0:
                 logger.info(
                     "[SIGNAL] BUY token_id=%s d_target=%s d_my=%s my_shares=%s",
@@ -1678,7 +1734,11 @@ def main() -> None:
                 my_target = cap_shares
 
             if topic_active:
-                probe_usd = float(cfg.get("probe_order_usd") or cfg.get("min_order_usd") or 5.0)
+                probe_usd = float(
+                    cfg_lowp.get("probe_order_usd")
+                    or cfg_lowp.get("min_order_usd")
+                    or 5.0
+                )
                 probe_shares = probe_usd / ref_price
 
                 if phase == "LONG":
@@ -1694,7 +1754,7 @@ def main() -> None:
                                 float(st.get("target_peak") or 0.0),
                                 float(st.get("entry_buy_accum") or 0.0),
                             )
-                            ratio = float(cfg.get("follow_ratio") or 0.0)
+                            ratio = ratio_buy
                             desired = 0.0
                             if base > 0 and ratio > 0:
                                 desired = min(cap_shares, ratio * base)
@@ -1828,6 +1888,7 @@ def main() -> None:
                 delta_usd_samples.append(delta_shares * ref_price)
 
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
+            cfg_for_reconcile = cfg_lowp if (is_lowp and desired_side == "BUY") else cfg
             actions = reconcile_one(
                 token_id,
                 my_target,
@@ -1835,7 +1896,7 @@ def main() -> None:
                 ob,
                 open_orders_for_reconcile,
                 now_ts,
-                cfg,
+                cfg_for_reconcile,
                 state,
             )
             if not actions:
@@ -1876,12 +1937,13 @@ def main() -> None:
                     continue
 
                 planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
                 ok, reason = risk_check(
                     token_key,
                     size,
                     my_shares,
                     price,
-                    cfg,
+                    cfg_for_action,
                     side=side,
                     planned_total_notional=planned_total_notional,
                     planned_token_notional=planned_token_notional,
@@ -1891,10 +1953,10 @@ def main() -> None:
                         act,
                         max_notional_total,
                         planned_total_notional,
-                        max_notional_per_token,
+                        float(cfg_for_action.get("max_notional_per_token") or 0.0),
                         planned_token_notional,
-                        float(cfg.get("min_order_usd") or 0.0),
-                        float(cfg.get("min_order_shares") or 0.0),
+                        float(cfg_for_action.get("min_order_usd") or 0.0),
+                        float(cfg_for_action.get("min_order_shares") or 0.0),
                         token_key,
                         token_id,
                         logger,
@@ -1917,7 +1979,7 @@ def main() -> None:
                         size,
                         my_shares,
                         price,
-                        cfg,
+                        cfg_for_action,
                         side=side,
                         planned_total_notional=planned_total_notional,
                         planned_token_notional=planned_token_notional,
