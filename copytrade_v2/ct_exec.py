@@ -201,30 +201,59 @@ def reconcile_one(
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
     tick_size = float(cfg.get("tick_size") or 0)
-    if side == "BUY":
-        if best_bid is not None:
-            price = best_bid
-        elif best_ask is not None:
-            price = best_ask - tick_size
-        if price is not None:
-            price = round_to_tick(price, tick_size, direction="down")
-    else:
-        if best_ask is not None:
-            price = best_ask
-        elif best_bid is not None:
-            price = best_bid + tick_size
-        if price is not None:
-            price = round_to_tick(price, tick_size, direction="up")
+    taker_spread_thr = float(cfg.get("taker_spread_threshold") or 0.01)
+    taker_enabled = bool(cfg.get("taker_enabled", True))
 
-    maker_only = bool(cfg.get("maker_only"))
-    if maker_only and tick_size and tick_size > 0:
-        if side == "BUY" and best_ask is not None and price is not None and price >= best_ask:
-            price = round_to_tick(best_ask - tick_size, tick_size, direction="down")
-        if side == "SELL" and best_bid is not None and price is not None and price <= best_bid:
-            price = round_to_tick(best_bid + tick_size, tick_size, direction="up")
+    spread: Optional[float] = None
+    if best_bid is not None and best_ask is not None:
+        try:
+            spread = float(best_ask) - float(best_bid)
+        except Exception:
+            spread = None
 
-        if price is None or price <= 0:
-            return actions
+    use_taker = bool(
+        taker_enabled
+        and spread is not None
+        and spread <= (taker_spread_thr + 1e-12)
+    )
+
+    if use_taker:
+        if side == "BUY":
+            if best_ask is None:
+                use_taker = False
+            else:
+                price = round_to_tick(float(best_ask), tick_size, direction="up")
+        else:
+            if best_bid is None:
+                use_taker = False
+            else:
+                price = round_to_tick(float(best_bid), tick_size, direction="down")
+
+    if not use_taker:
+        if side == "BUY":
+            if best_bid is not None:
+                price = best_bid
+            elif best_ask is not None:
+                price = best_ask - tick_size
+            if price is not None:
+                price = round_to_tick(price, tick_size, direction="down")
+        else:
+            if best_ask is not None:
+                price = best_ask
+            elif best_bid is not None:
+                price = best_bid + tick_size
+            if price is not None:
+                price = round_to_tick(price, tick_size, direction="up")
+
+        maker_only = bool(cfg.get("maker_only"))
+        if maker_only and tick_size and tick_size > 0:
+            if side == "BUY" and best_ask is not None and price is not None and price >= best_ask:
+                price = round_to_tick(best_ask - tick_size, tick_size, direction="down")
+            if side == "SELL" and best_bid is not None and price is not None and price <= best_bid:
+                price = round_to_tick(best_bid + tick_size, tick_size, direction="up")
+
+            if price is None or price <= 0:
+                return actions
 
     if price is None or price <= 0:
         return actions
@@ -265,6 +294,41 @@ def reconcile_one(
         return actions
 
     if open_orders:
+        if use_taker:
+            actions = []
+            for order in open_orders:
+                order_id = order.get("order_id") or order.get("id")
+                if order_id:
+                    actions.append(
+                        {
+                            "type": "cancel",
+                            "order_id": order_id,
+                            "token_id": token_id,
+                            "ts": now_ts,
+                        }
+                    )
+            if size > 0:
+                actions.append(
+                    {
+                        "type": "place",
+                        "token_id": token_id,
+                        "side": side,
+                        "price": price,
+                        "size": size,
+                        "ts": now_ts,
+                        "_taker": True,
+                        "_taker_spread": spread,
+                        "_taker_thr": taker_spread_thr,
+                    }
+                )
+            logger.info(
+                "[SWITCH_TO_TAKER] token_id=%s side=%s spread=%s thr=%s",
+                token_id,
+                side,
+                spread,
+                taker_spread_thr,
+            )
+            return actions
         if is_exiting and side == "SELL" and bool(cfg.get("exit_full_sell", True)):
             eps = 1e-9
             total_open = 0.0
@@ -371,6 +435,15 @@ def reconcile_one(
             "price": price,
             "size": size,
             "ts": now_ts,
+            **(
+                {
+                    "_taker": True,
+                    "_taker_spread": spread,
+                    "_taker_thr": taker_spread_thr,
+                }
+                if use_taker
+                else {}
+            ),
         }
     )
     return actions
@@ -521,6 +594,60 @@ def place_order(
     return result
 
 
+def place_market_order(
+    client: Any,
+    token_id: str,
+    side: str,
+    amount: float,
+    price: Optional[float] = None,
+    order_type: str = "FAK",
+) -> Dict[str, Any]:
+    """
+    Taker path via MarketOrderArgs.
+    - BUY: amount is USD
+    - SELL: amount is shares
+    """
+    from py_clob_client.clob_types import MarketOrderArgs, OrderType
+    from py_clob_client.order_builder.constants import BUY, SELL
+
+    side_const = BUY if side.upper() == "BUY" else SELL
+
+    kwargs: Dict[str, Any] = {"token_id": str(token_id), "side": side_const}
+    try:
+        params = inspect.signature(MarketOrderArgs).parameters
+    except Exception:
+        params = {}
+
+    if "amount" in params:
+        kwargs["amount"] = float(amount)
+    elif "size" in params:
+        kwargs["size"] = float(amount)
+    else:
+        kwargs["amount"] = float(amount)
+
+    if price is not None and float(price) > 0:
+        if "price" in params:
+            kwargs["price"] = float(price)
+
+    order_args = MarketOrderArgs(**kwargs)
+
+    if hasattr(client, "create_market_order"):
+        signed = client.create_market_order(order_args)
+    else:
+        signed = client.create_order(order_args)
+
+    ot = getattr(OrderType, str(order_type).upper(), None)
+    if ot is None:
+        ot = getattr(OrderType, "FAK", None) or getattr(OrderType, "FOK")
+
+    response = client.post_order(signed, ot)
+    order_id = _extract_order_id(response)
+    result: Dict[str, Any] = {"response": response}
+    if order_id:
+        result["order_id"] = order_id
+    return result
+
+
 def apply_actions(
     client: Any,
     actions: List[Dict[str, Any]],
@@ -578,18 +705,28 @@ def apply_actions(
     for action in actions:
         if action.get("type") != "place":
             continue
+        is_taker = bool(action.get("_taker"))
         if dry_run:
-            updated.append(
-                {
-                    "order_id": "dry_run",
-                    "side": action.get("side"),
-                    "price": action.get("price"),
-                    "size": action.get("size"),
-                    "ts": now_ts,
-                }
-            )
+            if not is_taker:
+                updated.append(
+                    {
+                        "order_id": "dry_run",
+                        "side": action.get("side"),
+                        "price": action.get("price"),
+                        "size": action.get("size"),
+                        "ts": now_ts,
+                    }
+                )
+            else:
+                logger.info(
+                    "[DRY_RUN_TAKER] token_id=%s side=%s price=%s size=%s",
+                    action.get("token_id"),
+                    action.get("side"),
+                    action.get("price"),
+                    action.get("size"),
+                )
             continue
-        if cfg is not None and bool(cfg.get("dedupe_place", True)):
+        if (not is_taker) and cfg is not None and bool(cfg.get("dedupe_place", True)):
             token_id = str(action.get("token_id") or "")
             want_side = str(action.get("side") or "")
             try:
@@ -633,28 +770,48 @@ def apply_actions(
         if cfg is not None:
             allow_partial = bool(cfg.get("allow_partial", True))
         size_for_record = float(action.get("size") or 0.0)
+        side_u = str(action.get("side") or "").upper()
+        price = float(action.get("price") or 0.0)
+        size = float(action.get("size") or 0.0)
         try:
-            response = place_order(
-                client,
-                token_id=str(action.get("token_id")),
-                side=str(action.get("side")),
-                price=float(action.get("price")),
-                size=size_for_record,
-                allow_partial=allow_partial,
-            )
+            if is_taker:
+                if side_u == "BUY":
+                    amount = abs(size) * price
+                else:
+                    amount = abs(size)
+                taker_order_type = "FAK"
+                if cfg is not None:
+                    if cfg.get("taker_order_type"):
+                        taker_order_type = str(cfg.get("taker_order_type")).upper()
+                    else:
+                        taker_order_type = "FAK" if allow_partial else "FOK"
+                response = place_market_order(
+                    client,
+                    token_id=str(action.get("token_id")),
+                    side=side_u,
+                    amount=amount,
+                    price=price,
+                    order_type=taker_order_type,
+                )
+            else:
+                response = place_order(
+                    client,
+                    token_id=str(action.get("token_id")),
+                    side=side_u,
+                    price=price,
+                    size=size_for_record,
+                    allow_partial=allow_partial,
+                )
         except Exception as exc:
             logger.warning("place_order failed token_id=%s: %s", action.get("token_id"), exc)
             if not cfg or not cfg.get("retry_on_insufficient_balance"):
                 continue
-            side = str(action.get("side") or "").upper()
-            if side != "BUY":
+            if side_u != "BUY":
                 if _is_insufficient_balance(exc) and state is not None:
                     token_id = str(action.get("token_id") or "")
                     refresh_tokens = state.setdefault("force_refresh_tokens", [])
                     if token_id and token_id not in refresh_tokens:
                         refresh_tokens.append(token_id)
-                    price = float(action.get("price") or 0.0)
-                    size = float(action.get("size") or 0.0)
                     if price > 0 and size > 0:
                         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
                         min_order_shares = float(cfg.get("min_order_shares") or 0.0)
@@ -667,14 +824,24 @@ def apply_actions(
                             new_size = new_usd / price
                             if min_order_shares <= 0 or new_size + 1e-12 >= min_order_shares:
                                 try:
-                                    response = place_order(
-                                        client,
-                                        token_id=str(action.get("token_id")),
-                                        side=str(action.get("side")),
-                                        price=price,
-                                        size=new_size,
-                                        allow_partial=allow_partial,
-                                    )
+                                    if is_taker:
+                                        response = place_market_order(
+                                            client,
+                                            token_id=str(action.get("token_id")),
+                                            side=side_u,
+                                            amount=abs(new_size),
+                                            price=price,
+                                            order_type="FAK" if allow_partial else "FOK",
+                                        )
+                                    else:
+                                        response = place_order(
+                                            client,
+                                            token_id=str(action.get("token_id")),
+                                            side=side_u,
+                                            price=price,
+                                            size=new_size,
+                                            allow_partial=allow_partial,
+                                        )
                                 except Exception as retry_exc:
                                     logger.warning(
                                         "[RETRY_SELL_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
@@ -693,7 +860,7 @@ def apply_actions(
                                     new_usd,
                                 )
                                 order_id = response.get("order_id")
-                                if order_id:
+                                if order_id and not is_taker:
                                     updated.append(
                                         {
                                             "order_id": order_id,
@@ -718,8 +885,6 @@ def apply_actions(
                 continue
             if not _is_insufficient_balance(exc):
                 continue
-            price = float(action.get("price") or 0.0)
-            size = float(action.get("size") or 0.0)
             if price <= 0 or size <= 0:
                 continue
             min_order_usd = float(cfg.get("min_order_usd") or 0.0)
@@ -735,14 +900,24 @@ def apply_actions(
             if min_order_shares > 0 and new_size + 1e-12 < min_order_shares:
                 continue
             try:
-                response = place_order(
-                    client,
-                    token_id=str(action.get("token_id")),
-                    side=str(action.get("side")),
-                    price=price,
-                    size=new_size,
-                    allow_partial=allow_partial,
-                )
+                if is_taker:
+                    response = place_market_order(
+                        client,
+                        token_id=str(action.get("token_id")),
+                        side=side_u,
+                        amount=abs(new_size) * price,
+                        price=price,
+                        order_type="FAK" if allow_partial else "FOK",
+                    )
+                else:
+                    response = place_order(
+                        client,
+                        token_id=str(action.get("token_id")),
+                        side=side_u,
+                        price=price,
+                        size=new_size,
+                        allow_partial=allow_partial,
+                    )
             except Exception as retry_exc:
                 logger.warning(
                     "[RETRY_BALANCE_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
@@ -773,15 +948,16 @@ def apply_actions(
                     "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear place_fail_until",
                     token_id,
                 )
-            updated.append(
-                {
-                    "order_id": order_id,
-                    "side": action.get("side"),
-                    "price": action.get("price"),
-                    "size": size_for_record,
-                    "ts": now_ts,
-                }
-            )
+            if not is_taker:
+                updated.append(
+                    {
+                        "order_id": order_id,
+                        "side": action.get("side"),
+                        "price": action.get("price"),
+                        "size": size_for_record,
+                        "ts": now_ts,
+                    }
+                )
     return updated
 
 
