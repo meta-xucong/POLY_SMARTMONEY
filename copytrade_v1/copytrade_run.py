@@ -1319,8 +1319,8 @@ def main() -> None:
 
             if action_seen:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
-                if t_now_present:
-                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+                # Even if position snapshot temporarily misses t_now, actions mean "recently seen".
+                state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
             elif t_now_present:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
@@ -1445,7 +1445,10 @@ def main() -> None:
                                 else 0,
                             )
                             ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
-                            if cooldown_active and not ignore_cd:
+                            cancel_ignore_cd = bool(
+                                cfg.get("cancel_intent_ignore_cooldown", True)
+                            )
+                            if cooldown_active and (not ignore_cd) and (not cancel_ignore_cd):
                                 logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                             else:
                                 updated_orders = apply_actions(
@@ -1664,7 +1667,13 @@ def main() -> None:
                         max_position_usd_per_token,
                     )
 
-                    if cooldown_sec > 0 and actions and (not ignore_cd) and (not is_reprice):
+                    if (
+                        cooldown_sec > 0
+                        and actions
+                        and has_any_place
+                        and (not ignore_cd)
+                        and (not is_reprice)
+                    ):
                         state.setdefault("cooldown_until", {})[token_id] = (
                             now_ts + cooldown_sec
                         )
@@ -1818,6 +1827,30 @@ def main() -> None:
 
                 elif phase == "EXITING":
                     my_target = 0.0
+
+            # Guard: if target snapshot temporarily misses this token, don't drop desired to 0
+            # while we still have outstanding orders (prevents churn & "stuck probe" at stale price).
+            if phase == "LONG" and (t_now is None) and (not action_seen) and open_orders_count > 0:
+                hold_sec = int(cfg.get("missing_hold_sec") or entry_settle_sec or 60)
+                last_seen = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
+                if last_seen > 0 and (now_ts - last_seen) <= hold_sec:
+                    prev_intent_tmp = state.get("intent_keys", {}).get(token_id)
+                    prev_desired = (
+                        float(prev_intent_tmp.get("desired_shares") or 0.0)
+                        if isinstance(prev_intent_tmp, dict)
+                        else 0.0
+                    )
+                    if prev_desired > my_target + eps:
+                        logger.info(
+                            "[HOLD] token_id=%s reason=missing_target prev_desired=%s "
+                            "my_target=%s last_seen=%s hold_sec=%s",
+                            token_id,
+                            prev_desired,
+                            my_target,
+                            last_seen,
+                            hold_sec,
+                        )
+                        my_target = min(cap_shares, prev_desired)
             delta = my_target - my_shares
             prev_intent = state.get("intent_keys", {}).get(token_id)
             if delta > eps:
@@ -1871,7 +1904,10 @@ def main() -> None:
                         else 0,
                     )
                     ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
-                    if cooldown_active and not ignore_cd:
+                    cancel_ignore_cd = bool(
+                        cfg.get("cancel_intent_ignore_cooldown", True)
+                    )
+                    if cooldown_active and (not ignore_cd) and (not cancel_ignore_cd):
                         logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                     else:
                         updated_orders = apply_actions(
@@ -2114,7 +2150,7 @@ def main() -> None:
                 max_position_usd_per_token,
             )
 
-            if cooldown_sec > 0 and actions and (not ignore_cd) and (not is_reprice):
+            if cooldown_sec > 0 and actions and has_any_place and (not ignore_cd) and (not is_reprice):
                 state.setdefault("cooldown_until", {})[token_id] = now_ts + cooldown_sec
             if is_reprice:
                 state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
