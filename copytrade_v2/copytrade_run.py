@@ -168,6 +168,14 @@ def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str
     return current.strip()
 
 
+def _derive_api_creds(client):
+    for name in ("derive_api_creds", "derive_api_key"):
+        method = getattr(client, name, None)
+        if callable(method):
+            return method()
+    return None
+
+
 def init_clob_client():
     from py_clob_client.client import ClobClient
 
@@ -184,7 +192,9 @@ def init_clob_client():
         signature_type=signature_type,
         funder=funder,
     )
-    api_creds = client.create_or_derive_api_creds()
+    api_creds = _derive_api_creds(client)
+    if not api_creds:
+        api_creds = client.create_or_derive_api_creds()
     client.set_api_creds(api_creds)
     try:
         setattr(client, "api_creds", api_creds)
