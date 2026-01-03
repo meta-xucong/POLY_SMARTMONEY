@@ -21,7 +21,7 @@
   "target_cache_bust_mode": "sec",
   "my_positions_force_http": false,
 
-  "deadband_shares": 3.0,
+  "deadband_shares": 1.0,
 
   "slice_min": 5,
   "slice_max": 25,
