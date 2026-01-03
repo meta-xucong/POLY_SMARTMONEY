@@ -366,6 +366,7 @@ def _deep_extract_token_id(obj: object, *, max_depth: int = 6) -> object | None:
         "token_id",
         "clobTokenId",
         "clob_token_id",
+        "asset",
         "assetId",
         "asset_id",
         "outcomeTokenId",
@@ -428,6 +429,7 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
         or raw.get("token_id")
         or raw.get("clobTokenId")
         or raw.get("clob_token_id")
+        or raw.get("asset")
         or raw.get("assetId")
         or raw.get("asset_id")
         or raw.get("outcomeTokenId")
@@ -488,6 +490,7 @@ def _normalize_trade_action(trade: Trade) -> Dict[str, object] | None:
         or raw.get("token_id")
         or raw.get("clobTokenId")
         or raw.get("clob_token_id")
+        or raw.get("asset")
         or raw.get("assetId")
         or raw.get("asset_id")
         or raw.get("outcomeTokenId")
