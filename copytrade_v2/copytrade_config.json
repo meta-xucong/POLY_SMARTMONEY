@@ -60,7 +60,7 @@
 
   "max_notional_per_token": 15,
   "max_notional_total": 120,
-  "shadow_buy_ttl_sec": 120,
+  "shadow_buy_ttl_sec": 180,
 
   "allow_partial": true,
   "taker_enabled": true,
