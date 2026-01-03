@@ -1413,6 +1413,17 @@ def main() -> None:
             state.get("last_mid_price_by_token_id", {}),
             max_position_usd_per_token,
         )
+        open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
+        top_tokens = sorted(planned_by_token_usd.items(), key=lambda item: item[1], reverse=True)[:5]
+        top_tokens_fmt = [
+            f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
+        ]
+        logger.info(
+            "[RISK_SUMMARY] used_total=%s open_buy_orders_usd=%s top_tokens=%s",
+            planned_total_notional,
+            open_buy_orders_usd,
+            top_tokens_fmt,
+        )
 
         for token_id in reconcile_set:
             open_orders = state.get("open_orders", {}).get(token_id, [])
