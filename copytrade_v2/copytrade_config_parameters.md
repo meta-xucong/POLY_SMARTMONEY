@@ -1,6 +1,6 @@
 # copytrade_config.json 参数说明
 
-本文档解释 `copytrade_v1/copytrade_config.json` 中每个参数的作用。
+本文档解释 `copytrade_v2/copytrade_config.json` 中每个参数的作用。
 
 ## 账户与跟随比例
 
@@ -23,6 +23,7 @@
 
 - `poll_interval_sec`: 正常状态轮询间隔（秒）。
 - `poll_interval_sec_exiting`: 退出/减仓状态轮询间隔（秒）。
+- `config_reload_sec`: 配置文件热加载间隔（秒）。
 - `size_threshold`: 规模阈值，小于该值的变动可忽略。
 - `target_positions_refresh_sec`: 目标仓位刷新间隔（秒）。
 - `log_positions_cache_headers`: 是否记录目标仓位请求的缓存响应头。
@@ -83,6 +84,9 @@
 ## 下单失败重试与去重
 
 - `allow_partial`: 是否允许部分成交。
+- `taker_enabled`: 是否启用 taker（吃单）逻辑。
+- `taker_spread_threshold`: 触发 taker 的价差阈值。
+- `taker_order_type`: taker 下单类型（如 `FAK`）。
 - `dedupe_place`: 是否对重复下单请求进行去重。
 - `dedupe_place_price_eps`: 价格去重容差。
 - `dedupe_place_size_rel_eps`: 份额去重的相对容差。
