@@ -267,8 +267,8 @@ def _calc_used_notional_totals(
     for token_id, shares in my_by_token_id.items():
         mid = float(mid_cache.get(token_id, 0.0))
         if mid <= 0:
-            # 保守上界：Polymarket price in [0,1]
-            mid = 1.0
+            # 拿不到价格/无盘口：按 0 估值（不占用总仓位上限）
+            mid = 0.0
         if mid < 0:
             mid = 0.0
         elif mid > 1.0:
