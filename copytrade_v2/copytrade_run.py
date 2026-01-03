@@ -445,10 +445,11 @@ def _action_identity(action: Dict[str, object]) -> str:
 
 
 def _extract_token_id_from_raw(raw: object) -> Optional[str]:
-    """从 position/raw 中快速提取 token_id（只读字段，不做任何网络请求）。"""
-    if not isinstance(raw, dict):
+    """从 position/raw/action.raw 中提取 token_id（只读字段，不做网络请求）。支持嵌套结构。"""
+    if raw is None:
         return None
-    id_keys = (
+
+    direct_keys = (
         "tokenId",
         "token_id",
         "clobTokenId",
@@ -457,15 +458,51 @@ def _extract_token_id_from_raw(raw: object) -> Optional[str]:
         "asset_id",
         "outcomeTokenId",
         "outcome_token_id",
-        "id",
     )
-    for key in id_keys:
-        value = raw.get(key)
-        if value is None:
+
+    if isinstance(raw, dict):
+        for key in direct_keys:
+            value = raw.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        value = raw.get("id")
+        if value is not None:
+            text = str(value).strip()
+            if text:
+                return text
+
+    keyset = set(direct_keys)
+    id_parent_ok = {"asset", "token", "outcomeToken", "outcome_token", "clobToken", "clob_token"}
+    stack: list[tuple[object, int, Optional[str]]] = [(raw, 0, None)]
+    seen: set[int] = set()
+    while stack:
+        cur, depth, parent = stack.pop()
+        if depth > 6:
             continue
-        text = str(value).strip()
-        if text:
-            return text
+        oid = id(cur)
+        if oid in seen:
+            continue
+        seen.add(oid)
+
+        if isinstance(cur, dict):
+            for key, value in cur.items():
+                if key in keyset and value is not None:
+                    text = str(value).strip()
+                    if text:
+                        return text
+                if key == "id" and parent in id_parent_ok and value is not None:
+                    text = str(value).strip()
+                    if text:
+                        return text
+                if isinstance(value, (dict, list)):
+                    stack.append((value, depth + 1, key))
+        elif isinstance(cur, list):
+            for value in cur:
+                if isinstance(value, (dict, list)):
+                    stack.append((value, depth + 1, parent))
     return None
 
 
@@ -702,24 +739,22 @@ def main() -> None:
             payload[key] = value
 
     def _apply_cfg_settings() -> None:
-        nonlocal (
-            poll_interval,
-            poll_interval_exiting,
-            size_threshold,
-            skip_closed,
-            refresh_sec,
-            positions_limit,
-            positions_max_pages,
-            target_positions_refresh_sec,
-            log_cache_headers,
-            header_keys,
-            target_cache_bust_mode,
-            my_positions_force_http,
-            actions_page_size,
-            actions_max_offset,
-            heartbeat_interval_sec,
-            config_reload_sec,
-        )
+        nonlocal poll_interval
+        nonlocal poll_interval_exiting
+        nonlocal size_threshold
+        nonlocal skip_closed
+        nonlocal refresh_sec
+        nonlocal positions_limit
+        nonlocal positions_max_pages
+        nonlocal target_positions_refresh_sec
+        nonlocal log_cache_headers
+        nonlocal header_keys
+        nonlocal target_cache_bust_mode
+        nonlocal my_positions_force_http
+        nonlocal actions_page_size
+        nonlocal actions_max_offset
+        nonlocal heartbeat_interval_sec
+        nonlocal config_reload_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -995,12 +1030,34 @@ def main() -> None:
                 del seen_action_ids[:-max_seen]
             actions_list = filtered_actions
 
+            miss_token = 0
+            miss_samples: list[list[str]] = []
             for action in actions_list:
-                token_id = action.get("token_id")
                 side = str(action.get("side") or "").upper()
                 size = float(action.get("size") or 0.0)
+
+                token_id = action.get("token_id") or _extract_token_id_from_raw(
+                    action.get("raw") or {}
+                )
                 if token_id:
-                    _record_action(str(token_id), side, size)
+                    tid = str(token_id)
+                    action["token_id"] = tid
+                    _record_action(tid, side, size)
+                else:
+                    miss_token += 1
+                    if len(miss_samples) < 3:
+                        raw = action.get("raw") or {}
+                        if isinstance(raw, dict):
+                            miss_samples.append(sorted(list(raw.keys()))[:25])
+
+            if miss_token:
+                logger.warning(
+                    "[ACT] actions_total=%s token_mapped=%s missing=%s sample_raw_keys=%s",
+                    len(actions_list),
+                    len(actions_list) - miss_token,
+                    miss_token,
+                    miss_samples,
+                )
             latest_action_ms = int(actions_info.get("latest_ms") or 0)
             if actions_info.get("ok") and not actions_info.get("incomplete"):
                 if latest_action_ms > actions_cursor_ms:
