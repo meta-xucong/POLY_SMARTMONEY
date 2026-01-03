@@ -739,24 +739,22 @@ def main() -> None:
             payload[key] = value
 
     def _apply_cfg_settings() -> None:
-        nonlocal (
-            poll_interval,
-            poll_interval_exiting,
-            size_threshold,
-            skip_closed,
-            refresh_sec,
-            positions_limit,
-            positions_max_pages,
-            target_positions_refresh_sec,
-            log_cache_headers,
-            header_keys,
-            target_cache_bust_mode,
-            my_positions_force_http,
-            actions_page_size,
-            actions_max_offset,
-            heartbeat_interval_sec,
-            config_reload_sec,
-        )
+        nonlocal poll_interval
+        nonlocal poll_interval_exiting
+        nonlocal size_threshold
+        nonlocal skip_closed
+        nonlocal refresh_sec
+        nonlocal positions_limit
+        nonlocal positions_max_pages
+        nonlocal target_positions_refresh_sec
+        nonlocal log_cache_headers
+        nonlocal header_keys
+        nonlocal target_cache_bust_mode
+        nonlocal my_positions_force_http
+        nonlocal actions_page_size
+        nonlocal actions_max_offset
+        nonlocal heartbeat_interval_sec
+        nonlocal config_reload_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
