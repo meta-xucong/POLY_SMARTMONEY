@@ -329,6 +329,77 @@ def _parse_timestamp(value: object) -> dt.datetime | None:
     return None
 
 
+def _deep_find_first(
+    obj: object,
+    keys: tuple[str, ...],
+    *,
+    max_depth: int = 6,
+) -> object | None:
+    keyset = set(keys)
+    stack: list[tuple[object, int]] = [(obj, 0)]
+    seen: set[int] = set()
+    while stack:
+        cur, depth = stack.pop()
+        if depth > max_depth:
+            continue
+        oid = id(cur)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k in keyset and v is not None:
+                    return v
+                if isinstance(v, (dict, list)):
+                    stack.append((v, depth + 1))
+        elif isinstance(cur, list):
+            for v in cur:
+                if isinstance(v, (dict, list)):
+                    stack.append((v, depth + 1))
+    return None
+
+
+def _deep_extract_token_id(obj: object, *, max_depth: int = 6) -> object | None:
+    # 不要无脑 deep 搜 "id"（会误抓到用户/订单/市场 id）
+    direct_keys = (
+        "tokenId",
+        "token_id",
+        "clobTokenId",
+        "clob_token_id",
+        "assetId",
+        "asset_id",
+        "outcomeTokenId",
+        "outcome_token_id",
+    )
+    hit = _deep_find_first(obj, direct_keys, max_depth=max_depth)
+    if hit is not None:
+        return hit
+
+    # 允许在 asset/token/outcome 这类父节点下取 "id"
+    id_parent_ok = {"asset", "token", "outcomeToken", "outcome_token", "clobToken", "clob_token"}
+    stack: list[tuple[object, int, str | None]] = [(obj, 0, None)]
+    seen: set[int] = set()
+    while stack:
+        cur, depth, parent = stack.pop()
+        if depth > max_depth:
+            continue
+        oid = id(cur)
+        if oid in seen:
+            continue
+        seen.add(oid)
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k == "id" and parent in id_parent_ok and v is not None:
+                    return v
+                if isinstance(v, (dict, list)):
+                    stack.append((v, depth + 1, k))
+        elif isinstance(cur, list):
+            for v in cur:
+                if isinstance(v, (dict, list)):
+                    stack.append((v, depth + 1, parent))
+    return None
+
+
 def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
     side = str(raw.get("side") or raw.get("action") or raw.get("type") or "").upper()
     event_type = str(
@@ -362,9 +433,24 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
         or raw.get("outcomeTokenId")
         or raw.get("outcome_token_id")
     )
+    if token_id is None:
+        token_id = _deep_extract_token_id(raw)
     token_id_text = str(token_id).strip() if token_id is not None else ""
-    condition_id = raw.get("conditionId") or raw.get("condition_id") or raw.get("marketId")
+    condition_id = (
+        raw.get("conditionId")
+        or raw.get("condition_id")
+        or raw.get("marketId")
+        or raw.get("market_id")
+    )
+    if condition_id is None:
+        condition_id = _deep_find_first(
+            raw,
+            ("conditionId", "condition_id", "marketId", "market_id"),
+            max_depth=6,
+        )
     outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
+    if outcome_index is None:
+        outcome_index = _deep_find_first(raw, ("outcomeIndex", "outcome_index"), max_depth=6)
     token_key = None
     if condition_id is not None and outcome_index is not None:
         try:
