@@ -935,6 +935,21 @@ def apply_actions(
                 new_usd,
             )
         order_id = response.get("order_id")
+        if (
+            is_taker
+            and state is not None
+            and side_u == "BUY"
+            and price > 0
+            and size_for_record > 0
+        ):
+            shadow_orders = state.setdefault("shadow_buy_orders", [])
+            shadow_orders.append(
+                {
+                    "token_id": str(action.get("token_id") or ""),
+                    "usd": abs(size_for_record) * price,
+                    "ts": now_ts,
+                }
+            )
         if order_id:
             if state is not None:
                 token_id = str(action.get("token_id") or "")

@@ -300,6 +300,62 @@ def _calc_used_notional_totals(
     return total, by_token, order_info_by_id
 
 
+def _calc_shadow_buy_notional(
+    state: Dict[str, Any],
+    now_ts: int,
+    ttl_sec: int,
+) -> tuple[float, Dict[str, float]]:
+    if ttl_sec <= 0:
+        state["shadow_buy_orders"] = []
+        return 0.0, {}
+    shadow_orders = state.get("shadow_buy_orders", [])
+    if not isinstance(shadow_orders, list):
+        state["shadow_buy_orders"] = []
+        return 0.0, {}
+    kept: list[dict] = []
+    total = 0.0
+    by_token: Dict[str, float] = {}
+    for order in shadow_orders:
+        if not isinstance(order, dict):
+            continue
+        token_id = str(order.get("token_id") or "")
+        if not token_id:
+            continue
+        ts = int(order.get("ts") or 0)
+        if ts <= 0 or (now_ts - ts) > ttl_sec:
+            continue
+        usd = float(order.get("usd") or 0.0)
+        if usd <= 0:
+            continue
+        kept.append(order)
+        total += usd
+        by_token[token_id] = by_token.get(token_id, 0.0) + usd
+    state["shadow_buy_orders"] = kept
+    return total, by_token
+
+
+def _calc_planned_notional_totals(
+    my_by_token_id: Dict[str, float],
+    open_orders_by_token_id: Dict[str, list[dict]],
+    mid_cache: Dict[str, float],
+    max_position_usd_per_token: float,
+    state: Dict[str, Any],
+    now_ts: int,
+    shadow_ttl_sec: int,
+) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
+    total, by_token, order_info_by_id = _calc_used_notional_totals(
+        my_by_token_id, open_orders_by_token_id, mid_cache, max_position_usd_per_token
+    )
+    shadow_total, shadow_by_token = _calc_shadow_buy_notional(
+        state, now_ts, shadow_ttl_sec
+    )
+    if shadow_total > 0:
+        total += shadow_total
+        for token_id, usd in shadow_by_token.items():
+            by_token[token_id] = by_token.get(token_id, 0.0) + usd
+    return total, by_token, order_info_by_id, shadow_total
+
+
 def _calc_used_notional_total(
     my_by_token_id: Dict[str, float],
     open_orders_by_token_id: Dict[str, list[dict]],
@@ -1387,6 +1443,7 @@ def main() -> None:
         max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
         max_notional_total = float(cfg.get("max_notional_total") or 0.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
+        shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
         missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 0)
         orphan_cancel_rounds = int(cfg.get("orphan_cancel_rounds") or 3)
@@ -1407,13 +1464,22 @@ def main() -> None:
 
         delta_usd_samples = []
 
-        planned_total_notional, planned_by_token_usd, order_info_by_id = _calc_used_notional_totals(
+        (
+            planned_total_notional,
+            planned_by_token_usd,
+            order_info_by_id,
+            shadow_buy_usd,
+        ) = _calc_planned_notional_totals(
             my_by_token_id,
             state.get("open_orders", {}),
             state.get("last_mid_price_by_token_id", {}),
             max_position_usd_per_token,
+            state,
+            now_ts,
+            shadow_ttl_sec,
         )
         open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
+        open_buy_orders_usd += shadow_buy_usd
         top_tokens = sorted(planned_by_token_usd.items(), key=lambda item: item[1], reverse=True)[:5]
         top_tokens_fmt = [
             f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
@@ -1489,11 +1555,15 @@ def main() -> None:
                                 planned_total_notional,
                                 planned_by_token_usd,
                                 order_info_by_id,
-                            ) = _calc_used_notional_totals(
+                                _shadow_buy_usd,
+                            ) = _calc_planned_notional_totals(
                                 my_by_token_id,
                                 state.get("open_orders", {}),
                                 state.get("last_mid_price_by_token_id", {}),
                                 max_position_usd_per_token,
+                                state,
+                                now_ts,
+                                shadow_ttl_sec,
                             )
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
                     meta = cached.get("meta") or {}
@@ -1688,11 +1758,15 @@ def main() -> None:
                             planned_total_notional,
                             planned_by_token_usd,
                             order_info_by_id,
-                        ) = _calc_used_notional_totals(
+                            _shadow_buy_usd,
+                        ) = _calc_planned_notional_totals(
                             my_by_token_id,
                             state.get("open_orders", {}),
                             state.get("last_mid_price_by_token_id", {}),
                             max_position_usd_per_token,
+                            state,
+                            now_ts,
+                            shadow_ttl_sec,
                         )
                         if orphan_ignore_sec > 0:
                             state.setdefault("ignored_tokens", {})[token_id] = {
@@ -1857,11 +1931,15 @@ def main() -> None:
                                     planned_total_notional,
                                     planned_by_token_usd,
                                     order_info_by_id,
-                                ) = _calc_used_notional_totals(
+                                    _shadow_buy_usd,
+                                ) = _calc_planned_notional_totals(
                                     my_by_token_id,
                                     state.get("open_orders", {}),
                                     state.get("last_mid_price_by_token_id", {}),
                                     max_position_usd_per_token,
+                                    state,
+                                    now_ts,
+                                    shadow_ttl_sec,
                                 )
                                 # NOTE: cancel-intent should NOT extend cooldown.
                                 # Cooldown is applied only on successful place actions.
@@ -2043,11 +2121,15 @@ def main() -> None:
                         planned_total_notional,
                         planned_by_token_usd,
                         order_info_by_id,
-                    ) = _calc_used_notional_totals(
+                        _shadow_buy_usd,
+                    ) = _calc_planned_notional_totals(
                         my_by_token_id,
                         state.get("open_orders", {}),
                         state.get("last_mid_price_by_token_id", {}),
                         max_position_usd_per_token,
+                        state,
+                        now_ts,
+                        shadow_ttl_sec,
                     )
 
                     has_any_place_final = any(
@@ -2317,11 +2399,15 @@ def main() -> None:
                             planned_total_notional,
                             planned_by_token_usd,
                             order_info_by_id,
-                        ) = _calc_used_notional_totals(
+                            _shadow_buy_usd,
+                        ) = _calc_planned_notional_totals(
                             my_by_token_id,
                             state.get("open_orders", {}),
                             state.get("last_mid_price_by_token_id", {}),
                             max_position_usd_per_token,
+                            state,
+                            now_ts,
+                            shadow_ttl_sec,
                         )
                         # NOTE: cancel-intent should NOT extend cooldown.
                         # Cooldown is applied only on successful place actions.
@@ -2527,11 +2613,15 @@ def main() -> None:
                 planned_total_notional,
                 planned_by_token_usd,
                 order_info_by_id,
-            ) = _calc_used_notional_totals(
+                _shadow_buy_usd,
+            ) = _calc_planned_notional_totals(
                 my_by_token_id,
                 state.get("open_orders", {}),
                 state.get("last_mid_price_by_token_id", {}),
                 max_position_usd_per_token,
+                state,
+                now_ts,
+                shadow_ttl_sec,
             )
 
             has_any_place_final = any(act.get("type") == "place" for act in actions)
