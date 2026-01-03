@@ -8,7 +8,7 @@ from typing import Dict, List, Tuple
 import requests
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
-from smartmoney_query.poly_martmoney_query.models import Position
+from smartmoney_query.poly_martmoney_query.models import Position, Trade
 
 
 def _normalize_position(pos: Position) -> Dict[str, object] | None:
@@ -469,7 +469,66 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
         "outcome_index": int(outcome_index) if outcome_index is not None else None,
         "side": side,
         "size": size_val,
+        "price": raw.get("price") or raw.get("fillPrice") or raw.get("avgPrice"),
         "timestamp": ts,
+        "raw": raw,
+    }
+
+
+def _normalize_trade_action(trade: Trade) -> Dict[str, object] | None:
+    side = str(trade.side or "").upper()
+    if side not in ("BUY", "SELL"):
+        return None
+    if trade.size <= 0:
+        return None
+
+    raw = trade.raw or {}
+    token_id = (
+        raw.get("tokenId")
+        or raw.get("token_id")
+        or raw.get("clobTokenId")
+        or raw.get("clob_token_id")
+        or raw.get("assetId")
+        or raw.get("asset_id")
+        or raw.get("outcomeTokenId")
+        or raw.get("outcome_token_id")
+    )
+    if token_id is None:
+        token_id = _deep_extract_token_id(raw)
+    token_id_text = str(token_id).strip() if token_id is not None else ""
+    condition_id = (
+        raw.get("conditionId")
+        or raw.get("condition_id")
+        or raw.get("marketId")
+        or raw.get("market_id")
+        or trade.market_id
+    )
+    if condition_id is None:
+        condition_id = _deep_find_first(
+            raw,
+            ("conditionId", "condition_id", "marketId", "market_id"),
+            max_depth=6,
+        )
+    outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
+    if outcome_index is None:
+        outcome_index = _deep_find_first(raw, ("outcomeIndex", "outcome_index"), max_depth=6)
+
+    token_key = None
+    if condition_id is not None and outcome_index is not None:
+        try:
+            token_key = f"{condition_id}:{int(outcome_index)}"
+        except Exception:
+            token_key = None
+
+    return {
+        "token_id": token_id_text or None,
+        "token_key": token_key,
+        "condition_id": str(condition_id) if condition_id is not None else None,
+        "outcome_index": int(outcome_index) if outcome_index is not None else None,
+        "side": side,
+        "size": float(trade.size),
+        "price": float(trade.price),
+        "timestamp": trade.timestamp,
         "raw": raw,
     }
 
@@ -517,6 +576,50 @@ def fetch_target_actions_since(
     info.setdefault("normalized", len(normalized))
     info["latest_ms"] = latest_ms
     info["incomplete"] = incomplete
+    return normalized, info
+
+
+def fetch_target_trades_since(
+    client: DataApiClient,
+    user: str,
+    since_ms: int,
+    *,
+    page_size: int = 500,
+    max_offset: int = 10000,
+    taker_only: bool = False,
+) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
+    start_time = dt.datetime.fromtimestamp(since_ms / 1000.0, tz=dt.timezone.utc)
+    max_pages = max(1, int(max_offset // max(1, page_size)))
+    trades = client.fetch_trades(
+        user,
+        start_time=start_time,
+        page_size=page_size,
+        max_pages=max_pages,
+        taker_only=taker_only,
+    )
+
+    normalized: List[Dict[str, object]] = []
+    latest_ms = 0
+    for trade in trades:
+        action = _normalize_trade_action(trade)
+        if action is None:
+            continue
+        action_ms = int(action["timestamp"].timestamp() * 1000)
+        if action_ms <= since_ms:
+            continue
+        latest_ms = max(latest_ms, action_ms)
+        normalized.append(action)
+
+    info: Dict[str, object] = {
+        "ok": True,
+        "incomplete": False,
+        "limit": page_size,
+        "total": len(trades),
+        "normalized": len(normalized),
+        "latest_ms": latest_ms,
+        "source": "trades",
+        "taker_only": taker_only,
+    }
     return normalized, info
 
 

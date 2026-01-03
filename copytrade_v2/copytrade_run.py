@@ -16,7 +16,11 @@ if str(REPO_ROOT) not in sys.path:
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 
-from ct_data import fetch_positions_norm, fetch_target_actions_since
+from ct_data import (
+    fetch_positions_norm,
+    fetch_target_actions_since,
+    fetch_target_trades_since,
+)
 from ct_exec import (
     apply_actions,
     fetch_open_orders_norm,
@@ -995,8 +999,15 @@ def main() -> None:
         sell_sum_by_token: Dict[str, float] = {}
         actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
-        actions_cursor_ms = int(state.get("target_actions_cursor_ms") or 0)
+        actions_source = str(cfg.get("actions_source") or "trades").lower()
+        actions_cursor_key = (
+            "target_trades_cursor_ms" if actions_source in ("trade", "trades") else "target_actions_cursor_ms"
+        )
+        actions_cursor_ms = int(state.get(actions_cursor_key) or 0)
         actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
+        seen_actions_key = (
+            "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
+        )
         def _record_action(token_id: str, side: str, size: float) -> None:
             if not token_id or size <= 0:
                 return
@@ -1008,14 +1019,24 @@ def main() -> None:
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
 
         try:
-            actions_list, actions_info = fetch_target_actions_since(
-                data_client,
-                cfg["target_address"],
-                actions_cursor_ms,
-                page_size=actions_page_size,
-                max_offset=actions_max_offset,
-            )
-            seen_action_ids = state.setdefault("seen_action_ids", [])
+            if actions_source in ("trade", "trades"):
+                actions_list, actions_info = fetch_target_trades_since(
+                    data_client,
+                    cfg["target_address"],
+                    actions_cursor_ms,
+                    page_size=actions_page_size,
+                    max_offset=actions_max_offset,
+                    taker_only=bool(cfg.get("actions_taker_only", False)),
+                )
+            else:
+                actions_list, actions_info = fetch_target_actions_since(
+                    data_client,
+                    cfg["target_address"],
+                    actions_cursor_ms,
+                    page_size=actions_page_size,
+                    max_offset=actions_max_offset,
+                )
+            seen_action_ids = state.setdefault(seen_actions_key, [])
             seen_action_set = {str(item) for item in seen_action_ids}
             filtered_actions: list[Dict[str, object]] = []
             for action in actions_list:
@@ -1061,7 +1082,7 @@ def main() -> None:
             latest_action_ms = int(actions_info.get("latest_ms") or 0)
             if actions_info.get("ok") and not actions_info.get("incomplete"):
                 if latest_action_ms > actions_cursor_ms:
-                    state["target_actions_cursor_ms"] = latest_action_ms
+                    state[actions_cursor_key] = latest_action_ms
             else:
                 logger.warning(
                     "[WARN] actions incomplete or failed; keep cursor_ms=%s", actions_cursor_ms
