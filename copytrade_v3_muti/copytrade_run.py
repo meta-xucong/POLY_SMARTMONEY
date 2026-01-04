@@ -852,6 +852,7 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
+    state.setdefault("orderbook_cache", {})
     state.setdefault("targets", {})
     state.setdefault("target_addresses", resolved_target_addresses)
     state.setdefault("target_round_robin_index", 0)
@@ -907,6 +908,8 @@ def main() -> None:
         state["adopted_existing_orders"] = False
     if not isinstance(state.get("place_fail_until"), dict):
         state["place_fail_until"] = {}
+    if not isinstance(state.get("orderbook_cache"), dict):
+        state["orderbook_cache"] = {}
     if not isinstance(state.get("targets"), dict):
         state["targets"] = {}
     if not isinstance(state.get("target_addresses"), list):
@@ -949,10 +952,15 @@ def main() -> None:
     actions_max_offset = 10000
     heartbeat_interval_sec = 600
     config_reload_sec = 600
+    open_orders_refresh_sec = 0
+    orderbook_refresh_sec = 0
+    max_orderbook_fetch_per_loop = 0
+    orderbook_cache_max_items = 0
     last_config_reload_ts = time.time()
     last_config_mtime: Optional[float] = None
     resolved_target_address = resolved_target_addresses[0]
     resolved_my_address = cfg["my_address"]
+    last_open_orders_sync_ts = 0.0
 
     def _apply_overrides(payload: Dict[str, Any]) -> None:
         for key, value in arg_overrides.items():
@@ -978,6 +986,10 @@ def main() -> None:
         nonlocal actions_max_offset
         nonlocal heartbeat_interval_sec
         nonlocal config_reload_sec
+        nonlocal open_orders_refresh_sec
+        nonlocal orderbook_refresh_sec
+        nonlocal max_orderbook_fetch_per_loop
+        nonlocal orderbook_cache_max_items
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         per_target_poll_interval_sec = int(
@@ -1005,6 +1017,10 @@ def main() -> None:
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
         config_reload_sec = int(cfg.get("config_reload_sec") or 600)
+        open_orders_refresh_sec = int(cfg.get("open_orders_refresh_sec") or 0)
+        orderbook_refresh_sec = int(cfg.get("orderbook_refresh_sec") or 0)
+        max_orderbook_fetch_per_loop = int(cfg.get("max_orderbook_fetch_per_loop") or 0)
+        orderbook_cache_max_items = int(cfg.get("orderbook_cache_max_items") or 0)
 
     def _refresh_log_level() -> None:
         level_name = str(cfg.get("log_level") or "INFO").upper()
@@ -1111,135 +1127,141 @@ def main() -> None:
                 reason = "interval"
             _reload_config(reason)
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
-        try:
-            remote_orders, ok, err = fetch_open_orders_norm(clob_client)
-            if ok:
-                remote_by_token: Dict[str, list[dict]] = {}
-                order_ts_by_id = state.setdefault("order_ts_by_id", {})
-                remote_order_ids: set[str] = set()
-                for order in remote_orders:
-                    order_id = str(order["order_id"])
-                    ts = order.get("ts") or order_ts_by_id.get(order_id) or now_ts
-                    remote_order_ids.add(order_id)
-                    order_payload = {
-                        "order_id": order_id,
-                        "side": order["side"],
-                        "price": order["price"],
-                        "size": order["size"],
-                        "ts": int(ts),
+        should_sync_orders = True
+        if open_orders_refresh_sec > 0 and last_open_orders_sync_ts > 0:
+            if now_wall - last_open_orders_sync_ts < open_orders_refresh_sec:
+                should_sync_orders = False
+        if should_sync_orders or not state.get("open_orders"):
+            last_open_orders_sync_ts = now_wall
+            try:
+                remote_orders, ok, err = fetch_open_orders_norm(clob_client)
+                if ok:
+                    remote_by_token: Dict[str, list[dict]] = {}
+                    order_ts_by_id = state.setdefault("order_ts_by_id", {})
+                    remote_order_ids: set[str] = set()
+                    for order in remote_orders:
+                        order_id = str(order["order_id"])
+                        ts = order.get("ts") or order_ts_by_id.get(order_id) or now_ts
+                        remote_order_ids.add(order_id)
+                        order_payload = {
+                            "order_id": order_id,
+                            "side": order["side"],
+                            "price": order["price"],
+                            "size": order["size"],
+                            "ts": int(ts),
+                        }
+                        remote_by_token.setdefault(order["token_id"], []).append(order_payload)
+                    adopt_existing = bool(cfg.get("adopt_existing_orders_on_boot", False))
+                    if adopt_existing and not state.get("adopted_existing_orders", False):
+                        if len(managed_ids) < 3:
+                            adoptable_ids: set[str] = set()
+                            for orders in remote_by_token.values():
+                                for order in orders:
+                                    price = float(order.get("price") or 0.0)
+                                    size = float(order.get("size") or 0.0)
+                                    if price <= 0 or price > 1.0:
+                                        continue
+                                    if size <= 0:
+                                        continue
+                                    order_id = order.get("order_id")
+                                    if order_id:
+                                        adoptable_ids.add(str(order_id))
+                            if adoptable_ids:
+                                logger.info(
+                                    "[BOOT] adopt_existing_orders_on_boot: adopted=%s",
+                                    len(adoptable_ids),
+                                )
+                                managed_ids |= adoptable_ids
+                        state["adopted_existing_orders"] = True
+                    # --- begin: ORDSYNC ledger-first (fix eventual consistency) ---
+                    prev_managed = state.get("open_orders")
+                    if not isinstance(prev_managed, dict):
+                        prev_managed = {}
+                    managed_by_token: Dict[str, list[dict]] = {
+                        str(token_id): [dict(order) for order in (orders or [])]
+                        for token_id, orders in prev_managed.items()
                     }
-                    remote_by_token.setdefault(order["token_id"], []).append(order_payload)
-                adopt_existing = bool(cfg.get("adopt_existing_orders_on_boot", False))
-                if adopt_existing and not state.get("adopted_existing_orders", False):
-                    if len(managed_ids) < 3:
-                        adoptable_ids: set[str] = set()
-                        for orders in remote_by_token.values():
-                            for order in orders:
-                                price = float(order.get("price") or 0.0)
-                                size = float(order.get("size") or 0.0)
-                                if price <= 0 or price > 1.0:
-                                    continue
-                                if size <= 0:
-                                    continue
-                                order_id = order.get("order_id")
-                                if order_id:
-                                    adoptable_ids.add(str(order_id))
-                        if adoptable_ids:
-                            logger.info(
-                                "[BOOT] adopt_existing_orders_on_boot: adopted=%s",
-                                len(adoptable_ids),
-                            )
-                            managed_ids |= adoptable_ids
-                    state["adopted_existing_orders"] = True
-                # --- begin: ORDSYNC ledger-first (fix eventual consistency) ---
-                prev_managed = state.get("open_orders")
-                if not isinstance(prev_managed, dict):
-                    prev_managed = {}
-                managed_by_token: Dict[str, list[dict]] = {
-                    str(token_id): [dict(order) for order in (orders or [])]
-                    for token_id, orders in prev_managed.items()
-                }
 
-                # Merge remote visibility into ledger WITHOUT dropping unseen managed orders.
-                # This makes order_visibility_grace_sec effective even when remote is partially consistent.
-                managed_index: Dict[str, tuple[str, int]] = {}
-                for t_id, orders in managed_by_token.items():
-                    for i, o in enumerate(orders or []):
-                        oid = str(o.get("order_id") or "")
-                        if oid:
-                            managed_index[oid] = (str(t_id), i)
+                    # Merge remote visibility into ledger WITHOUT dropping unseen managed orders.
+                    # This makes order_visibility_grace_sec effective even when remote is partially consistent.
+                    managed_index: Dict[str, tuple[str, int]] = {}
+                    for t_id, orders in managed_by_token.items():
+                        for i, o in enumerate(orders or []):
+                            oid = str(o.get("order_id") or "")
+                            if oid:
+                                managed_index[oid] = (str(t_id), i)
 
-                for t_id, orders in remote_by_token.items():
-                    for order in orders or []:
-                        oid = str(order.get("order_id") or "")
-                        if not oid or oid not in managed_ids:
-                            continue
+                    for t_id, orders in remote_by_token.items():
+                        for order in orders or []:
+                            oid = str(order.get("order_id") or "")
+                            if not oid or oid not in managed_ids:
+                                continue
 
-                        if oid not in order_ts_by_id:
-                            order_ts_by_id[oid] = int(order.get("ts") or now_ts)
-                        order["ts"] = int(order.get("ts") or order_ts_by_id.get(oid) or now_ts)
+                            if oid not in order_ts_by_id:
+                                order_ts_by_id[oid] = int(order.get("ts") or now_ts)
+                            order["ts"] = int(order.get("ts") or order_ts_by_id.get(oid) or now_ts)
 
-                        hit = managed_index.get(oid)
-                        if hit:
-                            t0, i0 = hit
-                            # Update the existing ledger order in-place (do NOT overwrite the whole token list)
-                            try:
-                                managed_by_token[t0][i0].update(order)
-                            except Exception:
-                                # Fallback if index drifted for any reason
+                            hit = managed_index.get(oid)
+                            if hit:
+                                t0, i0 = hit
+                                # Update the existing ledger order in-place (do NOT overwrite the whole token list)
+                                try:
+                                    managed_by_token[t0][i0].update(order)
+                                except Exception:
+                                    # Fallback if index drifted for any reason
+                                    t_id_s = str(t_id)
+                                    managed_by_token.setdefault(t_id_s, []).append(dict(order))
+                                    managed_index[oid] = (t_id_s, len(managed_by_token[t_id_s]) - 1)
+                            else:
                                 t_id_s = str(t_id)
                                 managed_by_token.setdefault(t_id_s, []).append(dict(order))
                                 managed_index[oid] = (t_id_s, len(managed_by_token[t_id_s]) - 1)
+
+                    grace_sec = int(cfg.get("order_visibility_grace_sec") or 180)
+                    pruned = 0
+
+                    for token_id, orders in list(managed_by_token.items()):
+                        kept: list[dict] = []
+                        for order in orders or []:
+                            order_id = str(order.get("order_id") or "")
+                            if not order_id or order_id not in managed_ids:
+                                continue
+
+                            ts = int(order.get("ts") or order_ts_by_id.get(order_id) or now_ts)
+                            order["ts"] = ts
+
+                            if order_id not in remote_order_ids and (now_ts - ts) > grace_sec:
+                                pruned += 1
+                                continue
+
+                            kept.append(order)
+
+                        if kept:
+                            managed_by_token[token_id] = kept
                         else:
-                            t_id_s = str(t_id)
-                            managed_by_token.setdefault(t_id_s, []).append(dict(order))
-                            managed_index[oid] = (t_id_s, len(managed_by_token[t_id_s]) - 1)
+                            managed_by_token.pop(token_id, None)
 
-                grace_sec = int(cfg.get("order_visibility_grace_sec") or 180)
-                pruned = 0
+                    managed_ids = _collect_order_ids(managed_by_token)
 
-                for token_id, orders in list(managed_by_token.items()):
-                    kept: list[dict] = []
-                    for order in orders or []:
-                        order_id = str(order.get("order_id") or "")
-                        if not order_id or order_id not in managed_ids:
-                            continue
+                    for order_id in list(order_ts_by_id.keys()):
+                        if str(order_id) not in managed_ids:
+                            order_ts_by_id.pop(order_id, None)
 
-                        ts = int(order.get("ts") or order_ts_by_id.get(order_id) or now_ts)
-                        order["ts"] = ts
+                    state["open_orders_all"] = remote_by_token
+                    state["open_orders"] = managed_by_token
+                    state["managed_order_ids"] = sorted(managed_ids)
 
-                        if order_id not in remote_order_ids and (now_ts - ts) > grace_sec:
-                            pruned += 1
-                            continue
-
-                        kept.append(order)
-
-                    if kept:
-                        managed_by_token[token_id] = kept
-                    else:
-                        managed_by_token.pop(token_id, None)
-
-                managed_ids = _collect_order_ids(managed_by_token)
-
-                for order_id in list(order_ts_by_id.keys()):
-                    if str(order_id) not in managed_ids:
-                        order_ts_by_id.pop(order_id, None)
-
-                state["open_orders_all"] = remote_by_token
-                state["open_orders"] = managed_by_token
-                state["managed_order_ids"] = sorted(managed_ids)
-
-                if pruned:
-                    logger.info(
-                        "[ORDSYNC] pruned_missing_after_grace=%s grace_sec=%s",
-                        pruned,
-                        grace_sec,
-                    )
-                # --- end: ORDSYNC ledger-first ---
-            else:
-                logger.warning("[WARN] sync open orders failed: %s", err)
-        except Exception as exc:
-            logger.exception("[ERR] sync open orders failed: %s", exc)
+                    if pruned:
+                        logger.info(
+                            "[ORDSYNC] pruned_missing_after_grace=%s grace_sec=%s",
+                            pruned,
+                            grace_sec,
+                        )
+                    # --- end: ORDSYNC ledger-first ---
+                else:
+                    logger.warning("[WARN] sync open orders failed: %s", err)
+            except Exception as exc:
+                logger.exception("[ERR] sync open orders failed: %s", exc)
         _prune_order_ts_by_id(state)
 
         has_buy_by_token: Dict[str, bool] = {}
@@ -1853,6 +1875,47 @@ def main() -> None:
                     status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
+        orderbook_fetches = 0
+        orderbook_cache = state.setdefault("orderbook_cache", {})
+
+        def _prune_orderbook_cache() -> None:
+            max_items = int(orderbook_cache_max_items or 0)
+            if max_items <= 0 or len(orderbook_cache) <= max_items:
+                return
+            excess = len(orderbook_cache) - max_items
+            if excess <= 0:
+                return
+            to_drop = sorted(
+                orderbook_cache.items(),
+                key=lambda item: int((item[1] or {}).get("ts") or 0),
+            )[:excess]
+            for token_id, _ in to_drop:
+                orderbook_cache.pop(token_id, None)
+
+        def _get_orderbook_cached(token_id: str, *, force_refresh: bool = False) -> Optional[Dict[str, Optional[float]]]:
+            nonlocal orderbook_fetches
+            if token_id in orderbooks:
+                return orderbooks[token_id]
+            cache_entry = orderbook_cache.get(token_id)
+            if cache_entry and not force_refresh:
+                ts = int(cache_entry.get("ts") or 0)
+                if orderbook_refresh_sec > 0 and (now_ts - ts) <= orderbook_refresh_sec:
+                    cached_book = cache_entry.get("book")
+                    if isinstance(cached_book, dict):
+                        orderbooks[token_id] = cached_book
+                        return cached_book
+            if max_orderbook_fetch_per_loop > 0 and orderbook_fetches >= max_orderbook_fetch_per_loop:
+                if cache_entry and isinstance(cache_entry.get("book"), dict):
+                    cached_book = cache_entry.get("book")
+                    orderbooks[token_id] = cached_book
+                    return cached_book
+                return None
+            orderbook_fetches += 1
+            book = get_orderbook(clob_client, token_id)
+            orderbooks[token_id] = book
+            orderbook_cache[token_id] = {"ts": now_ts, "book": book}
+            _prune_orderbook_cache()
+            return book
 
         mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
         min_usd = float(cfg.get("min_order_usd") or 5.0)
@@ -2237,8 +2300,13 @@ def main() -> None:
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
                     else:
-                        ob = get_orderbook(clob_client, token_id)
-                        orderbooks[token_id] = ob
+                        ob = _get_orderbook_cached(token_id)
+                        if ob is None:
+                            logger.info(
+                                "[NOOP] token_id=%s reason=orderbook_rate_limited probe=1",
+                                token_id,
+                            )
+                            continue
 
                     best_bid = ob.get("best_bid")
                     best_ask = ob.get("best_ask")
@@ -2250,8 +2318,13 @@ def main() -> None:
                             best_ask,
                         )
                         orderbooks.pop(token_id, None)
-                        ob = get_orderbook(clob_client, token_id)
-                        orderbooks[token_id] = ob
+                        ob = _get_orderbook_cached(token_id, force_refresh=True)
+                        if ob is None:
+                            logger.info(
+                                "[NOOP] token_id=%s reason=orderbook_rate_limited probe=1",
+                                token_id,
+                            )
+                            continue
                         best_bid = ob.get("best_bid")
                         best_ask = ob.get("best_ask")
                         if (
@@ -2751,8 +2824,13 @@ def main() -> None:
             if token_id in orderbooks:
                 ob = orderbooks[token_id]
             else:
-                ob = get_orderbook(clob_client, token_id)
-                orderbooks[token_id] = ob
+                ob = _get_orderbook_cached(token_id)
+                if ob is None:
+                    logger.info(
+                        "[NOOP] token_id=%s reason=orderbook_rate_limited",
+                        token_id,
+                    )
+                    continue
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
@@ -2764,8 +2842,13 @@ def main() -> None:
                     best_ask,
                 )
                 orderbooks.pop(token_id, None)
-                ob = get_orderbook(clob_client, token_id)
-                orderbooks[token_id] = ob
+                ob = _get_orderbook_cached(token_id, force_refresh=True)
+                if ob is None:
+                    logger.info(
+                        "[NOOP] token_id=%s reason=orderbook_rate_limited",
+                        token_id,
+                    )
+                    continue
                 best_bid = ob.get("best_bid")
                 best_ask = ob.get("best_ask")
                 if best_bid is not None and best_ask is not None and best_bid > best_ask:
