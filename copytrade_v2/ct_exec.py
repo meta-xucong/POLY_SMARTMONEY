@@ -945,11 +945,11 @@ def apply_actions(
             token_id = str(action.get("token_id") or "")
             usd = abs(size_for_record) * price
             if token_id and usd > 0:
-                shadow_orders = state.setdefault("shadow_buy_orders", [])
-                if not isinstance(shadow_orders, list):
-                    state["shadow_buy_orders"] = []
-                    shadow_orders = state["shadow_buy_orders"]
-                shadow_orders.append(
+                taker_orders = state.setdefault("taker_buy_orders", [])
+                if not isinstance(taker_orders, list):
+                    state["taker_buy_orders"] = []
+                    taker_orders = state["taker_buy_orders"]
+                taker_orders.append(
                     {
                         "token_id": token_id,
                         "usd": float(usd),
