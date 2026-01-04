@@ -33,6 +33,9 @@ DEFAULT_STATE: Dict[str, Any] = {
     "adopted_existing_orders": False,
     "shadow_buy_orders": [],
     "taker_buy_orders": [],
+    "targets": {},
+    "target_addresses": [],
+    "target_round_robin_index": 0,
 }
 
 
@@ -116,6 +119,14 @@ def load_state(path: str) -> Dict[str, Any]:
         state["shadow_buy_orders"] = []
     if "taker_buy_orders" not in state or not isinstance(state["taker_buy_orders"], list):
         state["taker_buy_orders"] = []
+    if "targets" not in state or not isinstance(state["targets"], dict):
+        state["targets"] = {}
+    if "target_addresses" not in state or not isinstance(state["target_addresses"], list):
+        state["target_addresses"] = []
+    if "target_round_robin_index" not in state or not isinstance(
+        state["target_round_robin_index"], (int, float)
+    ):
+        state["target_round_robin_index"] = 0
     return state
 
 

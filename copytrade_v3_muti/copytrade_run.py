@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -8,7 +9,7 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, List, Optional, Set
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -48,6 +49,15 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
     else:
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", addr)[:32] or "unknown"
         fname = f"state_{safe}.json"
+    return state_path.with_name(fname)
+
+
+def _state_path_for_targets(state_path: Path, target_addresses: List[str]) -> Path:
+    if len(target_addresses) == 1:
+        return _state_path_for_target(state_path, target_addresses[0])
+    normalized = ",".join(sorted({addr.lower() for addr in target_addresses}))
+    digest = hashlib.sha1(normalized.encode("utf-8")).hexdigest()[:8]
+    fname = f"state_multi_{len(target_addresses)}_{digest}.json"
     return state_path.with_name(fname)
 
 
@@ -117,7 +127,7 @@ def _shorten_address(address: str) -> str:
 
 def _setup_logging(
     cfg: Dict[str, Any],
-    target_address: str,
+    target_label: str,
     base_dir: Path,
 ) -> logging.Logger:
     log_dir_value = cfg.get("log_dir") or "logs"
@@ -127,7 +137,7 @@ def _setup_logging(
     log_dir.mkdir(parents=True, exist_ok=True)
     timestamp = time.strftime("%Y%m%d_%H%M%S")
     pid = os.getpid()
-    short = _shorten_address(target_address)
+    short = _shorten_address(target_label)
     log_path = log_dir / f"copytrade_{short}_{timestamp}_pid{pid}.log"
 
     level_name = str(cfg.get("log_level") or "INFO").upper()
@@ -168,8 +178,82 @@ def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str
         raise ValueError(
             f"{name} 未配置或格式不合法：{current!r}。需要 0x + 40 位十六进制地址。"
             f" 你可以在 copytrade_config.json 里填 {name}，或设置环境变量：{env_keys}"
-        )
+    )
     return current.strip()
+
+
+def _normalize_targets(cfg: Dict[str, Any], arg_target: Optional[str]) -> List[Dict[str, Any]]:
+    entries: List[Dict[str, Any]] = []
+
+    def _append_address(addr: str, meta: Optional[Dict[str, Any]] = None) -> None:
+        if not addr or not addr.strip():
+            return
+        payload = dict(meta or {})
+        payload["address"] = addr.strip()
+        entries.append(payload)
+
+    if arg_target:
+        targets = [item.strip() for item in arg_target.split(",") if item.strip()]
+        for target in targets:
+            _append_address(target, {})
+    else:
+        target_accounts = cfg.get("target_accounts")
+        if isinstance(target_accounts, list) and target_accounts:
+            for item in target_accounts:
+                if isinstance(item, dict):
+                    addr = item.get("address") or item.get("target_address") or item.get("target")
+                    _append_address(str(addr or ""), item)
+                elif isinstance(item, str):
+                    _append_address(item, {})
+        else:
+            target_addresses = cfg.get("target_addresses")
+            if isinstance(target_addresses, list) and target_addresses:
+                for addr in target_addresses:
+                    _append_address(str(addr or ""), {})
+            else:
+                _append_address(str(cfg.get("target_address") or ""), {})
+
+    cleaned: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for entry in entries:
+        address = str(entry.get("address") or "").strip()
+        if _is_placeholder_addr(address):
+            address = _get_env_first(
+                [
+                    "COPYTRADE_TARGET",
+                    "CT_TARGET",
+                    "POLY_TARGET_ADDRESS",
+                    "TARGET_ADDRESS",
+                ]
+            ) or address
+        if not address:
+            continue
+        if not _is_evm_address(address):
+            raise ValueError(f"target_address 格式不合法：{address!r}，需要 0x + 40 位十六进制地址")
+        key = address.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        weight = entry.get("weight")
+        if weight is None:
+            weight = entry.get("follow_ratio_mult")
+        weight_val = float(weight) if weight is not None else 1.0
+        enabled_val = entry.get("enabled")
+        enabled = True if enabled_val is None else bool(enabled_val)
+        poll_interval = entry.get("poll_interval_sec") or entry.get("poll_interval")
+        cleaned.append(
+            {
+                "address": address,
+                "weight": weight_val,
+                "enabled": enabled,
+                "poll_interval_sec": poll_interval,
+            }
+        )
+
+    cleaned = [entry for entry in cleaned if entry.get("enabled", True)]
+    if not cleaned:
+        raise ValueError("未配置 target_address 或 target_addresses")
+    return cleaned
 
 
 def _derive_api_creds(client):
@@ -613,6 +697,36 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _ensure_target_state(state: Dict[str, Any], address: str) -> Dict[str, Any]:
+    targets = state.setdefault("targets", {})
+    if not isinstance(targets, dict):
+        state["targets"] = {}
+        targets = state["targets"]
+    t_state = targets.setdefault(address, {})
+    if not isinstance(t_state, dict):
+        t_state = {}
+        targets[address] = t_state
+    if not isinstance(t_state.get("actions_cursor_ms"), (int, float)):
+        t_state["actions_cursor_ms"] = 0
+    if not isinstance(t_state.get("trades_cursor_ms"), (int, float)):
+        t_state["trades_cursor_ms"] = 0
+    if not isinstance(t_state.get("seen_action_ids"), list):
+        t_state["seen_action_ids"] = []
+    if not isinstance(t_state.get("seen_trade_ids"), list):
+        t_state["seen_trade_ids"] = []
+    if not isinstance(t_state.get("last_positions_by_token_key"), dict):
+        t_state["last_positions_by_token_key"] = {}
+    if not isinstance(t_state.get("next_poll_ts"), (int, float)):
+        t_state["next_poll_ts"] = 0
+    if not isinstance(t_state.get("actions_replay_from_ms"), (int, float)):
+        t_state["actions_replay_from_ms"] = 0
+    if not isinstance(t_state.get("actions_unreliable_until"), (int, float)):
+        t_state["actions_unreliable_until"] = 0
+    if not isinstance(t_state.get("last_positions_ts"), (int, float)):
+        t_state["last_positions_ts"] = 0
+    return t_state
+
+
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
@@ -638,39 +752,46 @@ def main() -> None:
             "MY_ADDRESS",
         ],
     )
-    cfg["target_address"] = _resolve_addr(
-        "target_address",
-        cfg.get("target_address"),
-        env_keys=[
-            "COPYTRADE_TARGET",
-            "CT_TARGET",
-            "POLY_TARGET_ADDRESS",
-            "TARGET_ADDRESS",
-        ],
-    )
 
-    # Per-target state file: if user didn't specify a custom --state, derive one from target address.
+    target_entries = _normalize_targets(cfg, args.target_address)
+    target_entries = [entry for entry in target_entries if float(entry.get("weight") or 0.0) > 0]
+    resolved_target_addresses = [entry["address"] for entry in target_entries]
+    cfg["target_addresses"] = resolved_target_addresses
+    if len(resolved_target_addresses) == 1:
+        cfg["target_address"] = resolved_target_addresses[0]
+
+    # Per-target state file: if user didn't specify a custom --state, derive one from target list.
     orig_state_path = args.state
     try:
         sp = Path(args.state)
         if sp.name == "state.json":
-            args.state = str(_state_path_for_target(sp, cfg["target_address"]))
+            args.state = str(_state_path_for_targets(sp, resolved_target_addresses))
     except Exception:
         args.state = orig_state_path
 
-    logger = _setup_logging(cfg, cfg["target_address"], Path(args.config).parent)
+    label = (
+        resolved_target_addresses[0]
+        if len(resolved_target_addresses) == 1
+        else f"multi_{len(resolved_target_addresses)}"
+    )
+    logger = _setup_logging(cfg, label, Path(args.config).parent)
     if args.state != orig_state_path:
         logger.info("[STATE] per-target state: %s -> %s", orig_state_path, args.state)
 
     state = load_state(args.state)
-    # Safety: if user accidentally reuses a state file across targets, reset bootstrap-related fields.
-    prev_target = str(state.get("target") or "").lower().strip()
-    cur_target = str(cfg.get("target_address") or "").lower().strip()
-    if prev_target and cur_target and prev_target != cur_target:
+    prev_targets: List[str] = []
+    if isinstance(state.get("target_addresses"), list) and state.get("target_addresses"):
+        prev_targets = [str(v) for v in state.get("target_addresses") or [] if str(v).strip()]
+    elif state.get("target"):
+        prev_targets = [str(state.get("target") or "")]
+    cur_targets = resolved_target_addresses
+    prev_set = {t.lower().strip() for t in prev_targets if t}
+    cur_set = {t.lower().strip() for t in cur_targets if t}
+    if prev_set and cur_set and prev_set != cur_set:
         logger.warning(
             "[STATE] state target mismatch (state=%s cfg=%s); resetting bootstrap fields",
-            prev_target,
-            cur_target,
+            prev_targets,
+            cur_targets,
         )
         state["bootstrapped"] = False
         state["boot_token_ids"] = []
@@ -684,6 +805,7 @@ def main() -> None:
         state["open_orders_all"] = []
         state["seen_action_ids"] = []
         state["target_actions_cursor_ms"] = 0
+        state["targets"] = {}
     run_start_ms = int(time.time() * 1000)
     state["run_start_ms"] = run_start_ms
     logger.info("[STATE] path=%s run_start_ms=%s", args.state, run_start_ms)
@@ -691,11 +813,12 @@ def main() -> None:
     state["sizing"].setdefault("ema_delta_usd", None)
     logger.info(
         "[CFG] target=%s my=%s ratio=%s",
-        cfg["target_address"],
+        ",".join(resolved_target_addresses),
         cfg["my_address"],
         cfg.get("follow_ratio"),
     )
-    state["target"] = cfg.get("target_address")
+    state["target_addresses"] = resolved_target_addresses
+    state["target"] = resolved_target_addresses[0]
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
@@ -724,6 +847,9 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
+    state.setdefault("targets", {})
+    state.setdefault("target_addresses", resolved_target_addresses)
+    state.setdefault("target_round_robin_index", 0)
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("open_orders_all"), dict):
@@ -776,12 +902,28 @@ def main() -> None:
         state["adopted_existing_orders"] = False
     if not isinstance(state.get("place_fail_until"), dict):
         state["place_fail_until"] = {}
+    if not isinstance(state.get("targets"), dict):
+        state["targets"] = {}
+    if not isinstance(state.get("target_addresses"), list):
+        state["target_addresses"] = resolved_target_addresses
+    if not isinstance(state.get("target_round_robin_index"), (int, float)):
+        state["target_round_robin_index"] = 0
+
+    state_targets = state.setdefault("targets", {})
+    for address in resolved_target_addresses:
+        _ensure_target_state(state, address)
+    for stale in list(state_targets.keys()):
+        if stale not in resolved_target_addresses:
+            state_targets.pop(stale, None)
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
 
     poll_interval = 20
     poll_interval_exiting = 20
+    per_target_poll_interval_sec = 20
+    max_targets_per_loop = 0
+    target_request_spacing_sec = 0.0
     size_threshold = 0.0
     skip_closed = True
     refresh_sec = 300
@@ -804,7 +946,7 @@ def main() -> None:
     config_reload_sec = 600
     last_config_reload_ts = time.time()
     last_config_mtime: Optional[float] = None
-    resolved_target_address = cfg["target_address"]
+    resolved_target_address = resolved_target_addresses[0]
     resolved_my_address = cfg["my_address"]
 
     def _apply_overrides(payload: Dict[str, Any]) -> None:
@@ -814,6 +956,9 @@ def main() -> None:
     def _apply_cfg_settings() -> None:
         nonlocal poll_interval
         nonlocal poll_interval_exiting
+        nonlocal per_target_poll_interval_sec
+        nonlocal max_targets_per_loop
+        nonlocal target_request_spacing_sec
         nonlocal size_threshold
         nonlocal skip_closed
         nonlocal refresh_sec
@@ -830,6 +975,11 @@ def main() -> None:
         nonlocal config_reload_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
+        per_target_poll_interval_sec = int(
+            cfg.get("per_target_poll_interval_sec") or poll_interval
+        )
+        max_targets_per_loop = int(cfg.get("max_targets_per_loop") or 0)
+        target_request_spacing_sec = float(cfg.get("target_request_spacing_sec") or 0.0)
         size_threshold = float(cfg.get("size_threshold") or 0)
         skip_closed = bool(cfg.get("skip_closed_markets", True))
         refresh_sec = int(cfg.get("market_status_refresh_sec") or 300)
@@ -860,7 +1010,7 @@ def main() -> None:
             handler.setLevel(level)
 
     def _reload_config(reason: str) -> None:
-        nonlocal cfg, last_config_reload_ts, last_config_mtime
+        nonlocal cfg, last_config_reload_ts, last_config_mtime, target_entries
         try:
             new_cfg = _load_config(Path(args.config))
         except Exception as exc:
@@ -868,15 +1018,22 @@ def main() -> None:
             last_config_reload_ts = time.time()
             return
         _apply_overrides(new_cfg)
-        new_target = new_cfg.get("target_address")
         new_my = new_cfg.get("my_address")
-        if new_target and str(new_target).strip() != str(resolved_target_address).strip():
+        try:
+            new_targets = _normalize_targets(new_cfg, None)
+            new_target_addresses = [entry["address"] for entry in new_targets]
+        except Exception:
+            new_target_addresses = []
+        if new_target_addresses and new_target_addresses != resolved_target_addresses:
             logger.warning(
-                "[CFG] target_address 变更将被忽略，需要重启: %s -> %s",
-                resolved_target_address,
-                new_target,
+                "[CFG] target_addresses 变更将被忽略，需要重启: %s -> %s",
+                resolved_target_addresses,
+                new_target_addresses,
             )
+            new_cfg["target_addresses"] = resolved_target_addresses
             new_cfg["target_address"] = resolved_target_address
+        elif new_target_addresses:
+            target_entries = new_targets
         if new_my and str(new_my).strip() != str(resolved_my_address).strip():
             logger.warning(
                 "[CFG] my_address 变更将被忽略，需要重启: %s -> %s",
@@ -907,6 +1064,16 @@ def main() -> None:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("target_actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+    for address in resolved_target_addresses:
+        t_state = _ensure_target_state(state, address)
+        if int(t_state.get("actions_cursor_ms") or 0) <= 0:
+            t_state["actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
+        if int(t_state.get("actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
+            t_state["actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+        if int(t_state.get("trades_cursor_ms") or 0) <= 0:
+            t_state["trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
+        if int(t_state.get("trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
+            t_state["trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
 
     missing_notice_tokens: set[str] = set()
 
@@ -917,6 +1084,14 @@ def main() -> None:
                 if (st or {}).get("phase") == "EXITING":
                     return poll_interval_exiting
         return poll_interval
+
+    def _broadcast_actions_replay(replay_ms: int) -> None:
+        state["actions_replay_from_ms"] = replay_ms
+        for entry in target_entries:
+            t_state = _ensure_target_state(state, entry["address"])
+            t_state["actions_replay_from_ms"] = max(
+                int(t_state.get("actions_replay_from_ms") or 0), replay_ms
+            )
 
     while True:
         now_ts = int(time.time())
@@ -1066,14 +1241,8 @@ def main() -> None:
         has_sell_by_token: Dict[str, bool] = {}
         buy_sum_by_token: Dict[str, float] = {}
         sell_sum_by_token: Dict[str, float] = {}
-        actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
         actions_source = str(cfg.get("actions_source") or "trades").lower()
-        actions_cursor_key = (
-            "target_trades_cursor_ms" if actions_source in ("trade", "trades") else "target_actions_cursor_ms"
-        )
-        actions_cursor_ms = int(state.get(actions_cursor_key) or 0)
-        actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
         actions_replay_window_sec = int(cfg.get("actions_replay_window_sec") or 600)
         actions_lag_threshold_sec = int(cfg.get("actions_lag_threshold_sec") or 180)
         actions_unreliable_hold_sec = int(cfg.get("actions_unreliable_hold_sec") or 120)
@@ -1084,17 +1253,7 @@ def main() -> None:
         force_shares_raw = cfg.get("sell_confirm_force_shares")
         sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
         now_ms = int(now_ts * 1000)
-        replay_from_ms = int(state.get("actions_replay_from_ms") or 0)
-        if replay_from_ms > 0 and replay_from_ms != actions_cursor_ms:
-            logger.info(
-                "[ACTIONS] replay_from_ms=%s cursor_ms=%s",
-                replay_from_ms,
-                actions_cursor_ms,
-            )
-            actions_cursor_ms = replay_from_ms
-        seen_actions_key = (
-            "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
-        )
+
         def _record_action(token_id: str, side: str, size: float) -> None:
             if not token_id or size <= 0:
                 return
@@ -1105,117 +1264,293 @@ def main() -> None:
                 has_sell_by_token[token_id] = True
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
 
-        try:
-            if actions_source in ("trade", "trades"):
-                actions_list, actions_info = fetch_target_trades_since(
-                    data_client,
-                    cfg["target_address"],
-                    actions_cursor_ms,
-                    page_size=actions_page_size,
-                    max_offset=actions_max_offset,
-                    taker_only=bool(cfg.get("actions_taker_only", False)),
+        hard_cap = positions_limit * positions_max_pages
+        eligible_targets: List[Dict[str, Any]] = []
+        for entry in target_entries:
+            t_state = _ensure_target_state(state, entry["address"])
+            if now_ts >= int(t_state.get("next_poll_ts") or 0):
+                eligible_targets.append(entry)
+        selected_targets = list(eligible_targets)
+        if max_targets_per_loop > 0 and len(eligible_targets) > max_targets_per_loop:
+            start = int(state.get("target_round_robin_index") or 0) % len(eligible_targets)
+            selected_targets = [
+                eligible_targets[(start + idx) % len(eligible_targets)]
+                for idx in range(max_targets_per_loop)
+            ]
+            state["target_round_robin_index"] = (start + max_targets_per_loop) % len(
+                eligible_targets
+            )
+
+        target_infos: Dict[str, Dict[str, object]] = {}
+        target_polled: set[str] = set()
+        last_request_wall = 0.0
+        selected_addresses = {entry["address"] for entry in selected_targets}
+
+        for entry in target_entries:
+            address = entry["address"]
+            t_state = _ensure_target_state(state, address)
+            should_poll = address in selected_addresses
+            has_new_actions_for_target = False
+
+            if should_poll:
+                spacing = float(target_request_spacing_sec or 0.0)
+                if spacing > 0:
+                    now_wall = time.time()
+                    if last_request_wall > 0 and now_wall - last_request_wall < spacing:
+                        time.sleep(spacing - (now_wall - last_request_wall))
+                    last_request_wall = time.time()
+
+                poll_every = entry.get("poll_interval_sec") or per_target_poll_interval_sec
+                try:
+                    poll_every = int(poll_every)
+                except Exception:
+                    poll_every = per_target_poll_interval_sec
+                if poll_every <= 0:
+                    poll_every = per_target_poll_interval_sec or poll_interval
+                t_state["next_poll_ts"] = now_ts + int(max(1, poll_every))
+
+                actions_cursor_key = (
+                    "trades_cursor_ms" if actions_source in ("trade", "trades") else "actions_cursor_ms"
                 )
-            else:
-                actions_list, actions_info = fetch_target_actions_since(
-                    data_client,
-                    cfg["target_address"],
-                    actions_cursor_ms,
-                    page_size=actions_page_size,
-                    max_offset=actions_max_offset,
+                actions_cursor_ms = int(t_state.get(actions_cursor_key) or 0)
+                actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
+                replay_from_ms = int(t_state.get("actions_replay_from_ms") or 0)
+                if replay_from_ms > 0 and replay_from_ms != actions_cursor_ms:
+                    logger.info(
+                        "[ACTIONS] target=%s replay_from_ms=%s cursor_ms=%s",
+                        _shorten_address(address),
+                        replay_from_ms,
+                        actions_cursor_ms,
+                    )
+                    actions_cursor_ms = replay_from_ms
+                seen_actions_key = (
+                    "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
                 )
-            seen_action_ids = state.setdefault(seen_actions_key, [])
-            seen_action_set = {str(item) for item in seen_action_ids}
-            filtered_actions: list[Dict[str, object]] = []
+                try:
+                    if actions_source in ("trade", "trades"):
+                        target_actions, actions_info = fetch_target_trades_since(
+                            data_client,
+                            address,
+                            actions_cursor_ms,
+                            page_size=actions_page_size,
+                            max_offset=actions_max_offset,
+                            taker_only=bool(cfg.get("actions_taker_only", False)),
+                        )
+                    else:
+                        target_actions, actions_info = fetch_target_actions_since(
+                            data_client,
+                            address,
+                            actions_cursor_ms,
+                            page_size=actions_page_size,
+                            max_offset=actions_max_offset,
+                        )
+                    seen_action_ids = t_state.setdefault(seen_actions_key, [])
+                    seen_action_set = {str(item) for item in seen_action_ids}
+                    filtered_actions: list[Dict[str, object]] = []
+                    for action in target_actions:
+                        action_id = _action_identity(action)
+                        if action_id in seen_action_set:
+                            continue
+                        filtered_actions.append(action)
+                        seen_action_ids.append(action_id)
+                        seen_action_set.add(action_id)
+                    max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
+                    if len(seen_action_ids) > max_seen:
+                        del seen_action_ids[:-max_seen]
+                    target_actions = filtered_actions
+
+                    miss_token = 0
+                    miss_samples: list[list[str]] = []
+                    for action in target_actions:
+                        side = str(action.get("side") or "").upper()
+                        size = float(action.get("size") or 0.0)
+
+                        token_id = action.get("token_id") or _extract_token_id_from_raw(
+                            action.get("raw") or {}
+                        )
+                        if token_id:
+                            tid = str(token_id)
+                            action["token_id"] = tid
+                            _record_action(tid, side, size)
+                        else:
+                            miss_token += 1
+                            if len(miss_samples) < 3:
+                                raw = action.get("raw") or {}
+                                if isinstance(raw, dict):
+                                    miss_samples.append(sorted(list(raw.keys()))[:25])
+
+                    if miss_token:
+                        logger.warning(
+                            "[ACT] target=%s actions_total=%s token_mapped=%s missing=%s "
+                            "sample_raw_keys=%s",
+                            _shorten_address(address),
+                            len(target_actions),
+                            len(target_actions) - miss_token,
+                            miss_token,
+                            miss_samples,
+                        )
+                    latest_action_ms = int(actions_info.get("latest_ms") or 0)
+                    actions_ok = bool(actions_info.get("ok"))
+                    actions_incomplete = bool(actions_info.get("incomplete"))
+                    actions_unreliable = (not actions_ok) or actions_incomplete
+                    if actions_unreliable:
+                        t_state["actions_unreliable_until"] = now_ts + actions_unreliable_hold_sec
+                        t_state["actions_replay_from_ms"] = max(
+                            0, now_ms - actions_replay_window_sec * 1000
+                        )
+                        logger.warning(
+                            "[ACTIONS] target=%s unreliable ok=%s incomplete=%s "
+                            "keep_cursor_ms=%s replay_from_ms=%s",
+                            _shorten_address(address),
+                            actions_ok,
+                            actions_incomplete,
+                            actions_cursor_ms,
+                            t_state["actions_replay_from_ms"],
+                        )
+                    else:
+                        t_state["actions_unreliable_until"] = 0
+                        if latest_action_ms > actions_cursor_ms:
+                            t_state[actions_cursor_key] = latest_action_ms
+                        if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
+                            t_state["actions_replay_from_ms"] = 0
+                        lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
+                        if lag_ms > actions_lag_threshold_sec * 1000:
+                            t_state["actions_replay_from_ms"] = max(
+                                0, now_ms - actions_replay_window_sec * 1000
+                            )
+                            logger.warning(
+                                "[ACTIONS] target=%s lag_ms=%s replay_from_ms=%s latest_ms=%s",
+                                _shorten_address(address),
+                                lag_ms,
+                                t_state["actions_replay_from_ms"],
+                                latest_action_ms,
+                            )
+
+                    for action in target_actions:
+                        action["_source_target"] = address
+                    actions_list.extend(target_actions)
+                    has_new_actions_for_target = bool(target_actions)
+                except Exception as exc:
+                    logger.exception(
+                        "[ERR] fetch target actions failed target=%s: %s",
+                        _shorten_address(address),
+                        exc,
+                    )
+
+            target_cache_mode = (
+                "nonce" if has_new_actions_for_target else target_cache_bust_mode
+            )
+            target_info: Dict[str, object] = {"ok": True, "incomplete": False}
+            if should_poll:
+                try:
+                    target_pos, target_info = fetch_positions_norm(
+                        data_client,
+                        address,
+                        size_threshold,
+                        positions_limit=positions_limit,
+                        positions_max_pages=positions_max_pages,
+                        refresh_sec=target_positions_refresh_sec,
+                        force_http=True,
+                        cache_bust_mode=target_cache_mode,
+                        header_keys=header_keys,
+                    )
+                    if len(target_pos) >= hard_cap:
+                        target_info["incomplete"] = True
+                        logger.info(
+                            "[SAFE] target positions 可能截断 target=%s len>=hard_cap=%s",
+                            _shorten_address(address),
+                            hard_cap,
+                        )
+                    if target_info.get("ok") and not target_info.get("incomplete"):
+                        pos_map: Dict[str, Dict[str, object]] = {}
+                        for pos in target_pos:
+                            token_key = str(pos.get("token_key") or "").strip()
+                            if not token_key:
+                                continue
+                            pos_map[token_key] = {
+                                "size": float(pos.get("size") or 0.0),
+                                "raw": pos.get("raw"),
+                            }
+                        t_state["last_positions_by_token_key"] = pos_map
+                        t_state["last_positions_ts"] = now_ts
+                except Exception as exc:
+                    logger.exception(
+                        "[ERR] fetch target positions failed target=%s: %s",
+                        _shorten_address(address),
+                        exc,
+                    )
+            target_infos[address] = target_info
+            if should_poll:
+                target_polled.add(address)
+
+        target_positions_by_token_key: Dict[str, Dict[str, object]] = {}
+        target_cached_count = 0
+        for entry in target_entries:
+            address = entry["address"]
+            t_state = _ensure_target_state(state, address)
+            pos_map = t_state.get("last_positions_by_token_key")
+            if not isinstance(pos_map, dict) or not pos_map:
+                continue
+            target_cached_count += 1
+            weight = float(entry.get("weight") or 1.0)
+            for token_key, payload in pos_map.items():
+                if isinstance(payload, dict):
+                    size = float(payload.get("size") or 0.0)
+                    raw = payload.get("raw")
+                else:
+                    size = float(payload or 0.0)
+                    raw = None
+                if weight != 1.0:
+                    size *= weight
+                if token_key in target_positions_by_token_key:
+                    target_positions_by_token_key[token_key]["size"] += size
+                    if not target_positions_by_token_key[token_key].get("raw") and raw:
+                        target_positions_by_token_key[token_key]["raw"] = raw
+                else:
+                    target_positions_by_token_key[token_key] = {
+                        "size": size,
+                        "raw": raw,
+                    }
+
+        target_pos = [
+            {"token_key": token_key, "size": data.get("size", 0.0), "raw": data.get("raw")}
+            for token_key, data in target_positions_by_token_key.items()
+        ]
+        target_info = {
+            "ok": target_cached_count > 0,
+            "incomplete": False,
+            "targets_total": len(target_entries),
+            "targets_polled": len(target_polled),
+        }
+        if actions_list:
+            seen_global: set[str] = set()
+            deduped_actions: list[Dict[str, object]] = []
             for action in actions_list:
                 action_id = _action_identity(action)
-                if action_id in seen_action_set:
+                if action_id in seen_global:
                     continue
-                filtered_actions.append(action)
-                seen_action_ids.append(action_id)
-                seen_action_set.add(action_id)
-            max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
-            if len(seen_action_ids) > max_seen:
-                del seen_action_ids[:-max_seen]
-            actions_list = filtered_actions
-
-            miss_token = 0
-            miss_samples: list[list[str]] = []
-            for action in actions_list:
-                side = str(action.get("side") or "").upper()
-                size = float(action.get("size") or 0.0)
-
-                token_id = action.get("token_id") or _extract_token_id_from_raw(
-                    action.get("raw") or {}
-                )
-                if token_id:
-                    tid = str(token_id)
-                    action["token_id"] = tid
-                    _record_action(tid, side, size)
-                else:
-                    miss_token += 1
-                    if len(miss_samples) < 3:
-                        raw = action.get("raw") or {}
-                        if isinstance(raw, dict):
-                            miss_samples.append(sorted(list(raw.keys()))[:25])
-
-            if miss_token:
-                logger.warning(
-                    "[ACT] actions_total=%s token_mapped=%s missing=%s sample_raw_keys=%s",
-                    len(actions_list),
-                    len(actions_list) - miss_token,
-                    miss_token,
-                    miss_samples,
-                )
-            latest_action_ms = int(actions_info.get("latest_ms") or 0)
-            actions_ok = bool(actions_info.get("ok"))
-            actions_incomplete = bool(actions_info.get("incomplete"))
-            actions_unreliable = (not actions_ok) or actions_incomplete
-            if actions_unreliable:
-                state["actions_unreliable_until"] = now_ts + actions_unreliable_hold_sec
-                state["actions_replay_from_ms"] = max(
-                    0, now_ms - actions_replay_window_sec * 1000
-                )
-                logger.warning(
-                    "[ACTIONS] unreliable ok=%s incomplete=%s keep_cursor_ms=%s replay_from_ms=%s",
-                    actions_ok,
-                    actions_incomplete,
-                    actions_cursor_ms,
-                    state["actions_replay_from_ms"],
-                )
-            else:
-                state.pop("actions_unreliable_until", None)
-                if latest_action_ms > actions_cursor_ms:
-                    state[actions_cursor_key] = latest_action_ms
-                if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
-                    state.pop("actions_replay_from_ms", None)
-                lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
-                if lag_ms > actions_lag_threshold_sec * 1000:
-                    state["actions_replay_from_ms"] = max(
-                        0, now_ms - actions_replay_window_sec * 1000
-                    )
-                    logger.warning(
-                        "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s",
-                        lag_ms,
-                        state["actions_replay_from_ms"],
-                        latest_action_ms,
-                    )
-        except Exception as exc:
-            logger.exception("[ERR] fetch target actions failed: %s", exc)
-
+                seen_global.add(action_id)
+                deduped_actions.append(action)
+            actions_list = deduped_actions
         has_new_actions = bool(actions_list)
-        target_cache_mode = "nonce" if has_new_actions else target_cache_bust_mode
-
-        target_pos, target_info = fetch_positions_norm(
-            data_client,
-            cfg["target_address"],
-            size_threshold,
-            positions_limit=positions_limit,
-            positions_max_pages=positions_max_pages,
-            refresh_sec=target_positions_refresh_sec,
-            force_http=True,
-            cache_bust_mode=target_cache_mode,
-            header_keys=header_keys,
-        )
+        actions_unreliable_until = 0
+        actions_replay_from_ms = 0
+        for entry in target_entries:
+            t_state = _ensure_target_state(state, entry["address"])
+            actions_unreliable_until = max(
+                actions_unreliable_until, int(t_state.get("actions_unreliable_until") or 0)
+            )
+            actions_replay_from_ms = max(
+                actions_replay_from_ms, int(t_state.get("actions_replay_from_ms") or 0)
+            )
+        if actions_unreliable_until > 0:
+            state["actions_unreliable_until"] = actions_unreliable_until
+        else:
+            state.pop("actions_unreliable_until", None)
+        if actions_replay_from_ms > 0:
+            state["actions_replay_from_ms"] = actions_replay_from_ms
+        else:
+            state.pop("actions_replay_from_ms", None)
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
@@ -1242,38 +1577,39 @@ def main() -> None:
         if should_log_heartbeat:
             logger.info(
                 "[POS] target_count=%s my_count=%s target_incomplete=%s my_incomplete=%s | "
-                "t_src=%s t_cb=%s t_rsec=%s t_mode=%s t_http=%s t_hit=%s",
+                "targets_polled=%s/%s",
                 len(target_pos),
                 len(my_pos),
                 bool(target_info.get("incomplete")),
                 bool(my_info.get("incomplete")),
-                target_info.get("source"),
-                target_info.get("cache_bucket"),
-                target_info.get("refresh_sec"),
-                target_info.get("cache_bust_mode"),
-                target_info.get("http_status"),
-                target_info.get("cache_hit_hint"),
+                target_info.get("targets_polled"),
+                target_info.get("targets_total"),
             )
-            if target_info.get("incomplete"):
-                logger.info(
-                    "[POS] target positions info limit=%s total=%s max_pages=%s",
-                    target_info.get("limit"),
-                    target_info.get("total"),
-                    target_info.get("max_pages"),
-                )
-            if log_cache_headers:
-                logger.info(
-                    "[POS] target cache_headers_first=%s",
-                    target_info.get("cache_headers_first"),
-                )
-                logger.info(
-                    "[POS] target cache_headers_last=%s",
-                    target_info.get("cache_headers_last"),
-                )
+            for address, info in target_infos.items():
+                if info.get("incomplete"):
+                    logger.info(
+                        "[POS] target=%s positions info limit=%s total=%s max_pages=%s",
+                        _shorten_address(address),
+                        info.get("limit"),
+                        info.get("total"),
+                        info.get("max_pages"),
+                    )
+                if log_cache_headers and info.get("cache_headers_first"):
+                    logger.info(
+                        "[POS] target=%s cache_headers_first=%s",
+                        _shorten_address(address),
+                        info.get("cache_headers_first"),
+                    )
+                if log_cache_headers and info.get("cache_headers_last"):
+                    logger.info(
+                        "[POS] target=%s cache_headers_last=%s",
+                        _shorten_address(address),
+                        info.get("cache_headers_last"),
+                    )
             last_heartbeat_ts = now_ts
 
-        if not target_info.get("ok") or target_info.get("incomplete"):
-            logger.warning("[SAFE] target positions 不完整，跳过本轮执行")
+        if not target_info.get("ok"):
+            logger.warning("[SAFE] target positions 不完整或不可用，跳过本轮执行")
             save_state(args.state, state)
             time.sleep(_get_poll_interval())
             continue
@@ -1327,8 +1663,17 @@ def main() -> None:
                     state.setdefault("target_missing_streak", {})[token_id] = 0
             state["boot_token_ids"] = sorted(set(boot_token_ids))
 
-            state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+            run_start_cursor = int(state.get("run_start_ms") or 0)
+            state["target_actions_cursor_ms"] = run_start_cursor
             state["seen_action_ids"] = []
+            for address in resolved_target_addresses:
+                t_state = _ensure_target_state(state, address)
+                t_state["actions_cursor_ms"] = run_start_cursor
+                t_state["trades_cursor_ms"] = run_start_cursor
+                t_state["seen_action_ids"] = []
+                t_state["seen_trade_ids"] = []
+                t_state["actions_replay_from_ms"] = 0
+                t_state["actions_unreliable_until"] = 0
             state["topic_state"] = {}
             state["probed_token_ids"] = []
             state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
@@ -1337,7 +1682,7 @@ def main() -> None:
                 "[BOOT] baseline_only: baseline_keys=%s baseline_ids=%s cursor_ms=%s",
                 len(boot_keys),
                 len(state["boot_token_ids"]),
-                state["target_actions_cursor_ms"],
+                run_start_cursor,
             )
             save_state(args.state, state)
             time.sleep(_get_poll_interval())
@@ -2297,8 +2642,8 @@ def main() -> None:
                     if actions_unreliable:
                         token_confirm["first_ts"] = now_ts
                         sell_confirm[token_id] = token_confirm
-                        state["actions_replay_from_ms"] = max(
-                            0, now_ms - actions_replay_window_sec * 1000
+                        _broadcast_actions_replay(
+                            max(0, now_ms - actions_replay_window_sec * 1000)
                         )
                         logger.info(
                             "[HOLD] token_id=%s reason=actions_unreliable d_target=%s confirm=%s/%s replay_from_ms=%s",
@@ -2316,8 +2661,8 @@ def main() -> None:
                         token_confirm["first_ts"] = int(token_confirm.get("first_ts") or now_ts)
                         sell_confirm[token_id] = token_confirm
                         if token_confirm["count"] < sell_confirm_max:
-                            state["actions_replay_from_ms"] = max(
-                                0, now_ms - actions_replay_window_sec * 1000
+                            _broadcast_actions_replay(
+                                max(0, now_ms - actions_replay_window_sec * 1000)
                             )
                             logger.info(
                                 "[HOLD] token_id=%s reason=no_sell_action d_target=%s confirm=%s/%s replay_from_ms=%s",
