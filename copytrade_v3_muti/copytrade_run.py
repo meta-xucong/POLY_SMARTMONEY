@@ -576,6 +576,7 @@ def _update_intent_state(
 
 def _action_identity(action: Dict[str, object]) -> str:
     raw = action.get("raw") or {}
+    source = str(action.get("_source_target") or "").strip().lower()
     token_id = str(action.get("token_id") or "").strip()
     side = str(action.get("side") or "").strip().upper()
     price = action.get("price")
@@ -585,11 +586,14 @@ def _action_identity(action: Dict[str, object]) -> str:
         log_index = raw.get("logIndex") or raw.get("log_index")
         fill_id = raw.get("fillId") or raw.get("fill_id")
         if tx_hash and log_index is not None:
-            return f"tx:{tx_hash}:{log_index}"
+            base = f"tx:{tx_hash}:{log_index}"
+            return f"{source}:{base}" if source else base
         if fill_id is not None:
-            return f"fill:{fill_id}"
+            base = f"fill:{fill_id}"
+            return f"{source}:{base}" if source else base
         if tx_hash:
-            return f"tx:{tx_hash}:{token_id}:{side}:{price}:{size}"
+            base = f"tx:{tx_hash}:{token_id}:{side}:{price}:{size}"
+            return f"{source}:{base}" if source else base
     token_id = action.get("token_id") or ""
     side = action.get("side") or ""
     size = action.get("size") or ""
@@ -598,7 +602,8 @@ def _action_identity(action: Dict[str, object]) -> str:
     price = ""
     if isinstance(raw, dict):
         price = raw.get("price") or raw.get("fillPrice") or raw.get("avgPrice") or ""
-    return f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
+    base = f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
+    return f"{source}:{base}" if source else base
 
 
 def _extract_token_id_from_raw(raw: object) -> Optional[str]:
@@ -1291,6 +1296,7 @@ def main() -> None:
             t_state = _ensure_target_state(state, address)
             should_poll = address in selected_addresses
             has_new_actions_for_target = False
+            weight = float(entry.get("weight") or 1.0)
 
             if should_poll:
                 spacing = float(target_request_spacing_sec or 0.0)
@@ -1348,6 +1354,7 @@ def main() -> None:
                     seen_action_set = {str(item) for item in seen_action_ids}
                     filtered_actions: list[Dict[str, object]] = []
                     for action in target_actions:
+                        action["_source_target"] = address
                         action_id = _action_identity(action)
                         if action_id in seen_action_set:
                             continue
@@ -1363,7 +1370,12 @@ def main() -> None:
                     miss_samples: list[list[str]] = []
                     for action in target_actions:
                         side = str(action.get("side") or "").upper()
-                        size = float(action.get("size") or 0.0)
+                        raw_size = float(action.get("size") or 0.0)
+                        size = raw_size * weight
+                        if weight != 1.0:
+                            action["_raw_size"] = raw_size
+                            action["_weight"] = weight
+                        action["size"] = size
 
                         token_id = action.get("token_id") or _extract_token_id_from_raw(
                             action.get("raw") or {}
@@ -1426,8 +1438,6 @@ def main() -> None:
                                 latest_action_ms,
                             )
 
-                    for action in target_actions:
-                        action["_source_target"] = address
                     actions_list.extend(target_actions)
                     has_new_actions_for_target = bool(target_actions)
                 except Exception as exc:
