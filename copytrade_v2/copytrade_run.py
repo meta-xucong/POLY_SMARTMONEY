@@ -2102,26 +2102,58 @@ def main() -> None:
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
                     is_reprice = _is_pure_reprice(actions)
+                    missing_freeze = state.setdefault("missing_data_freeze", {})
                     if not missing_data and token_id:
                         state.get("missing_buy_attempts", {}).pop(token_id, None)
+                        cap_limit = min(cap_shares, cap_shares_notional)
+                        if my_shares <= cap_limit + eps:
+                            missing_freeze.pop(token_id, None)
+                        else:
+                            missing_freeze[token_id] = {
+                                "ts": now_ts,
+                                "shares": my_shares,
+                                "cap": cap_limit,
+                            }
+                            logger.warning(
+                                "[FREEZE] token_id=%s reason=position_exceeds_cap shares=%s cap=%s",
+                                token_id,
+                                my_shares,
+                                cap_limit,
+                            )
+                    if token_id and token_id in missing_freeze and any(
+                        act.get("type") == "place"
+                        and str(act.get("side") or "").upper() == "BUY"
+                        for act in actions
+                    ):
+                        logger.warning(
+                            "[SKIP] token_id=%s reason=missing_data_freeze",
+                            token_id,
+                        )
+                        continue
                     if missing_data and any(
                         act.get("type") == "place"
                         and str(act.get("side") or "").upper() == "BUY"
                         for act in actions
                     ):
-                        missing_limit = int(cfg.get("max_missing_buy_attempts") or 5)
-                        if missing_limit > 0:
-                            missing_counts = state.setdefault("missing_buy_attempts", {})
-                            missing_counts[token_id] = int(missing_counts.get(token_id) or 0) + 1
-                            if missing_counts[token_id] > missing_limit:
-                                logger.warning(
-                                    "[SKIP] token_id=%s reason=missing_data_buy_limit count=%s "
-                                    "limit=%s",
-                                    token_id,
-                                    missing_counts[token_id],
-                                    missing_limit,
-                                )
-                                continue
+                        missing_limit = int(cfg.get("max_missing_buy_attempts") or 0)
+                        if missing_limit <= 0:
+                            logger.warning(
+                                "[SKIP] token_id=%s reason=missing_data_buy_block limit=%s",
+                                token_id,
+                                missing_limit,
+                            )
+                            continue
+                        missing_counts = state.setdefault("missing_buy_attempts", {})
+                        missing_counts[token_id] = int(missing_counts.get(token_id) or 0) + 1
+                        if missing_counts[token_id] > missing_limit:
+                            logger.warning(
+                                "[SKIP] token_id=%s reason=missing_data_buy_limit count=%s "
+                                "limit=%s",
+                                token_id,
+                                missing_counts[token_id],
+                                missing_limit,
+                            )
+                            continue
                     if place_backoff_active and any(
                         act.get("type") == "place" for act in actions
                     ):
