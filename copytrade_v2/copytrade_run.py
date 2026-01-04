@@ -706,6 +706,7 @@ def main() -> None:
         state.setdefault("cumulative_buy_usd_by_token", {})
         state.setdefault("seen_my_trade_ids", [])
         state.setdefault("my_trades_cursor_ms", 0)
+        state.setdefault("my_trades_unreliable_until", 0)
     state.setdefault("managed_order_ids", [])
     state.setdefault("intent_keys", {})
     state.setdefault("token_map", {})
@@ -917,6 +918,8 @@ def main() -> None:
         state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
         state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
+    if int(state.get("my_trades_unreliable_until") or 0) < 0:
+        state["my_trades_unreliable_until"] = 0
 
     missing_notice_tokens: set[str] = set()
 
@@ -1212,6 +1215,9 @@ def main() -> None:
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
+        my_trades_unreliable_hold_sec = int(cfg.get("my_trades_unreliable_hold_sec") or 0)
+        if my_trades_unreliable_hold_sec <= 0:
+            my_trades_unreliable_hold_sec = actions_unreliable_hold_sec
         try:
             my_trades_cursor_ms = int(state.get("my_trades_cursor_ms") or 0)
             my_trades, my_trades_info = fetch_target_trades_since(
@@ -1267,10 +1273,23 @@ def main() -> None:
                     miss_trade_token,
                     len(my_trades),
                 )
+            trades_ok = bool(my_trades_info.get("ok", True))
+            trades_incomplete = bool(my_trades_info.get("incomplete", False))
+            if not trades_ok or trades_incomplete:
+                state["my_trades_unreliable_until"] = now_ts + my_trades_unreliable_hold_sec
+                logger.warning(
+                    "[MY_TRADES] unreliable ok=%s incomplete=%s hold_sec=%s",
+                    trades_ok,
+                    trades_incomplete,
+                    my_trades_unreliable_hold_sec,
+                )
+            else:
+                state["my_trades_unreliable_until"] = 0
             latest_trade_ms = int(my_trades_info.get("latest_ms") or 0)
             if latest_trade_ms > my_trades_cursor_ms:
                 state["my_trades_cursor_ms"] = latest_trade_ms
         except Exception as exc:
+            state["my_trades_unreliable_until"] = now_ts + my_trades_unreliable_hold_sec
             logger.exception("[ERR] fetch my trades failed: %s", exc)
 
         has_new_actions = bool(actions_list)
@@ -1617,6 +1636,13 @@ def main() -> None:
             open_buy_orders_usd,
             top_tokens_fmt,
         )
+        my_trades_unreliable_until = int(state.get("my_trades_unreliable_until") or 0)
+        my_trades_unreliable = my_trades_unreliable_until > now_ts
+        if my_trades_unreliable:
+            logger.warning(
+                "[MY_TRADES] unreliable freeze buys until=%s",
+                my_trades_unreliable_until,
+            )
 
         for token_id in reconcile_set:
             open_orders = state.get("open_orders", {}).get(token_id, [])
@@ -2129,6 +2155,9 @@ def main() -> None:
                         price = float(act.get("price") or ref_price or 0.0)
                         size = float(act.get("size") or 0.0)
                         if price <= 0 or size <= 0:
+                            continue
+                        if my_trades_unreliable and side == "BUY":
+                            blocked_reasons.add("my_trades_unreliable")
                             continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
@@ -2790,6 +2819,9 @@ def main() -> None:
                 price = float(act.get("price") or ref_price or 0.0)
                 size = float(act.get("size") or 0.0)
                 if price <= 0 or size <= 0:
+                    continue
+                if my_trades_unreliable and side == "BUY":
+                    blocked_reasons.add("my_trades_unreliable")
                     continue
 
                 planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
