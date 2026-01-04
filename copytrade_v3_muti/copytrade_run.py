@@ -1132,6 +1132,7 @@ def main() -> None:
             if now_wall - last_open_orders_sync_ts < open_orders_refresh_sec:
                 should_sync_orders = False
         if should_sync_orders or not state.get("open_orders"):
+            last_open_orders_sync_ts = now_wall
             try:
                 remote_orders, ok, err = fetch_open_orders_norm(clob_client)
                 if ok:
@@ -1257,7 +1258,6 @@ def main() -> None:
                             grace_sec,
                         )
                     # --- end: ORDSYNC ledger-first ---
-                    last_open_orders_sync_ts = now_wall
                 else:
                     logger.warning("[WARN] sync open orders failed: %s", err)
             except Exception as exc:
@@ -1899,7 +1899,7 @@ def main() -> None:
             cache_entry = orderbook_cache.get(token_id)
             if cache_entry and not force_refresh:
                 ts = int(cache_entry.get("ts") or 0)
-                if orderbook_refresh_sec <= 0 or (now_ts - ts) <= orderbook_refresh_sec:
+                if orderbook_refresh_sec > 0 and (now_ts - ts) <= orderbook_refresh_sec:
                     cached_book = cache_entry.get("book")
                     if isinstance(cached_book, dict):
                         orderbooks[token_id] = cached_book
