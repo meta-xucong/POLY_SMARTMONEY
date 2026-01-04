@@ -818,6 +818,10 @@ def main() -> None:
         actions_unreliable_hold_sec = int(cfg.get("actions_unreliable_hold_sec") or 120)
         sell_confirm_max = int(cfg.get("sell_confirm_max") or 5)
         sell_confirm_window_sec = int(cfg.get("sell_confirm_window_sec") or 300)
+        force_ratio_raw = cfg.get("sell_confirm_force_ratio")
+        sell_confirm_force_ratio = 0.5 if force_ratio_raw is None else float(force_ratio_raw)
+        force_shares_raw = cfg.get("sell_confirm_force_shares")
+        sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
         now_ms = int(now_ts * 1000)
         replay_from_ms = int(state.get("actions_replay_from_ms") or 0)
         if replay_from_ms > 0 and replay_from_ms != actions_cursor_ms:
@@ -1871,15 +1875,42 @@ def main() -> None:
                             )
                             d_target = 0.0
                         else:
-                            logger.info(
-                                "[HOLD] token_id=%s reason=no_sell_after_confirm d_target=%s confirm=%s/%s",
-                                token_id,
-                                d_target,
-                                token_confirm["count"],
-                                sell_confirm_max,
-                            )
-                            sell_confirm.pop(token_id, None)
-                            d_target = 0.0
+                            drop_shares = max(0.0, -float(d_target))
+                            base_shares = max(0.0, float(t_last or 0.0))
+                            drop_threshold = 0.0
+                            if sell_confirm_force_ratio > 0 and base_shares > 0:
+                                drop_threshold = max(
+                                    drop_threshold, base_shares * sell_confirm_force_ratio
+                                )
+                            if sell_confirm_force_shares > 0:
+                                drop_threshold = max(
+                                    drop_threshold, sell_confirm_force_shares
+                                )
+                            significant_drop = drop_threshold > 0 and drop_shares >= drop_threshold
+                            if significant_drop:
+                                logger.info(
+                                    "[FORCE] token_id=%s reason=sell_confirm_drop d_target=%s drop=%s threshold=%s ratio=%s base=%s",
+                                    token_id,
+                                    d_target,
+                                    drop_shares,
+                                    drop_threshold,
+                                    sell_confirm_force_ratio,
+                                    base_shares,
+                                )
+                                sell_confirm.pop(token_id, None)
+                            else:
+                                logger.info(
+                                    "[HOLD] token_id=%s reason=no_sell_after_confirm d_target=%s confirm=%s/%s drop=%s threshold=%s",
+                                    token_id,
+                                    d_target,
+                                    token_confirm["count"],
+                                    sell_confirm_max,
+                                    drop_shares,
+                                    drop_threshold,
+                                )
+                                token_confirm["count"] = sell_confirm_max
+                                sell_confirm[token_id] = token_confirm
+                                d_target = 0.0
             else:
                 state.setdefault("sell_confirm", {}).pop(token_id, None)
             if abs(d_target) <= eps and not topic_active:

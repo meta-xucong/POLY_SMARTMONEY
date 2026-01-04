@@ -69,6 +69,10 @@
 - `cooldown_sec_per_token`: 每个 token 的冷却时间（秒）。
 - `missing_timeout_sec`: 目标仓位缺失超时时间（秒）。
 - `missing_to_zero_rounds`: 目标仓位缺失达到次数后是否视为零仓位。
+- `sell_confirm_max`: 在没有 SELL 动作时，卖出确认的最大次数。
+- `sell_confirm_window_sec`: 卖出确认计数窗口（秒）。
+- `sell_confirm_force_ratio`: 卖出确认达到上限后，若目标仓位降幅超过该比例，则强制触发卖出。
+- `sell_confirm_force_shares`: 卖出确认达到上限后，若目标仓位降幅超过该绝对份额，则强制触发卖出。
 - `debug_token_ids`: 调试用 token id 列表。
 - `log_dir`: 日志目录。
 - `log_level`: 日志级别（如 `INFO`）。
