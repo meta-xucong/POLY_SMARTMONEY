@@ -816,6 +816,8 @@ def main() -> None:
         actions_replay_window_sec = int(cfg.get("actions_replay_window_sec") or 600)
         actions_lag_threshold_sec = int(cfg.get("actions_lag_threshold_sec") or 180)
         actions_unreliable_hold_sec = int(cfg.get("actions_unreliable_hold_sec") or 120)
+        sell_confirm_max = int(cfg.get("sell_confirm_max") or 5)
+        sell_confirm_window_sec = int(cfg.get("sell_confirm_window_sec") or 300)
         now_ms = int(now_ts * 1000)
         replay_from_ms = int(state.get("actions_replay_from_ms") or 0)
         if replay_from_ms > 0 and replay_from_ms < actions_cursor_ms:
@@ -1820,14 +1822,43 @@ def main() -> None:
             topic_active = topic_mode and phase in ("LONG", "EXITING")
             actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
             actions_unreliable = actions_unreliable_until > now_ts
-            if d_target < -eps and not has_sell:
-                logger.info(
-                    "[HOLD] token_id=%s reason=%s d_target=%s",
-                    token_id,
-                    "actions_unreliable" if actions_unreliable else "no_sell_action",
-                    d_target,
-                )
-                d_target = 0.0
+            if d_target < -eps:
+                if has_sell:
+                    state.setdefault("sell_confirm", {}).pop(token_id, None)
+                else:
+                    sell_confirm = state.setdefault("sell_confirm", {})
+                    token_confirm = sell_confirm.get(token_id) or {"count": 0, "first_ts": now_ts}
+                    if now_ts - int(token_confirm.get("first_ts") or now_ts) > sell_confirm_window_sec:
+                        token_confirm = {"count": 0, "first_ts": now_ts}
+                    token_confirm["count"] = int(token_confirm.get("count") or 0) + 1
+                    token_confirm["first_ts"] = int(token_confirm.get("first_ts") or now_ts)
+                    sell_confirm[token_id] = token_confirm
+                    if token_confirm["count"] < sell_confirm_max:
+                        state["actions_replay_from_ms"] = max(
+                            0, now_ms - actions_replay_window_sec * 1000
+                        )
+                        logger.info(
+                            "[HOLD] token_id=%s reason=%s d_target=%s confirm=%s/%s replay_from_ms=%s",
+                            token_id,
+                            "actions_unreliable" if actions_unreliable else "no_sell_action",
+                            d_target,
+                            token_confirm["count"],
+                            sell_confirm_max,
+                            state.get("actions_replay_from_ms"),
+                        )
+                        d_target = 0.0
+                    else:
+                        logger.info(
+                            "[HOLD] token_id=%s reason=no_sell_after_confirm d_target=%s confirm=%s/%s",
+                            token_id,
+                            d_target,
+                            token_confirm["count"],
+                            sell_confirm_max,
+                        )
+                        sell_confirm.pop(token_id, None)
+                        d_target = 0.0
+            else:
+                state.setdefault("sell_confirm", {}).pop(token_id, None)
             if abs(d_target) <= eps and not topic_active:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
