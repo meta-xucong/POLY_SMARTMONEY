@@ -32,6 +32,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "last_reprice_ts_by_token": {},
     "adopted_existing_orders": False,
     "shadow_buy_orders": [],
+    "taker_buy_orders": [],
 }
 
 
@@ -113,6 +114,8 @@ def load_state(path: str) -> Dict[str, Any]:
         state["adopted_existing_orders"] = False
     if "shadow_buy_orders" not in state or not isinstance(state["shadow_buy_orders"], list):
         state["shadow_buy_orders"] = []
+    if "taker_buy_orders" not in state or not isinstance(state["taker_buy_orders"], list):
+        state["taker_buy_orders"] = []
     return state
 
 

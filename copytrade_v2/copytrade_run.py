@@ -308,9 +308,20 @@ def _calc_shadow_buy_notional(
     if ttl_sec <= 0:
         state["shadow_buy_orders"] = []
         return 0.0, {}
-    shadow_orders = state.get("shadow_buy_orders", [])
+    taker_orders = state.get("taker_buy_orders")
+    shadow_orders = state.get("shadow_buy_orders")
+    if isinstance(taker_orders, list) and taker_orders:
+        orders_key = "taker_buy_orders"
+        shadow_orders = taker_orders
+    elif isinstance(shadow_orders, list) and shadow_orders:
+        orders_key = "shadow_buy_orders"
+    else:
+        orders_key = (
+            "taker_buy_orders" if isinstance(taker_orders, list) else "shadow_buy_orders"
+        )
+        shadow_orders = taker_orders if isinstance(taker_orders, list) else shadow_orders
     if not isinstance(shadow_orders, list):
-        state["shadow_buy_orders"] = []
+        state[orders_key] = []
         return 0.0, {}
     kept: list[dict] = []
     total = 0.0
@@ -330,7 +341,9 @@ def _calc_shadow_buy_notional(
         kept.append(order)
         total += usd
         by_token[token_id] = by_token.get(token_id, 0.0) + usd
-    state["shadow_buy_orders"] = kept
+    state[orders_key] = kept
+    if orders_key == "shadow_buy_orders":
+        state["taker_buy_orders"] = list(kept)
     return total, by_token
 
 
@@ -784,7 +797,7 @@ def main() -> None:
         "Cache-Control",
     ]
     target_cache_bust_mode = "bucket"
-    my_positions_force_http = False
+    my_positions_force_http = True
     actions_page_size = 300
     actions_max_offset = 10000
     heartbeat_interval_sec = 600
@@ -832,7 +845,7 @@ def main() -> None:
             "Cache-Control",
         ]
         target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
-        my_positions_force_http = bool(cfg.get("my_positions_force_http"))
+        my_positions_force_http = bool(cfg.get("my_positions_force_http", True))
         actions_page_size = int(cfg.get("actions_page_size") or 300)
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)

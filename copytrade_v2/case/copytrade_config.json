@@ -19,7 +19,7 @@
   "log_positions_cache_headers": true,
   "positions_cache_header_keys": ["Age", "CF-Cache-Status", "X-Cache", "Via", "Cache-Control", "ETag", "Last-Modified", "Date", "Server"],
   "target_cache_bust_mode": "sec",
-  "my_positions_force_http": false,
+  "my_positions_force_http": true,
 
   "deadband_shares": 1,
 
@@ -60,7 +60,7 @@
 
   "max_notional_per_token": 15,
   "max_notional_total": 300,
-  "shadow_buy_ttl_sec": 180,
+  "shadow_buy_ttl_sec": 900,
 
   "allow_partial": true,
   "taker_enabled": true,
