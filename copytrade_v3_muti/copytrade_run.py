@@ -64,10 +64,113 @@ def _state_path_for_targets(state_path: Path, target_addresses: List[str]) -> Pa
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"配置文件不存在: {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw = path.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        relaxed = _relax_json_text(raw)
+        if relaxed != raw:
+            try:
+                payload = json.loads(relaxed)
+            except json.JSONDecodeError:
+                raise ValueError(_format_json_error(path, raw, exc)) from exc
+        else:
+            raise ValueError(_format_json_error(path, raw, exc)) from exc
     if not isinstance(payload, dict):
         raise ValueError("配置文件必须为 JSON dict")
     return payload
+
+
+def _format_json_error(path: Path, raw: str, exc: json.JSONDecodeError) -> str:
+    lines = raw.splitlines()
+    line_no = exc.lineno
+    col_no = exc.colno
+    context = ""
+    if 1 <= line_no <= len(lines):
+        line = lines[line_no - 1]
+        caret = " " * (max(col_no - 1, 0)) + "^"
+        context = f"\n{line}\n{caret}"
+    return f"配置文件 JSON 解析失败: {path} (line {line_no}, column {col_no}){context}"
+
+
+def _relax_json_text(raw: str) -> str:
+    text = raw.lstrip("\ufeff")
+    text = _strip_json_comments(text)
+    text = _strip_trailing_commas(text)
+    return text
+
+
+def _strip_json_comments(text: str) -> str:
+    out: list[str] = []
+    i = 0
+    in_string = False
+    escape = False
+    while i < len(text):
+        ch = text[i]
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "/" and i + 1 < len(text) and text[i + 1] == "/":
+            i += 2
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        if ch == "/" and i + 1 < len(text) and text[i + 1] == "*":
+            i += 2
+            while i + 1 < len(text) and not (text[i] == "*" and text[i + 1] == "/"):
+                i += 1
+            i += 2
+            continue
+        if ch == "#":
+            i += 1
+            while i < len(text) and text[i] not in "\r\n":
+                i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        if ch in ("}", "]"):
+            idx = len(out) - 1
+            while idx >= 0 and out[idx].isspace():
+                idx -= 1
+            if idx >= 0 and out[idx] == ",":
+                del out[idx:]
+            out.append(ch)
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _normalize_privkey(key: str) -> str:
