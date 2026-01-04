@@ -12,6 +12,8 @@ def risk_check(
     side: Optional[str] = None,
     planned_total_notional: Optional[float] = None,
     planned_token_notional: Optional[float] = None,
+    cumulative_total_usd: Optional[float] = None,
+    cumulative_token_usd: Optional[float] = None,
 ) -> Tuple[bool, str]:
     blacklist = cfg.get("blacklist_token_keys") or []
     if token_key in blacklist:
@@ -29,15 +31,15 @@ def risk_check(
             return False, "short_disabled"
     apply_token_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
     if max_per_token > 0 and apply_token_cap:
-        base = float(planned_token_notional or 0.0)
+        base = float(cumulative_token_usd or 0.0)
         if base + order_notional > max_per_token:
             return False, "max_notional_per_token"
 
     max_total = float(cfg.get("max_notional_total") or 0)
     apply_total_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
-    if max_total > 0 and planned_total_notional is not None and apply_total_cap:
+    if max_total > 0 and cumulative_total_usd is not None and apply_total_cap:
         delta = abs(order_shares) * ref_price
-        if planned_total_notional + delta > max_total:
+        if cumulative_total_usd + delta > max_total:
             return False, "max_notional_total"
 
     return True, "ok"
