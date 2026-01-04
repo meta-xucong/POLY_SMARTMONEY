@@ -1598,6 +1598,7 @@ def main() -> None:
                 if alt is not None:
                     t_now_present = True
                     t_now = float(alt)
+            missing_data = t_now is None
             boot_key_set = set(state.get("boot_token_keys", []))
             is_boot_token = token_key in boot_key_set
 
@@ -2101,6 +2102,26 @@ def main() -> None:
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
                     is_reprice = _is_pure_reprice(actions)
+                    if not missing_data and token_id:
+                        state.get("missing_buy_attempts", {}).pop(token_id, None)
+                    if missing_data and any(
+                        act.get("type") == "place"
+                        and str(act.get("side") or "").upper() == "BUY"
+                        for act in actions
+                    ):
+                        missing_limit = int(cfg.get("max_missing_buy_attempts") or 5)
+                        if missing_limit > 0:
+                            missing_counts = state.setdefault("missing_buy_attempts", {})
+                            missing_counts[token_id] = int(missing_counts.get(token_id) or 0) + 1
+                            if missing_counts[token_id] > missing_limit:
+                                logger.warning(
+                                    "[SKIP] token_id=%s reason=missing_data_buy_limit count=%s "
+                                    "limit=%s",
+                                    token_id,
+                                    missing_counts[token_id],
+                                    missing_limit,
+                                )
+                                continue
                     if place_backoff_active and any(
                         act.get("type") == "place" for act in actions
                     ):
@@ -2242,6 +2263,13 @@ def main() -> None:
             if max_position_usd_per_token > 0:
                 cap_shares = max_position_usd_per_token / ref_price
 
+            max_notional_per_token = float(
+                cfg_lowp.get("max_notional_per_token") or cfg.get("max_notional_per_token") or 0.0
+            )
+            cap_shares_notional = (
+                (max_notional_per_token / ref_price) if max_notional_per_token > 0 else float("inf")
+            )
+
             use_ratio = ratio_buy if d_target > 0 else ratio_base
             d_my = use_ratio * d_target
             if d_target > 0:
@@ -2263,8 +2291,11 @@ def main() -> None:
             my_target = my_shares + d_my
             if my_target < 0:
                 my_target = 0.0
-            if my_target > cap_shares:
-                my_target = cap_shares
+            if d_target > 0:
+                my_target = min(my_target, cap_shares, cap_shares_notional)
+            else:
+                if my_target > cap_shares:
+                    my_target = cap_shares
 
             if topic_active:
                 probe_usd = float(
@@ -2276,22 +2307,24 @@ def main() -> None:
 
                 if phase == "LONG":
                     if not st.get("did_probe") and my_shares <= eps:
-                        my_target = min(cap_shares, my_shares + probe_shares)
+                        my_target = min(cap_shares, cap_shares_notional, my_shares + probe_shares)
                         probe_attempted = True
                         logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
                     if not st.get("entry_sized"):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
                         if now_ts - first_buy_ts >= entry_settle_sec:
-                            base = max(
-                                float(st.get("target_peak") or 0.0),
-                                float(st.get("entry_buy_accum") or 0.0),
+                            base = float(t_now) if t_now is not None else float(
+                                st.get("target_peak") or 0.0
                             )
                             ratio = ratio_buy
                             desired = 0.0
                             if base > 0 and ratio > 0:
-                                desired = min(cap_shares, ratio * base)
-                            desired = max(desired, min(cap_shares, my_shares + probe_shares))
+                                desired = min(cap_shares, cap_shares_notional, ratio * base)
+                            desired = max(
+                                desired,
+                                min(cap_shares, cap_shares_notional, my_shares + probe_shares),
+                            )
                             st["desired_shares"] = float(desired)
                             st["entry_sized"] = True
                             topic_state[token_id] = st
@@ -2302,9 +2335,17 @@ def main() -> None:
                                 base,
                             )
 
+                    base = float(t_now) if t_now is not None else float(
+                        st.get("target_peak") or 0.0
+                    )
                     desired_locked = float(st.get("desired_shares") or 0.0)
-                    if desired_locked > 0:
-                        my_target = max(my_shares, min(cap_shares, desired_locked))
+                    desired_target = desired_locked
+                    if base > 0 and ratio_buy > 0:
+                        desired_target = min(cap_shares, cap_shares_notional, ratio_buy * base)
+                    if desired_target > 0:
+                        st["desired_shares"] = float(desired_target)
+                        topic_state[token_id] = st
+                        my_target = max(my_shares, min(cap_shares, cap_shares_notional, desired_target))
 
                 elif phase == "EXITING":
                     my_target = 0.0
@@ -2331,7 +2372,7 @@ def main() -> None:
                             last_seen,
                             hold_sec,
                         )
-                        my_target = min(cap_shares, prev_desired)
+                        my_target = min(cap_shares, cap_shares_notional, prev_desired)
             delta = my_target - my_shares
             prev_intent = state.get("intent_keys", {}).get(token_id)
             if delta > eps:
