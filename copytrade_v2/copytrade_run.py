@@ -1598,6 +1598,7 @@ def main() -> None:
                 if alt is not None:
                     t_now_present = True
                     t_now = float(alt)
+            missing_data = t_now is None
             boot_key_set = set(state.get("boot_token_keys", []))
             is_boot_token = token_key in boot_key_set
 
@@ -2101,6 +2102,26 @@ def main() -> None:
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
                     is_reprice = _is_pure_reprice(actions)
+                    if not missing_data and token_id:
+                        state.get("missing_buy_attempts", {}).pop(token_id, None)
+                    if missing_data and any(
+                        act.get("type") == "place"
+                        and str(act.get("side") or "").upper() == "BUY"
+                        for act in actions
+                    ):
+                        missing_limit = int(cfg.get("max_missing_buy_attempts") or 5)
+                        if missing_limit > 0:
+                            missing_counts = state.setdefault("missing_buy_attempts", {})
+                            missing_counts[token_id] = int(missing_counts.get(token_id) or 0) + 1
+                            if missing_counts[token_id] > missing_limit:
+                                logger.warning(
+                                    "[SKIP] token_id=%s reason=missing_data_buy_limit count=%s "
+                                    "limit=%s",
+                                    token_id,
+                                    missing_counts[token_id],
+                                    missing_limit,
+                                )
+                                continue
                     if place_backoff_active and any(
                         act.get("type") == "place" for act in actions
                     ):
@@ -2351,7 +2372,7 @@ def main() -> None:
                             last_seen,
                             hold_sec,
                         )
-                        my_target = min(cap_shares, prev_desired)
+                        my_target = min(cap_shares, cap_shares_notional, prev_desired)
             delta = my_target - my_shares
             prev_intent = state.get("intent_keys", {}).get(token_id)
             if delta > eps:
