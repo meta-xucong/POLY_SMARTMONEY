@@ -576,6 +576,7 @@ def _update_intent_state(
 
 def _action_identity(action: Dict[str, object]) -> str:
     raw = action.get("raw") or {}
+    source = str(action.get("_source_target") or "").strip().lower()
     token_id = str(action.get("token_id") or "").strip()
     side = str(action.get("side") or "").strip().upper()
     price = action.get("price")
@@ -585,11 +586,14 @@ def _action_identity(action: Dict[str, object]) -> str:
         log_index = raw.get("logIndex") or raw.get("log_index")
         fill_id = raw.get("fillId") or raw.get("fill_id")
         if tx_hash and log_index is not None:
-            return f"tx:{tx_hash}:{log_index}"
+            base = f"tx:{tx_hash}:{log_index}"
+            return f"{source}:{base}" if source else base
         if fill_id is not None:
-            return f"fill:{fill_id}"
+            base = f"fill:{fill_id}"
+            return f"{source}:{base}" if source else base
         if tx_hash:
-            return f"tx:{tx_hash}:{token_id}:{side}:{price}:{size}"
+            base = f"tx:{tx_hash}:{token_id}:{side}:{price}:{size}"
+            return f"{source}:{base}" if source else base
     token_id = action.get("token_id") or ""
     side = action.get("side") or ""
     size = action.get("size") or ""
@@ -598,7 +602,8 @@ def _action_identity(action: Dict[str, object]) -> str:
     price = ""
     if isinstance(raw, dict):
         price = raw.get("price") or raw.get("fillPrice") or raw.get("avgPrice") or ""
-    return f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
+    base = f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
+    return f"{source}:{base}" if source else base
 
 
 def _extract_token_id_from_raw(raw: object) -> Optional[str]:
@@ -1291,6 +1296,7 @@ def main() -> None:
             t_state = _ensure_target_state(state, address)
             should_poll = address in selected_addresses
             has_new_actions_for_target = False
+            weight = float(entry.get("weight") or 1.0)
 
             if should_poll:
                 spacing = float(target_request_spacing_sec or 0.0)
@@ -1348,6 +1354,7 @@ def main() -> None:
                     seen_action_set = {str(item) for item in seen_action_ids}
                     filtered_actions: list[Dict[str, object]] = []
                     for action in target_actions:
+                        action["_source_target"] = address
                         action_id = _action_identity(action)
                         if action_id in seen_action_set:
                             continue
@@ -1363,7 +1370,12 @@ def main() -> None:
                     miss_samples: list[list[str]] = []
                     for action in target_actions:
                         side = str(action.get("side") or "").upper()
-                        size = float(action.get("size") or 0.0)
+                        raw_size = float(action.get("size") or 0.0)
+                        size = raw_size * weight
+                        if weight != 1.0:
+                            action["_raw_size"] = raw_size
+                            action["_weight"] = weight
+                        action["size"] = size
 
                         token_id = action.get("token_id") or _extract_token_id_from_raw(
                             action.get("raw") or {}
@@ -1426,8 +1438,6 @@ def main() -> None:
                                 latest_action_ms,
                             )
 
-                    for action in target_actions:
-                        action["_source_target"] = address
                     actions_list.extend(target_actions)
                     has_new_actions_for_target = bool(target_actions)
                 except Exception as exc:
@@ -1535,6 +1545,7 @@ def main() -> None:
         has_new_actions = bool(actions_list)
         actions_unreliable_until = 0
         actions_replay_from_ms = 0
+        unreliable_targets = 0
         for entry in target_entries:
             t_state = _ensure_target_state(state, entry["address"])
             actions_unreliable_until = max(
@@ -1543,7 +1554,14 @@ def main() -> None:
             actions_replay_from_ms = max(
                 actions_replay_from_ms, int(t_state.get("actions_replay_from_ms") or 0)
             )
-        if actions_unreliable_until > 0:
+            if int(t_state.get("actions_unreliable_until") or 0) > now_ts:
+                unreliable_targets += 1
+        total_targets = max(1, len(target_entries))
+        min_unreliable = int(cfg.get("actions_unreliable_min_targets") or 1)
+        ratio_unreliable = float(cfg.get("actions_unreliable_ratio") or 0.0)
+        if ratio_unreliable > 0:
+            min_unreliable = max(min_unreliable, int(total_targets * ratio_unreliable + 0.999))
+        if unreliable_targets >= min_unreliable and actions_unreliable_until > 0:
             state["actions_unreliable_until"] = actions_unreliable_until
         else:
             state.pop("actions_unreliable_until", None)
@@ -2023,6 +2041,20 @@ def main() -> None:
             buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
             sell_sum = float(sell_sum_by_token.get(token_id, 0.0))
             action_seen = has_buy or has_sell
+            conflict_eps = float(cfg.get("conflict_action_eps") or eps)
+            if has_buy and has_sell and abs(buy_sum - sell_sum) <= conflict_eps:
+                logger.info(
+                    "[ACT_CONFLICT] token_id=%s buy_sum=%s sell_sum=%s eps=%s -> ignore_actions",
+                    token_id,
+                    buy_sum,
+                    sell_sum,
+                    conflict_eps,
+                )
+                has_buy = False
+                has_sell = False
+                buy_sum = 0.0
+                sell_sum = 0.0
+                action_seen = False
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
