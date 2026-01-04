@@ -704,6 +704,8 @@ def main() -> None:
         state.setdefault("open_orders_all", {})
         state.setdefault("cumulative_buy_usd_total", 0.0)
         state.setdefault("cumulative_buy_usd_by_token", {})
+        state.setdefault("seen_my_trade_ids", [])
+        state.setdefault("my_trades_cursor_ms", 0)
     state.setdefault("managed_order_ids", [])
     state.setdefault("intent_keys", {})
     state.setdefault("token_map", {})
@@ -911,6 +913,10 @@ def main() -> None:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("target_actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+    if int(state.get("my_trades_cursor_ms") or 0) <= 0:
+        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
+    if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
+        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
 
     missing_notice_tokens: set[str] = set()
 
@@ -1205,6 +1211,67 @@ def main() -> None:
                     )
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
+
+        try:
+            my_trades_cursor_ms = int(state.get("my_trades_cursor_ms") or 0)
+            my_trades, my_trades_info = fetch_target_trades_since(
+                data_client,
+                cfg["my_address"],
+                my_trades_cursor_ms,
+                page_size=actions_page_size,
+                max_offset=actions_max_offset,
+            )
+            seen_my_trade_ids = state.setdefault("seen_my_trade_ids", [])
+            seen_my_trade_set = {str(item) for item in seen_my_trade_ids}
+            filtered_my_trades: list[Dict[str, object]] = []
+            for trade in my_trades:
+                trade_id = _action_identity(trade)
+                if trade_id in seen_my_trade_set:
+                    continue
+                filtered_my_trades.append(trade)
+                seen_my_trade_ids.append(trade_id)
+                seen_my_trade_set.add(trade_id)
+            max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
+            if len(seen_my_trade_ids) > max_seen:
+                del seen_my_trade_ids[:-max_seen]
+            my_trades = filtered_my_trades
+
+            miss_trade_token = 0
+            cumulative_total_usd = float(state.get("cumulative_buy_usd_total") or 0.0)
+            cumulative_by_token = state.get("cumulative_buy_usd_by_token")
+            if not isinstance(cumulative_by_token, dict):
+                cumulative_by_token = {}
+                state["cumulative_buy_usd_by_token"] = cumulative_by_token
+            for trade in my_trades:
+                side = str(trade.get("side") or "").upper()
+                if side != "BUY":
+                    continue
+                size = float(trade.get("size") or 0.0)
+                price = float(trade.get("price") or 0.0)
+                if size <= 0 or price <= 0:
+                    continue
+                token_id = trade.get("token_id") or _extract_token_id_from_raw(
+                    trade.get("raw") or {}
+                )
+                if not token_id:
+                    miss_trade_token += 1
+                    continue
+                token_id = str(token_id)
+                usd = size * price
+                cumulative_total_usd += usd
+                cumulative_by_token[token_id] = float(cumulative_by_token.get(token_id) or 0.0) + usd
+            state["cumulative_buy_usd_total"] = cumulative_total_usd
+            if miss_trade_token:
+                logger.warning(
+                    "[MY_TRADES] token_missing=%s total=%s",
+                    miss_trade_token,
+                    len(my_trades),
+                )
+            latest_trade_ms = int(my_trades_info.get("latest_ms") or 0)
+            if latest_trade_ms > my_trades_cursor_ms:
+                state["my_trades_cursor_ms"] = latest_trade_ms
+        except Exception as exc:
+            logger.exception("[ERR] fetch my trades failed: %s", exc)
 
         has_new_actions = bool(actions_list)
         target_cache_mode = "nonce" if has_new_actions else target_cache_bust_mode
