@@ -1545,6 +1545,7 @@ def main() -> None:
         has_new_actions = bool(actions_list)
         actions_unreliable_until = 0
         actions_replay_from_ms = 0
+        unreliable_targets = 0
         for entry in target_entries:
             t_state = _ensure_target_state(state, entry["address"])
             actions_unreliable_until = max(
@@ -1553,7 +1554,14 @@ def main() -> None:
             actions_replay_from_ms = max(
                 actions_replay_from_ms, int(t_state.get("actions_replay_from_ms") or 0)
             )
-        if actions_unreliable_until > 0:
+            if int(t_state.get("actions_unreliable_until") or 0) > now_ts:
+                unreliable_targets += 1
+        total_targets = max(1, len(target_entries))
+        min_unreliable = int(cfg.get("actions_unreliable_min_targets") or 1)
+        ratio_unreliable = float(cfg.get("actions_unreliable_ratio") or 0.0)
+        if ratio_unreliable > 0:
+            min_unreliable = max(min_unreliable, int(total_targets * ratio_unreliable + 0.999))
+        if unreliable_targets >= min_unreliable and actions_unreliable_until > 0:
             state["actions_unreliable_until"] = actions_unreliable_until
         else:
             state.pop("actions_unreliable_until", None)
@@ -2033,6 +2041,20 @@ def main() -> None:
             buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
             sell_sum = float(sell_sum_by_token.get(token_id, 0.0))
             action_seen = has_buy or has_sell
+            conflict_eps = float(cfg.get("conflict_action_eps") or eps)
+            if has_buy and has_sell and abs(buy_sum - sell_sum) <= conflict_eps:
+                logger.info(
+                    "[ACT_CONFLICT] token_id=%s buy_sum=%s sell_sum=%s eps=%s -> ignore_actions",
+                    token_id,
+                    buy_sum,
+                    sell_sum,
+                    conflict_eps,
+                )
+                has_buy = False
+                has_sell = False
+                buy_sum = 0.0
+                sell_sum = 0.0
+                action_seen = False
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
