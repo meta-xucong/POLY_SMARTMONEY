@@ -1480,23 +1480,54 @@ def main() -> None:
                     "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
                 )
                 try:
-                    if actions_source in ("trade", "trades"):
-                        target_actions, actions_info = fetch_target_trades_since(
-                            data_client,
-                            address,
-                            actions_cursor_ms,
-                            page_size=actions_page_size,
-                            max_offset=actions_max_offset,
-                            taker_only=bool(cfg.get("actions_taker_only", False)),
-                        )
-                    else:
-                        target_actions, actions_info = fetch_target_actions_since(
-                            data_client,
-                            address,
-                            actions_cursor_ms,
-                            page_size=actions_page_size,
-                            max_offset=actions_max_offset,
-                        )
+                    target_actions = []
+                    actions_info: Dict[str, object] = {}
+                    retry_sleep_sec = 1.0
+                    for attempt in range(2):
+                        try:
+                            if actions_source in ("trade", "trades"):
+                                target_actions, actions_info = fetch_target_trades_since(
+                                    data_client,
+                                    address,
+                                    actions_cursor_ms,
+                                    page_size=actions_page_size,
+                                    max_offset=actions_max_offset,
+                                    taker_only=bool(cfg.get("actions_taker_only", False)),
+                                )
+                            else:
+                                target_actions, actions_info = fetch_target_actions_since(
+                                    data_client,
+                                    address,
+                                    actions_cursor_ms,
+                                    page_size=actions_page_size,
+                                    max_offset=actions_max_offset,
+                                )
+                        except Exception as exc:
+                            if attempt == 0:
+                                logger.warning(
+                                    "[ACTIONS] target=%s fetch failed, retry once after %.1fs: %s",
+                                    _shorten_address(address),
+                                    retry_sleep_sec,
+                                    exc,
+                                )
+                                time.sleep(retry_sleep_sec)
+                                continue
+                            raise
+                        actions_ok = bool(actions_info.get("ok"))
+                        actions_incomplete = bool(actions_info.get("incomplete"))
+                        if (not actions_ok) or actions_incomplete:
+                            if attempt == 0:
+                                logger.warning(
+                                    "[ACTIONS] target=%s unreliable fetch ok=%s incomplete=%s "
+                                    "retry once after %.1fs",
+                                    _shorten_address(address),
+                                    actions_ok,
+                                    actions_incomplete,
+                                    retry_sleep_sec,
+                                )
+                                time.sleep(retry_sleep_sec)
+                                continue
+                        break
                     seen_action_ids = t_state.setdefault(seen_actions_key, [])
                     seen_action_set = {str(item) for item in seen_action_ids}
                     filtered_actions: list[Dict[str, object]] = []
