@@ -842,13 +842,41 @@ def main() -> None:
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
 
         try:
-            actions_list, actions_info = fetch_target_actions_since(
-                data_client,
-                cfg["target_address"],
-                actions_cursor_ms,
-                page_size=actions_page_size,
-                max_offset=actions_max_offset,
-            )
+            actions_list = []
+            actions_info: Dict[str, object] = {}
+            retry_sleep_sec = 1.0
+            for attempt in range(2):
+                try:
+                    actions_list, actions_info = fetch_target_actions_since(
+                        data_client,
+                        cfg["target_address"],
+                        actions_cursor_ms,
+                        page_size=actions_page_size,
+                        max_offset=actions_max_offset,
+                    )
+                except Exception as exc:
+                    if attempt == 0:
+                        logger.warning(
+                            "[ACTIONS] fetch failed, retry once after %.1fs: %s",
+                            retry_sleep_sec,
+                            exc,
+                        )
+                        time.sleep(retry_sleep_sec)
+                        continue
+                    raise
+                actions_ok = bool(actions_info.get("ok"))
+                actions_incomplete = bool(actions_info.get("incomplete"))
+                if (not actions_ok) or actions_incomplete:
+                    if attempt == 0:
+                        logger.warning(
+                            "[ACTIONS] unreliable fetch ok=%s incomplete=%s retry once after %.1fs",
+                            actions_ok,
+                            actions_incomplete,
+                            retry_sleep_sec,
+                        )
+                        time.sleep(retry_sleep_sec)
+                        continue
+                break
             seen_action_ids = state.setdefault("seen_action_ids", [])
             seen_action_set = {str(item) for item in seen_action_ids}
             filtered_actions: list[Dict[str, object]] = []
