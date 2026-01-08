@@ -959,19 +959,6 @@ def apply_actions(
         if order_id:
             if state is not None:
                 token_id = str(action.get("token_id") or "")
-                if side_u == "BUY" and price > 0 and size_for_record > 0:
-                    usd = abs(size_for_record) * price
-                    if usd > 0:
-                        state["cumulative_buy_usd_total"] = float(
-                            state.get("cumulative_buy_usd_total") or 0.0
-                        ) + float(usd)
-                        cumulative_by_token = state.get("cumulative_buy_usd_by_token")
-                        if not isinstance(cumulative_by_token, dict):
-                            cumulative_by_token = {}
-                            state["cumulative_buy_usd_by_token"] = cumulative_by_token
-                        cumulative_by_token[token_id] = float(
-                            cumulative_by_token.get(token_id) or 0.0
-                        ) + float(usd)
                 for key_prefix in ("sell_insufficient", "sell_insufficient_shrink"):
                     state.get("fail_counts", {}).pop(f"{key_prefix}:{token_id}", None)
                     state.get("place_fail_lastlog", {}).pop(f"{key_prefix}:{token_id}", None)
