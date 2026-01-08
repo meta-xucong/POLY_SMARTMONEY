@@ -1295,6 +1295,34 @@ def main() -> None:
     while True:
         now_ts = int(time.time())
         now_wall = time.time()
+        active_target_entries: list[Dict[str, Any]] = []
+        disabled_targets: list[tuple[str, int, str]] = []
+        _, _, _, _, disable_log_every = _target_disable_params(cfg)
+
+        for entry in target_entries:
+            addr = entry["address"]
+            t_state = _ensure_target_state(state, addr)
+            if _target_is_disabled(t_state, now_ts):
+                until = int(t_state.get("disabled_until_ts") or 0)
+                reason = str(t_state.get("disabled_reason") or "")
+                last_log = int(t_state.get("disabled_log_ts") or 0)
+                if now_ts - last_log >= disable_log_every:
+                    logger.warning(
+                        "[TARGET] disabled target=%s until=%s reason=%s",
+                        _shorten_address(addr),
+                        until,
+                        reason,
+                    )
+                    t_state["disabled_log_ts"] = now_ts
+                disabled_targets.append((addr, until, reason))
+                continue
+            active_target_entries.append(entry)
+
+        if not active_target_entries:
+            logger.warning("[SAFE] all targets disabled or unavailable, skip this loop")
+            save_state(args.state, state)
+            time.sleep(_get_poll_interval())
+            continue
         if now_wall - last_config_reload_ts >= max(config_reload_sec, 1):
             reason = "interval"
             try:
