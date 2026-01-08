@@ -228,6 +228,53 @@ def _shorten_address(address: str) -> str:
     return f"{text[:6]}..{text[-4:]}"
 
 
+def _target_disable_params(cfg: Dict[str, Any]) -> tuple[set[int], int, int, int, int]:
+    hard_status = cfg.get("target_disable_hard_http_status") or [404, 410]
+    hard_set = {
+        int(value)
+        for value in hard_status
+        if isinstance(value, (int, float, str)) and str(value).isdigit()
+    }
+    fail_streak = int(cfg.get("target_disable_fail_streak") or 10)
+    cooldown = int(cfg.get("target_disable_cooldown_sec") or 21600)
+    hard_cooldown = int(cfg.get("target_disable_hard_cooldown_sec") or 604800)
+    log_every = int(cfg.get("target_disable_log_every_sec") or 300)
+    return hard_set, fail_streak, cooldown, hard_cooldown, log_every
+
+
+def _target_is_disabled(t_state: Dict[str, Any], now_ts: int) -> bool:
+    return int(t_state.get("disabled_until_ts") or 0) > now_ts
+
+
+def _target_mark_ok(t_state: Dict[str, Any], now_ts: int) -> None:
+    t_state["fail_streak"] = 0
+    t_state["last_ok_ts"] = now_ts
+
+
+def _target_mark_fail_and_maybe_disable(
+    t_state: Dict[str, Any],
+    now_ts: int,
+    *,
+    cfg: Dict[str, Any],
+    http_status: int | None,
+    reason: str,
+) -> None:
+    hard_set, streak_limit, cooldown, hard_cooldown, _ = _target_disable_params(cfg)
+
+    t_state["last_fail_ts"] = now_ts
+    t_state["fail_streak"] = int(t_state.get("fail_streak") or 0) + 1
+
+    if http_status is not None and int(http_status) in hard_set:
+        t_state["disabled_until_ts"] = now_ts + hard_cooldown
+        t_state["disabled_reason"] = f"{reason}:http_{int(http_status)}"
+        return
+
+    if int(t_state["fail_streak"]) >= streak_limit:
+        t_state["disabled_until_ts"] = now_ts + cooldown
+        t_state["disabled_reason"] = f"{reason}:fail_streak>={streak_limit}"
+        t_state["fail_streak"] = 0
+
+
 def _setup_logging(
     cfg: Dict[str, Any],
     target_label: str,
@@ -832,6 +879,18 @@ def _ensure_target_state(state: Dict[str, Any], address: str) -> Dict[str, Any]:
         t_state["actions_unreliable_until"] = 0
     if not isinstance(t_state.get("last_positions_ts"), (int, float)):
         t_state["last_positions_ts"] = 0
+    if not isinstance(t_state.get("fail_streak"), (int, float)):
+        t_state["fail_streak"] = 0
+    if not isinstance(t_state.get("last_ok_ts"), (int, float)):
+        t_state["last_ok_ts"] = 0
+    if not isinstance(t_state.get("last_fail_ts"), (int, float)):
+        t_state["last_fail_ts"] = 0
+    if not isinstance(t_state.get("disabled_until_ts"), (int, float)):
+        t_state["disabled_until_ts"] = 0
+    if not isinstance(t_state.get("disabled_reason"), str):
+        t_state["disabled_reason"] = ""
+    if not isinstance(t_state.get("disabled_log_ts"), (int, float)):
+        t_state["disabled_log_ts"] = 0
     return t_state
 
 
@@ -1245,6 +1304,32 @@ def main() -> None:
             except Exception:
                 reason = "interval"
             _reload_config(reason)
+        active_target_entries: list[Dict[str, Any]] = []
+        _, _, _, _, disable_log_every = _target_disable_params(cfg)
+
+        for entry in target_entries:
+            addr = entry["address"]
+            t_state = _ensure_target_state(state, addr)
+            if _target_is_disabled(t_state, now_ts):
+                until = int(t_state.get("disabled_until_ts") or 0)
+                reason = str(t_state.get("disabled_reason") or "")
+                last_log = int(t_state.get("disabled_log_ts") or 0)
+                if now_ts - last_log >= disable_log_every:
+                    logger.warning(
+                        "[TARGET] disabled target=%s until=%s reason=%s",
+                        _shorten_address(addr),
+                        until,
+                        reason,
+                    )
+                    t_state["disabled_log_ts"] = now_ts
+                continue
+            active_target_entries.append(entry)
+
+        if not active_target_entries:
+            logger.warning("[SAFE] all targets disabled, skip loop")
+            save_state(args.state, state)
+            time.sleep(_get_poll_interval())
+            continue
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         should_sync_orders = True
         if open_orders_refresh_sec > 0 and last_open_orders_sync_ts > 0:
@@ -1412,7 +1497,7 @@ def main() -> None:
 
         hard_cap = positions_limit * positions_max_pages
         eligible_targets: List[Dict[str, Any]] = []
-        for entry in target_entries:
+        for entry in active_target_entries:
             t_state = _ensure_target_state(state, entry["address"])
             if now_ts >= int(t_state.get("next_poll_ts") or 0):
                 eligible_targets.append(entry)
@@ -1432,7 +1517,7 @@ def main() -> None:
         last_request_wall = 0.0
         selected_addresses = {entry["address"] for entry in selected_targets}
 
-        for entry in target_entries:
+        for entry in active_target_entries:
             address = entry["address"]
             t_state = _ensure_target_state(state, address)
             should_poll = address in selected_addresses
@@ -1636,6 +1721,27 @@ def main() -> None:
                         cache_bust_mode=target_cache_mode,
                         header_keys=header_keys,
                     )
+                    http_status = target_info.get("http_status")
+                    if target_info.get("ok"):
+                        _target_mark_ok(t_state, now_ts)
+                    else:
+                        hs = int(http_status) if isinstance(http_status, (int, float)) else None
+                        _target_mark_fail_and_maybe_disable(
+                            t_state,
+                            now_ts,
+                            cfg=cfg,
+                            http_status=hs,
+                            reason="positions",
+                        )
+                        if _target_is_disabled(t_state, now_ts):
+                            t_state["last_positions_by_token_key"] = {}
+                            t_state["last_positions_ts"] = 0
+                            logger.warning(
+                                "[TARGET] auto-disabled target=%s until=%s reason=%s",
+                                _shorten_address(address),
+                                int(t_state.get("disabled_until_ts") or 0),
+                                str(t_state.get("disabled_reason") or ""),
+                            )
                     if len(target_pos) >= hard_cap:
                         target_info["incomplete"] = True
                         logger.info(
@@ -1661,19 +1767,35 @@ def main() -> None:
                         _shorten_address(address),
                         exc,
                     )
+                    target_info = {"ok": False, "incomplete": True, "error_msg": str(exc)}
+                    _target_mark_fail_and_maybe_disable(
+                        t_state,
+                        now_ts,
+                        cfg=cfg,
+                        http_status=None,
+                        reason="positions_exc",
+                    )
+                    if _target_is_disabled(t_state, now_ts):
+                        t_state["last_positions_by_token_key"] = {}
+                        t_state["last_positions_ts"] = 0
             target_infos[address] = target_info
             if should_poll:
                 target_polled.add(address)
 
         target_positions_by_token_key: Dict[str, Dict[str, object]] = {}
         target_cached_count = 0
-        for entry in target_entries:
+        for entry in active_target_entries:
             address = entry["address"]
             t_state = _ensure_target_state(state, address)
+            if _target_is_disabled(t_state, now_ts):
+                continue
             pos_map = t_state.get("last_positions_by_token_key")
-            if not isinstance(pos_map, dict) or not pos_map:
+            ts = int(t_state.get("last_positions_ts") or 0)
+            if not isinstance(pos_map, dict) or ts <= 0:
                 continue
             target_cached_count += 1
+            if not pos_map:
+                continue
             weight = float(entry.get("weight") or 1.0)
             for token_key, payload in pos_map.items():
                 if isinstance(payload, dict):
@@ -1701,7 +1823,7 @@ def main() -> None:
         target_info = {
             "ok": target_cached_count > 0,
             "incomplete": False,
-            "targets_total": len(target_entries),
+            "targets_total": len(active_target_entries),
             "targets_polled": len(target_polled),
         }
         if actions_list:
@@ -1779,7 +1901,7 @@ def main() -> None:
         actions_unreliable_until = 0
         actions_replay_from_ms = 0
         unreliable_targets = 0
-        for entry in target_entries:
+        for entry in active_target_entries:
             t_state = _ensure_target_state(state, entry["address"])
             actions_unreliable_until = max(
                 actions_unreliable_until, int(t_state.get("actions_unreliable_until") or 0)
@@ -1789,7 +1911,7 @@ def main() -> None:
             )
             if int(t_state.get("actions_unreliable_until") or 0) > now_ts:
                 unreliable_targets += 1
-        total_targets = max(1, len(target_entries))
+        total_targets = max(1, len(active_target_entries))
         min_unreliable = int(cfg.get("actions_unreliable_min_targets") or 1)
         ratio_unreliable = float(cfg.get("actions_unreliable_ratio") or 0.0)
         if ratio_unreliable > 0:
@@ -1860,7 +1982,23 @@ def main() -> None:
             last_heartbeat_ts = now_ts
 
         if not target_info.get("ok"):
-            logger.warning("[SAFE] target positions 不完整或不可用，跳过本轮执行")
+            bad: list[str] = []
+            for entry in active_target_entries:
+                addr = entry["address"]
+                t_state = _ensure_target_state(state, addr)
+                info = target_infos.get(addr) or {}
+                error_msg = info.get("error_msg") or info.get("error")
+                bad.append(
+                    f"{_shorten_address(addr)} "
+                    f"disabled_until={int(t_state.get('disabled_until_ts') or 0)} "
+                    f"fail_streak={int(t_state.get('fail_streak') or 0)} "
+                    f"last_pos_ts={int(t_state.get('last_positions_ts') or 0)} "
+                    f"ok={info.get('ok')} http={info.get('http_status')} err={error_msg}"
+                )
+            logger.warning(
+                "[SAFE] target positions unavailable; details=%s",
+                " | ".join(bad),
+            )
             save_state(args.state, state)
             time.sleep(_get_poll_interval())
             continue

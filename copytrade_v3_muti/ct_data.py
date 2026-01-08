@@ -186,6 +186,18 @@ def _fetch_positions_norm_http(
             ok = False
             incomplete = True
             last_error = str(exc)
+            resp_obj = getattr(exc, "response", None)
+            if resp_obj is not None:
+                try:
+                    last_status = getattr(resp_obj, "status_code", last_status)
+                    last_url = getattr(resp_obj, "url", last_url)
+                    hdrs = getattr(resp_obj, "headers", None)
+                    if hdrs is not None:
+                        last_headers = dict(hdrs)
+                        if pages == 0 and not first_headers:
+                            first_headers = dict(hdrs)
+                except Exception:
+                    pass
             break
 
         if pages == 0:
