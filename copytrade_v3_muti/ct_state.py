@@ -37,8 +37,6 @@ DEFAULT_STATE: Dict[str, Any] = {
     "targets": {},
     "target_addresses": [],
     "target_round_robin_index": 0,
-    "cumulative_buy_usd_total": 0.0,
-    "cumulative_buy_usd_by_token": {},
     "seen_my_trade_ids": [],
     "my_trades_cursor_ms": 0,
     "my_trades_unreliable_until": 0,
@@ -135,14 +133,6 @@ def load_state(path: str) -> Dict[str, Any]:
         state["target_round_robin_index"], (int, float)
     ):
         state["target_round_robin_index"] = 0
-    if "cumulative_buy_usd_total" not in state or not isinstance(
-        state["cumulative_buy_usd_total"], (int, float)
-    ):
-        state["cumulative_buy_usd_total"] = 0.0
-    if "cumulative_buy_usd_by_token" not in state or not isinstance(
-        state["cumulative_buy_usd_by_token"], dict
-    ):
-        state["cumulative_buy_usd_by_token"] = {}
     if "seen_my_trade_ids" not in state or not isinstance(state["seen_my_trade_ids"], list):
         state["seen_my_trade_ids"] = []
     if "my_trades_cursor_ms" not in state or not isinstance(
