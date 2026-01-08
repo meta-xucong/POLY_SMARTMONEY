@@ -387,8 +387,6 @@ def _shrink_on_risk_limit(
     planned_total: float,
     max_per_token: float,
     planned_token: float,
-    cumulative_total: float,
-    cumulative_token: float,
     min_usd: float,
     min_shares: float,
     token_key: str,
@@ -404,8 +402,8 @@ def _shrink_on_risk_limit(
         return None
 
     order_usd = abs(size) * price
-    cap_total_remaining = (max_total - cumulative_total) if max_total > 0 else None
-    cap_token_remaining = (max_per_token - cumulative_token) if max_per_token > 0 else None
+    cap_total_remaining = (max_total - planned_total) if max_total > 0 else None
+    cap_token_remaining = (max_per_token - planned_token) if max_per_token > 0 else None
 
     candidates = [order_usd]
     if cap_total_remaining is not None:
@@ -686,6 +684,8 @@ def main() -> None:
         state["open_orders_all"] = []
         state["seen_action_ids"] = []
         state["target_actions_cursor_ms"] = 0
+    state.pop("cumulative_buy_usd_total", None)
+    state.pop("cumulative_buy_usd_by_token", None)
     run_start_ms = int(time.time() * 1000)
     state["run_start_ms"] = run_start_ms
     logger.info("[STATE] path=%s run_start_ms=%s", args.state, run_start_ms)
@@ -702,8 +702,6 @@ def main() -> None:
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
     state.setdefault("open_orders_all", {})
-    state.setdefault("cumulative_buy_usd_total", 0.0)
-    state.setdefault("cumulative_buy_usd_by_token", {})
     state.setdefault("seen_my_trade_ids", [])
     state.setdefault("my_trades_cursor_ms", 0)
     state.setdefault("my_trades_unreliable_until", 0)
@@ -1271,30 +1269,15 @@ def main() -> None:
             my_trades = filtered_my_trades
 
             miss_trade_token = 0
-            cumulative_total_usd = float(state.get("cumulative_buy_usd_total") or 0.0)
-            cumulative_by_token = state.get("cumulative_buy_usd_by_token")
-            if not isinstance(cumulative_by_token, dict):
-                cumulative_by_token = {}
-                state["cumulative_buy_usd_by_token"] = cumulative_by_token
             for trade in my_trades:
                 side = str(trade.get("side") or "").upper()
                 if side != "BUY":
-                    continue
-                size = float(trade.get("size") or 0.0)
-                price = float(trade.get("price") or 0.0)
-                if size <= 0 or price <= 0:
                     continue
                 token_id = trade.get("token_id") or _extract_token_id_from_raw(
                     trade.get("raw") or {}
                 )
                 if not token_id:
                     miss_trade_token += 1
-                    continue
-                token_id = str(token_id)
-                usd = size * price
-                cumulative_total_usd += usd
-                cumulative_by_token[token_id] = float(cumulative_by_token.get(token_id) or 0.0) + usd
-            state["cumulative_buy_usd_total"] = cumulative_total_usd
             if miss_trade_token:
                 logger.warning(
                     "[MY_TRADES] token_missing=%s total=%s",
@@ -2151,12 +2134,6 @@ def main() -> None:
                     pending_cancel_actions = []
                     pending_cancel_usd = 0.0
                     token_planned_before = float(planned_by_token_usd.get(token_id, 0.0))
-                    cumulative_total_usd = float(state.get("cumulative_buy_usd_total") or 0.0)
-                    cumulative_by_token = state.get("cumulative_buy_usd_by_token")
-                    if not isinstance(cumulative_by_token, dict):
-                        cumulative_by_token = {}
-                        state["cumulative_buy_usd_by_token"] = cumulative_by_token
-                    cumulative_token_usd = float(cumulative_by_token.get(token_id) or 0.0)
 
                     for act in actions:
                         act_type = act.get("type")
@@ -2199,8 +2176,8 @@ def main() -> None:
                             side=side,
                             planned_total_notional=planned_total_notional,
                             planned_token_notional=planned_token_notional,
-                            cumulative_total_usd=cumulative_total_usd,
-                            cumulative_token_usd=cumulative_token_usd,
+                            cumulative_total_usd=None,
+                            cumulative_token_usd=None,
                         )
                         if not ok:
                             resized = _shrink_on_risk_limit(
@@ -2209,8 +2186,6 @@ def main() -> None:
                                 planned_total_notional,
                                 float(cfg_for_action.get("max_notional_per_token") or 0.0),
                                 planned_token_notional,
-                                cumulative_total_usd,
-                                cumulative_token_usd,
                                 float(cfg_for_action.get("min_order_usd") or 0.0),
                                 float(cfg_for_action.get("min_order_shares") or 0.0),
                                 token_key,
@@ -2239,8 +2214,8 @@ def main() -> None:
                                 side=side,
                                 planned_total_notional=planned_total_notional,
                                 planned_token_notional=planned_token_notional,
-                                cumulative_total_usd=cumulative_total_usd,
-                                cumulative_token_usd=cumulative_token_usd,
+                                cumulative_total_usd=None,
+                                cumulative_token_usd=None,
                             )
                             if not ok2:
                                 if has_any_place and pending_cancel_actions:
@@ -2815,12 +2790,6 @@ def main() -> None:
             pending_cancel_actions = []
             pending_cancel_usd = 0.0
             token_planned_before = float(planned_by_token_usd.get(token_id, 0.0))
-            cumulative_total_usd = float(state.get("cumulative_buy_usd_total") or 0.0)
-            cumulative_by_token = state.get("cumulative_buy_usd_by_token")
-            if not isinstance(cumulative_by_token, dict):
-                cumulative_by_token = {}
-                state["cumulative_buy_usd_by_token"] = cumulative_by_token
-            cumulative_token_usd = float(cumulative_by_token.get(token_id) or 0.0)
 
             for act in actions:
                 act_type = act.get("type")
@@ -2863,8 +2832,8 @@ def main() -> None:
                     side=side,
                     planned_total_notional=planned_total_notional,
                     planned_token_notional=planned_token_notional,
-                    cumulative_total_usd=cumulative_total_usd,
-                    cumulative_token_usd=cumulative_token_usd,
+                    cumulative_total_usd=None,
+                    cumulative_token_usd=None,
                 )
                 if not ok:
                     resized = _shrink_on_risk_limit(
@@ -2873,8 +2842,6 @@ def main() -> None:
                         planned_total_notional,
                         float(cfg_for_action.get("max_notional_per_token") or 0.0),
                         planned_token_notional,
-                        cumulative_total_usd,
-                        cumulative_token_usd,
                         float(cfg_for_action.get("min_order_usd") or 0.0),
                         float(cfg_for_action.get("min_order_shares") or 0.0),
                         token_key,
@@ -2903,8 +2870,8 @@ def main() -> None:
                         side=side,
                         planned_total_notional=planned_total_notional,
                         planned_token_notional=planned_token_notional,
-                        cumulative_total_usd=cumulative_total_usd,
-                        cumulative_token_usd=cumulative_token_usd,
+                        cumulative_total_usd=None,
+                        cumulative_token_usd=None,
                     )
                     if not ok2:
                         if has_any_place and pending_cancel_actions:
