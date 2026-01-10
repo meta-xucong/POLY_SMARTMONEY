@@ -259,6 +259,7 @@ def _calc_used_notional_totals(
     open_orders_by_token_id: Dict[str, list[dict]],
     mid_cache: Dict[str, float],
     max_position_usd_per_token: float,
+    fallback_mid_price: float,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]]]:
     total = 0.0
     by_token: Dict[str, float] = {}
@@ -269,6 +270,8 @@ def _calc_used_notional_totals(
         if mid <= 0:
             # 拿不到价格/无盘口：按 0 估值（不占用总仓位上限）
             mid = 0.0
+            if fallback_mid_price > 0 and abs(shares) > 0:
+                mid = fallback_mid_price
         if mid < 0:
             mid = 0.0
         elif mid > 1.0:
@@ -355,9 +358,14 @@ def _calc_planned_notional_totals(
     state: Dict[str, Any],
     now_ts: int,
     shadow_ttl_sec: int,
+    fallback_mid_price: float,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
     total, by_token, order_info_by_id = _calc_used_notional_totals(
-        my_by_token_id, open_orders_by_token_id, mid_cache, max_position_usd_per_token
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        fallback_mid_price,
     )
     shadow_total, shadow_by_token = _calc_shadow_buy_notional(
         state, now_ts, shadow_ttl_sec
@@ -374,11 +382,63 @@ def _calc_used_notional_total(
     open_orders_by_token_id: Dict[str, list[dict]],
     mid_cache: Dict[str, float],
     max_position_usd_per_token: float,
+    fallback_mid_price: float,
 ) -> float:
     total, _, _ = _calc_used_notional_totals(
-        my_by_token_id, open_orders_by_token_id, mid_cache, max_position_usd_per_token
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        fallback_mid_price,
     )
     return total
+
+
+def _calc_planned_notional_with_fallback(
+    my_by_token_id: Dict[str, float],
+    open_orders_by_token_id: Dict[str, list[dict]],
+    mid_cache: Dict[str, float],
+    max_position_usd_per_token: float,
+    state: Dict[str, Any],
+    now_ts: int,
+    shadow_ttl_sec: int,
+    fallback_mid_price: float,
+    logger: logging.Logger,
+) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
+    total, by_token, order_info_by_id, shadow_total = _calc_planned_notional_totals(
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        state,
+        now_ts,
+        shadow_ttl_sec,
+        0.0,
+    )
+    if total > 0 or not my_by_token_id or fallback_mid_price <= 0:
+        state["planned_zero_streak"] = 0
+        return total, by_token, order_info_by_id, shadow_total
+
+    total, by_token, order_info_by_id, shadow_total = _calc_planned_notional_totals(
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        state,
+        now_ts,
+        shadow_ttl_sec,
+        fallback_mid_price,
+    )
+    planned_zero_streak = int(state.get("planned_zero_streak") or 0) + 1
+    state["planned_zero_streak"] = planned_zero_streak
+    if planned_zero_streak <= 3 or planned_zero_streak % 20 == 0:
+        logger.warning(
+            "[ALERT] planned_notional_zero fallback_mid=%s positions=%s streak=%s",
+            fallback_mid_price,
+            len(my_by_token_id),
+            planned_zero_streak,
+        )
+    return total, by_token, order_info_by_id, shadow_total
 
 
 def _shrink_on_risk_limit(
@@ -807,6 +867,7 @@ def main() -> None:
     actions_max_offset = 10000
     heartbeat_interval_sec = 600
     config_reload_sec = 600
+    max_resolve_target_positions_per_loop = 20
     last_config_reload_ts = time.time()
     last_config_mtime: Optional[float] = None
     resolved_target_address = cfg["target_address"]
@@ -833,6 +894,7 @@ def main() -> None:
         nonlocal actions_max_offset
         nonlocal heartbeat_interval_sec
         nonlocal config_reload_sec
+        nonlocal max_resolve_target_positions_per_loop
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -855,6 +917,9 @@ def main() -> None:
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
         config_reload_sec = int(cfg.get("config_reload_sec") or 600)
+        max_resolve_target_positions_per_loop = int(
+            cfg.get("max_resolve_target_positions_per_loop") or 20
+        )
 
     def _refresh_log_level() -> None:
         level_name = str(cfg.get("log_level") or "INFO").upper()
@@ -1460,6 +1525,9 @@ def main() -> None:
         unresolved_target = 0
         resolved_by_cache = 0
         resolved_by_raw = 0
+        resolved_by_resolver = 0
+        resolver_fail = 0
+        resolve_target_budget = max(0, int(max_resolve_target_positions_per_loop or 0))
         for pos in target_pos:
             token_key = str(pos.get("token_key") or "")
             if not token_key:
@@ -1475,6 +1543,17 @@ def main() -> None:
                 if token_id:
                     token_map[token_key] = str(token_id)
                     resolved_by_raw += 1
+                elif resolve_target_budget > 0:
+                    resolve_target_budget -= 1
+                    try:
+                        token_id = resolve_token_id(token_key, pos, token_map)
+                    except Exception as exc:
+                        resolver_fail += 1
+                        logger.warning("[WARN] resolver 失败(target): %s -> %s", token_key, exc)
+                        unresolved_target += 1
+                        continue
+                    token_map[token_key] = str(token_id)
+                    resolved_by_resolver += 1
                 else:
                     unresolved_target += 1
                     continue
@@ -1485,9 +1564,10 @@ def main() -> None:
 
         if unresolved_target:
             logger.info(
-                "[POSMAP] target idmap cache=%d raw=%d pending=%d total=%d",
+                "[POSMAP] target idmap cache=%d raw=%d resolver=%d pending=%d total=%d",
                 resolved_by_cache,
                 resolved_by_raw,
+                resolved_by_resolver,
                 unresolved_target,
                 len(target_pos),
             )
@@ -1599,6 +1679,7 @@ def main() -> None:
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
         max_notional_total = float(cfg.get("max_notional_total") or 0.0)
+        fallback_mid_price = float(cfg.get("missing_mid_fallback_price") or 1.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
@@ -1626,7 +1707,7 @@ def main() -> None:
             planned_by_token_usd,
             order_info_by_id,
             shadow_buy_usd,
-        ) = _calc_planned_notional_totals(
+        ) = _calc_planned_notional_with_fallback(
             my_by_token_id,
             state.get("open_orders", {}),
             state.get("last_mid_price_by_token_id", {}),
@@ -1634,6 +1715,8 @@ def main() -> None:
             state,
             now_ts,
             shadow_ttl_sec,
+            fallback_mid_price,
+            logger,
         )
         open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
         open_buy_orders_usd += shadow_buy_usd
@@ -1720,7 +1803,7 @@ def main() -> None:
                                 planned_by_token_usd,
                                 order_info_by_id,
                                 _shadow_buy_usd,
-                            ) = _calc_planned_notional_totals(
+                            ) = _calc_planned_notional_with_fallback(
                                 my_by_token_id,
                                 state.get("open_orders", {}),
                                 state.get("last_mid_price_by_token_id", {}),
@@ -1728,6 +1811,8 @@ def main() -> None:
                                 state,
                                 now_ts,
                                 shadow_ttl_sec,
+                                fallback_mid_price,
+                                logger,
                             )
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
                     meta = cached.get("meta") or {}
@@ -1924,7 +2009,7 @@ def main() -> None:
                             planned_by_token_usd,
                             order_info_by_id,
                             _shadow_buy_usd,
-                        ) = _calc_planned_notional_totals(
+                        ) = _calc_planned_notional_with_fallback(
                             my_by_token_id,
                             state.get("open_orders", {}),
                             state.get("last_mid_price_by_token_id", {}),
@@ -1932,6 +2017,8 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
+                            logger,
                         )
                         if orphan_ignore_sec > 0:
                             state.setdefault("ignored_tokens", {})[token_id] = {
@@ -2097,7 +2184,7 @@ def main() -> None:
                                     planned_by_token_usd,
                                     order_info_by_id,
                                     _shadow_buy_usd,
-                                ) = _calc_planned_notional_totals(
+                                ) = _calc_planned_notional_with_fallback(
                                     my_by_token_id,
                                     state.get("open_orders", {}),
                                     state.get("last_mid_price_by_token_id", {}),
@@ -2105,6 +2192,8 @@ def main() -> None:
                                     state,
                                     now_ts,
                                     shadow_ttl_sec,
+                                    fallback_mid_price,
+                                    logger,
                                 )
                                 # NOTE: cancel-intent should NOT extend cooldown.
                                 # Cooldown is applied only on successful place actions.
@@ -2346,7 +2435,7 @@ def main() -> None:
                         planned_by_token_usd,
                         order_info_by_id,
                         _shadow_buy_usd,
-                    ) = _calc_planned_notional_totals(
+                    ) = _calc_planned_notional_with_fallback(
                         my_by_token_id,
                         state.get("open_orders", {}),
                         state.get("last_mid_price_by_token_id", {}),
@@ -2354,6 +2443,8 @@ def main() -> None:
                         state,
                         now_ts,
                         shadow_ttl_sec,
+                        fallback_mid_price,
+                        logger,
                     )
 
                     has_any_place_final = any(
@@ -2733,7 +2824,7 @@ def main() -> None:
                             planned_by_token_usd,
                             order_info_by_id,
                             _shadow_buy_usd,
-                        ) = _calc_planned_notional_totals(
+                        ) = _calc_planned_notional_with_fallback(
                             my_by_token_id,
                             state.get("open_orders", {}),
                             state.get("last_mid_price_by_token_id", {}),
@@ -2741,6 +2832,8 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
+                            logger,
                         )
                         # NOTE: cancel-intent should NOT extend cooldown.
                         # Cooldown is applied only on successful place actions.
@@ -2954,7 +3047,7 @@ def main() -> None:
                 planned_by_token_usd,
                 order_info_by_id,
                 _shadow_buy_usd,
-            ) = _calc_planned_notional_totals(
+            ) = _calc_planned_notional_with_fallback(
                 my_by_token_id,
                 state.get("open_orders", {}),
                 state.get("last_mid_price_by_token_id", {}),
@@ -2962,6 +3055,8 @@ def main() -> None:
                 state,
                 now_ts,
                 shadow_ttl_sec,
+                fallback_mid_price,
+                logger,
             )
 
             has_any_place_final = any(act.get("type") == "place" for act in actions)
