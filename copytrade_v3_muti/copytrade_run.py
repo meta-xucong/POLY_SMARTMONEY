@@ -829,6 +829,32 @@ def _prune_order_ts_by_id(state: Dict[str, Any]) -> None:
             order_ts_by_id.pop(order_id, None)
 
 
+def _record_orderbook_empty(
+    state: Dict[str, Any],
+    token_id: str,
+    logger: logging.Logger,
+) -> None:
+    streaks = state.setdefault("orderbook_empty_streak", {})
+    if not isinstance(streaks, dict):
+        streaks = {}
+        state["orderbook_empty_streak"] = streaks
+    prev = int(streaks.get(token_id) or 0)
+    current = prev + 1
+    streaks[token_id] = current
+    if current <= 3 or current % 10 == 0:
+        logger.warning(
+            "[ALERT] orderbook_empty token_id=%s streak=%s",
+            token_id,
+            current,
+        )
+
+
+def _clear_orderbook_empty(state: Dict[str, Any], token_id: str) -> None:
+    streaks = state.get("orderbook_empty_streak")
+    if isinstance(streaks, dict):
+        streaks.pop(token_id, None)
+
+
 def _maybe_update_target_last(
     state: Dict[str, Any],
     token_id: str,
@@ -1011,6 +1037,7 @@ def main() -> None:
     state.setdefault("topic_state", {})
     state.setdefault("target_actions_cursor_ms", 0)
     state.setdefault("last_mid_price_by_token_id", {})
+    state.setdefault("orderbook_empty_streak", {})
     state.setdefault("order_ts_by_id", {})
     state.setdefault("seen_action_ids", [])
     state.setdefault("last_reprice_ts_by_token", {})
@@ -1065,6 +1092,8 @@ def main() -> None:
         state["target_actions_cursor_ms"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
         state["last_mid_price_by_token_id"] = {}
+    if not isinstance(state.get("orderbook_empty_streak"), dict):
+        state["orderbook_empty_streak"] = {}
     if not isinstance(state.get("order_ts_by_id"), dict):
         state["order_ts_by_id"] = {}
     if not isinstance(state.get("seen_action_ids"), list):
@@ -1512,6 +1541,10 @@ def main() -> None:
         force_shares_raw = cfg.get("sell_confirm_force_shares")
         sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
         now_ms = int(now_ts * 1000)
+        actions_missing_ratio = 0.0
+        total_actions_count = 0
+        total_actions_missing = 0
+        unresolved_trade_candidates: list[Dict[str, Any]] = []
 
         def _record_action(token_id: str, side: str, size: float) -> None:
             if not token_id or size <= 0:
@@ -1676,7 +1709,11 @@ def main() -> None:
                                 if isinstance(raw, dict):
                                     miss_samples.append(sorted(list(raw.keys()))[:25])
 
+                    if target_actions:
+                        total_actions_count += len(target_actions)
+                        total_actions_missing += miss_token
                     if miss_token:
+                        missing_ratio = miss_token / len(target_actions) if target_actions else 0.0
                         logger.warning(
                             "[ACT] target=%s actions_total=%s token_mapped=%s missing=%s "
                             "sample_raw_keys=%s",
@@ -1685,6 +1722,11 @@ def main() -> None:
                             len(target_actions) - miss_token,
                             miss_token,
                             miss_samples,
+                        )
+                        logger.warning(
+                            "[ACT] target=%s token_missing_ratio=%.3f",
+                            _shorten_address(address),
+                            missing_ratio,
                         )
                     latest_action_ms = int(actions_info.get("latest_ms") or 0)
                     actions_ok = bool(actions_info.get("ok"))
@@ -1864,6 +1906,8 @@ def main() -> None:
                 seen_global.add(action_id)
                 deduped_actions.append(action)
             actions_list = deduped_actions
+        if total_actions_count > 0:
+            actions_missing_ratio = total_actions_missing / total_actions_count
         my_trades_unreliable_hold_sec = int(cfg.get("my_trades_unreliable_hold_sec") or 0)
         if my_trades_unreliable_hold_sec <= 0:
             my_trades_unreliable_hold_sec = actions_unreliable_hold_sec
@@ -1892,20 +1936,39 @@ def main() -> None:
             my_trades = filtered_my_trades
 
             miss_trade_token = 0
+            miss_trade_samples: list[list[str]] = []
             for trade in my_trades:
                 side = str(trade.get("side") or "").upper()
                 if side != "BUY":
                     continue
+                token_key = trade.get("token_key")
                 token_id = trade.get("token_id") or _extract_token_id_from_raw(
                     trade.get("raw") or {}
                 )
                 if not token_id:
                     miss_trade_token += 1
+                    if token_key:
+                        unresolved_trade_candidates.append(
+                            {
+                                "token_key": token_key,
+                                "condition_id": trade.get("condition_id"),
+                                "outcome_index": trade.get("outcome_index"),
+                                "slug": None,
+                                "raw": trade.get("raw") or {},
+                            }
+                        )
+                    if len(miss_trade_samples) < 3:
+                        raw = trade.get("raw") or {}
+                        if isinstance(raw, dict):
+                            miss_trade_samples.append(sorted(list(raw.keys()))[:25])
             if miss_trade_token:
+                miss_trade_ratio = miss_trade_token / len(my_trades) if my_trades else 0.0
                 logger.warning(
-                    "[MY_TRADES] token_missing=%s total=%s",
+                    "[MY_TRADES] token_missing=%s total=%s ratio=%.3f sample_raw_keys=%s",
                     miss_trade_token,
                     len(my_trades),
+                    miss_trade_ratio,
+                    miss_trade_samples,
                 )
             trades_ok = bool(my_trades_info.get("ok", True))
             trades_incomplete = bool(my_trades_info.get("incomplete", False))
@@ -2175,6 +2238,17 @@ def main() -> None:
             token_key_by_token_id.setdefault(tid, token_key)
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
+        missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
+        if actions_list and actions_missing_ratio >= missing_ratio_threshold:
+            boosted = int(cfg.get("max_resolve_actions_on_missing") or 60)
+            if boosted > resolve_budget:
+                logger.warning(
+                    "[ACT] missing_ratio=%.3f boosting resolver budget %s->%s",
+                    actions_missing_ratio,
+                    resolve_budget,
+                    boosted,
+                )
+                resolve_budget = boosted
         for action in actions_list:
             token_id = action.get("token_id")
             token_key = action.get("token_key")
@@ -2216,6 +2290,31 @@ def main() -> None:
             token_map[str(token_key)] = tid
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
+
+        resolve_trade_budget = int(cfg.get("max_resolve_trades_per_loop") or 10)
+        if unresolved_trade_candidates and resolve_trade_budget > 0:
+            logger.warning(
+                "[MY_TRADES] unresolved_trades=%s resolve_budget=%s",
+                len(unresolved_trade_candidates),
+                resolve_trade_budget,
+            )
+            for trade in unresolved_trade_candidates:
+                if resolve_trade_budget <= 0:
+                    break
+                token_key = str(trade.get("token_key") or "")
+                if not token_key:
+                    continue
+                if token_map.get(token_key):
+                    continue
+                resolve_trade_budget -= 1
+                try:
+                    token_id = resolve_token_id(token_key, trade, token_map)
+                except Exception as exc:
+                    logger.warning("[WARN] resolver 失败(trades): %s -> %s", token_key, exc)
+                    continue
+                tid = str(token_id)
+                token_map[token_key] = tid
+                token_key_by_token_id.setdefault(tid, token_key)
 
         reconcile_set: Set[str] = set(target_shares_now_by_token_id)
         reconcile_set.update(state.get("target_last_shares", {}).keys())
@@ -2725,8 +2824,10 @@ def main() -> None:
                             best_bid,
                             best_ask,
                         )
+                        _record_orderbook_empty(state, token_id, logger)
                         continue
 
+                    _clear_orderbook_empty(state, token_id)
                     state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(
                         ref_price
                     )
@@ -3252,8 +3353,10 @@ def main() -> None:
                     best_bid,
                     best_ask,
                 )
+                _record_orderbook_empty(state, token_id, logger)
                 logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 continue
+            _clear_orderbook_empty(state, token_id)
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
             is_lowp = _is_lowp_token(cfg, float(ref_price))
             cfg_lowp = _lowp_cfg(cfg, is_lowp)
