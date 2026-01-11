@@ -174,18 +174,50 @@ def _fetch_positions_norm_http(
             "Expires": "0",
         }
 
-        try:
-            if callable(cache_disable_ctx):
-                with cache_disable_ctx():
+        payload = None
+        resp = None
+        last_exc = None
+        retry_delays = [0.5, 1.0, 2.0]
+        max_attempts = len(retry_delays) + 1
+        for attempt in range(max_attempts):
+            retryable = False
+            try:
+                if callable(cache_disable_ctx):
+                    with cache_disable_ctx():
+                        resp = session.get(url, params=params, headers=headers, timeout=15.0)
+                else:
                     resp = session.get(url, params=params, headers=headers, timeout=15.0)
-            else:
-                resp = session.get(url, params=params, headers=headers, timeout=15.0)
-            resp.raise_for_status()
-            payload = resp.json()
-        except Exception as exc:
+                if resp.status_code == 429 or 500 <= resp.status_code < 600:
+                    retryable = True
+                    raise requests.HTTPError(
+                        f"retryable_status_{resp.status_code}",
+                        response=resp,
+                    )
+                resp.raise_for_status()
+                payload = resp.json()
+                last_exc = None
+                break
+            except (requests.Timeout, requests.ConnectionError) as exc:
+                last_exc = exc
+                retryable = True
+            except requests.HTTPError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code == 429 or (status_code and 500 <= status_code < 600):
+                    last_exc = exc
+                    retryable = True
+                else:
+                    last_exc = exc
+            except Exception as exc:
+                last_exc = exc
+            if last_exc and retryable and attempt < len(retry_delays):
+                time.sleep(retry_delays[attempt])
+                continue
+            break
+
+        if last_exc is not None or payload is None:
             ok = False
             incomplete = True
-            last_error = str(exc)
+            last_error = str(last_exc)
             break
 
         if pages == 0:
