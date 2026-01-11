@@ -1708,6 +1708,10 @@ def main() -> None:
             tid = str(token_id)
             target_shares_now_by_token_id[tid] = size
             token_key_by_token_id[tid] = token_key
+            cur_price = float(pos.get("cur_price") or 0.0)
+            if cur_price > 0:
+                state.setdefault("last_mid_price_by_token_id", {})[tid] = cur_price
+                state["last_mid_price_update_ts"] = now_ts
 
         if unresolved_target:
             logger.info(
@@ -1739,6 +1743,10 @@ def main() -> None:
             token_map[token_key] = tid
             my_by_token_id[tid] = size
             token_key_by_token_id.setdefault(tid, token_key)
+            cur_price = float(pos.get("cur_price") or 0.0)
+            if cur_price > 0:
+                state.setdefault("last_mid_price_by_token_id", {})[tid] = cur_price
+                state["last_mid_price_update_ts"] = now_ts
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
