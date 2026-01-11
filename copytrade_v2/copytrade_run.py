@@ -960,8 +960,6 @@ def main() -> None:
 
     def _reload_config(reason: str) -> None:
         nonlocal cfg, last_config_reload_ts, last_config_mtime
-        actions_missing_ratio = 0.0
-        unresolved_trade_candidates: list[Dict[str, Any]] = []
         try:
             new_cfg = _load_config(Path(args.config))
         except Exception as exc:
@@ -1028,6 +1026,8 @@ def main() -> None:
     while True:
         now_ts = int(time.time())
         now_wall = time.time()
+        actions_missing_ratio = 0.0
+        unresolved_trade_candidates: list[Dict[str, Any]] = []
         if now_wall - last_config_reload_ts >= max(config_reload_sec, 1):
             reason = "interval"
             try:
