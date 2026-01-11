@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
 from ct_utils import round_to_tick, safe_float
@@ -1095,13 +1096,56 @@ def _normalize_open_order(order: Any) -> Optional[Dict[str, Any]]:
 def fetch_open_orders_norm(client: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
     from py_clob_client.clob_types import OpenOrderParams
 
-    try:
-        payload = client.get_orders(OpenOrderParams())
-    except Exception as exc:
+    def _resolve_open_orders_url() -> str | None:
+        for attr in ("host", "base_url", "url"):
+            base = getattr(client, attr, None)
+            if base:
+                base = str(base).rstrip("/")
+                return f"{base}/orders"
+        return None
+
+    def _supports_timeout(func: Any) -> bool:
         try:
-            payload = client.get_orders()
-        except Exception as exc2:
-            return [], False, str(exc2 or exc)
+            return "timeout" in inspect.signature(func).parameters
+        except Exception:
+            return False
+
+    def _call_get_orders(params: Any | None, timeout: float) -> Any:
+        kwargs: Dict[str, Any] = {}
+        if _supports_timeout(client.get_orders):
+            kwargs["timeout"] = timeout
+        if params is None:
+            return client.get_orders(**kwargs)
+        return client.get_orders(params, **kwargs)
+
+    timeout = 15.0
+    retry_delays = [0.5, 1.0, 2.0]
+    max_attempts = len(retry_delays) + 1
+    payload = None
+    last_exc: Exception | None = None
+    retries_used = 0
+    for attempt in range(max_attempts):
+        try:
+            payload = _call_get_orders(OpenOrderParams(), timeout)
+            last_exc = None
+            break
+        except Exception as exc:
+            try:
+                payload = _call_get_orders(None, timeout)
+                last_exc = None
+                break
+            except Exception as exc2:
+                last_exc = exc2 or exc
+        if last_exc is not None and attempt < len(retry_delays):
+            retries_used = attempt + 1
+            time.sleep(retry_delays[attempt])
+            continue
+        break
+    if last_exc is not None:
+        err_detail = (
+            f"{last_exc} url={_resolve_open_orders_url()} timeout={timeout} retries={retries_used}"
+        )
+        return [], False, err_detail
 
     orders = _coerce_list(payload)
     normalized: List[Dict[str, Any]] = []
