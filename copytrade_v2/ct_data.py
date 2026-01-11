@@ -42,9 +42,17 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
 
     size = raw.get("size") or raw.get("shares") or raw.get("positionSize")
     avg_price = raw.get("avgPrice") or raw.get("avg_price") or raw.get("averagePrice") or 0.0
+    cur_price = (
+        raw.get("curPrice")
+        or raw.get("cur_price")
+        or raw.get("currentPrice")
+        or raw.get("price")
+        or 0.0
+    )
     try:
         size_f = float(size or 0.0)
         avg_f = float(avg_price or 0.0)
+        cur_f = float(cur_price or 0.0)
     except Exception:
         return None
 
@@ -59,6 +67,7 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
         "outcome_index": idx,
         "size": size_f,
         "avg_price": avg_f,
+        "cur_price": cur_f,
         "slug": slug,
         "title": title,
         "end_date": end_date,
@@ -215,6 +224,12 @@ def _fetch_positions_norm_http(
             break
 
         if last_exc is not None or payload is None:
+            if resp is not None:
+                try:
+                    last_status = resp.status_code
+                    last_url = resp.url
+                except Exception:
+                    pass
             ok = False
             incomplete = True
             last_error = str(last_exc)
