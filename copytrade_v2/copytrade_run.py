@@ -824,6 +824,8 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
+    state.setdefault("target_positions_nonce_last_ts", 0)
+    state.setdefault("target_positions_nonce_actions", 0)
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("open_orders_all"), dict):
@@ -878,6 +880,10 @@ def main() -> None:
         state["adopted_existing_orders"] = False
     if not isinstance(state.get("place_fail_until"), dict):
         state["place_fail_until"] = {}
+    if not isinstance(state.get("target_positions_nonce_last_ts"), (int, float)):
+        state["target_positions_nonce_last_ts"] = 0
+    if not isinstance(state.get("target_positions_nonce_actions"), (int, float)):
+        state["target_positions_nonce_actions"] = 0
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -1435,7 +1441,26 @@ def main() -> None:
             logger.exception("[ERR] fetch my trades failed: %s", exc)
 
         has_new_actions = bool(actions_list)
-        target_cache_mode = "nonce" if has_new_actions else target_cache_bust_mode
+        if has_new_actions:
+            state["target_positions_nonce_actions"] = int(
+                state.get("target_positions_nonce_actions") or 0
+            ) + len(actions_list)
+        nonce_min_interval_sec = max(1, min(target_positions_refresh_sec, poll_interval))
+        nonce_action_window = max(
+            1, int(max(target_positions_refresh_sec, poll_interval) / max(poll_interval, 1))
+        )
+        last_nonce_ts = float(state.get("target_positions_nonce_last_ts") or 0)
+        allow_nonce = (
+            has_new_actions
+            and (now_ts - last_nonce_ts) >= nonce_min_interval_sec
+            and int(state.get("target_positions_nonce_actions") or 0) >= nonce_action_window
+        )
+        if allow_nonce:
+            target_cache_mode = "nonce"
+            state["target_positions_nonce_last_ts"] = now_ts
+            state["target_positions_nonce_actions"] = 0
+        else:
+            target_cache_mode = target_cache_bust_mode
 
         target_pos, target_info = fetch_positions_norm(
             data_client,
