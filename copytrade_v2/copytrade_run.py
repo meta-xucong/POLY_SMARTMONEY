@@ -695,6 +695,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--ratio", type=float, dest="follow_ratio")
     parser.add_argument("--poll", type=int, dest="poll_interval_sec")
     parser.add_argument("--poll-exit", type=int, dest="poll_interval_sec_exiting")
+    parser.add_argument(
+        "--my-positions-force-http",
+        action="store_true",
+        dest="my_positions_force_http",
+        default=None,
+        help="Force HTTP direct fetch for my positions (override config).",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -709,6 +716,7 @@ def main() -> None:
         "follow_ratio",
         "poll_interval_sec",
         "poll_interval_sec_exiting",
+        "my_positions_force_http",
     ):
         arg_val = getattr(args, key, None)
         if arg_val is not None:
@@ -891,7 +899,7 @@ def main() -> None:
         "Cache-Control",
     ]
     target_cache_bust_mode = "bucket"
-    my_positions_force_http = True
+    my_positions_force_http = False
     actions_page_size = 300
     actions_max_offset = 10000
     heartbeat_interval_sec = 600
@@ -941,7 +949,7 @@ def main() -> None:
             "Cache-Control",
         ]
         target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
-        my_positions_force_http = bool(cfg.get("my_positions_force_http", True))
+        my_positions_force_http = bool(cfg.get("my_positions_force_http", False))
         actions_page_size = int(cfg.get("actions_page_size") or 300)
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
