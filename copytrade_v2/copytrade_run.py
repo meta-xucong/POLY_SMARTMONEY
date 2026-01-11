@@ -223,6 +223,47 @@ def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
     return None
 
 
+def _extract_mid_cache_meta(state: Dict[str, Any]) -> tuple[Optional[float], Dict[str, Any]]:
+    meta_keys = (
+        "mid_cache_ttl_sec",
+        "mid_cache_ttl",
+        "mid_cache_update_ts",
+        "mid_cache_update_ms",
+        "mid_cache_updated_at",
+        "last_mid_price_update_ts",
+        "last_mid_price_update_ms",
+    )
+    meta: Dict[str, Any] = {}
+    for key in meta_keys:
+        if key in state:
+            meta[key] = state.get(key)
+
+    ts_by_token = state.get("last_mid_price_ts_by_token_id")
+    if isinstance(ts_by_token, dict):
+        ts_values = [
+            ts for ts in ts_by_token.values() if isinstance(ts, (int, float)) and ts > 0
+        ]
+        if ts_values:
+            meta["last_mid_price_ts_max"] = max(ts_values)
+
+    last_mid_update = None
+    if "last_mid_price_ts_max" in meta:
+        last_mid_update = meta["last_mid_price_ts_max"]
+    else:
+        for key in (
+            "last_mid_price_update_ts",
+            "last_mid_price_update_ms",
+            "mid_cache_update_ts",
+            "mid_cache_update_ms",
+            "mid_cache_updated_at",
+        ):
+            value = meta.get(key)
+            if isinstance(value, (int, float)) and value > 0:
+                last_mid_update = value
+                break
+    return last_mid_update, meta
+
+
 def _is_lowp_token(cfg: Dict[str, Any], ref_price: float) -> bool:
     if not bool(cfg.get("lowp_guard_enabled", False)):
         return False
@@ -432,11 +473,23 @@ def _calc_planned_notional_with_fallback(
     planned_zero_streak = int(state.get("planned_zero_streak") or 0) + 1
     state["planned_zero_streak"] = planned_zero_streak
     if planned_zero_streak <= 3 or planned_zero_streak % 20 == 0:
+        missing_mid_tokens = [
+            token_id
+            for token_id in my_by_token_id
+            if float(mid_cache.get(token_id, 0.0) or 0.0) <= 0
+        ]
+        missing_mid_sample = missing_mid_tokens[:5]
+        last_mid_update, mid_cache_meta = _extract_mid_cache_meta(state)
         logger.warning(
-            "[ALERT] planned_notional_zero fallback_mid=%s positions=%s streak=%s",
+            "[ALERT] planned_notional_zero fallback_mid=%s positions=%s streak=%s "
+            "token_count=%s last_mid_update=%s missing_mid_sample=%s mid_cache_meta=%s",
             fallback_mid_price,
             len(my_by_token_id),
             planned_zero_streak,
+            len(mid_cache),
+            last_mid_update,
+            missing_mid_sample,
+            mid_cache_meta,
         )
     return total, by_token, order_info_by_id, shadow_total
 
@@ -818,6 +871,7 @@ def main() -> None:
     state.setdefault("topic_state", {})
     state.setdefault("target_actions_cursor_ms", 0)
     state.setdefault("last_mid_price_by_token_id", {})
+    state.setdefault("last_mid_price_update_ts", 0)
     state.setdefault("orderbook_empty_streak", {})
     state.setdefault("order_ts_by_id", {})
     state.setdefault("seen_action_ids", [])
@@ -868,6 +922,8 @@ def main() -> None:
         state["target_actions_cursor_ms"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
         state["last_mid_price_by_token_id"] = {}
+    if not isinstance(state.get("last_mid_price_update_ts"), (int, float)):
+        state["last_mid_price_update_ts"] = 0
     if not isinstance(state.get("orderbook_empty_streak"), dict):
         state["orderbook_empty_streak"] = {}
     if not isinstance(state.get("order_ts_by_id"), dict):
@@ -2220,6 +2276,7 @@ def main() -> None:
                     state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(
                         ref_price
                     )
+                    state["last_mid_price_update_ts"] = now_ts
                     is_lowp = _is_lowp_token(cfg, float(ref_price))
                     cfg_lowp = _lowp_cfg(cfg, is_lowp)
                     probe_usd = float(
@@ -2741,6 +2798,7 @@ def main() -> None:
                 continue
             _clear_orderbook_empty(state, token_id)
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
+            state["last_mid_price_update_ts"] = now_ts
             is_lowp = _is_lowp_token(cfg, float(ref_price))
             cfg_lowp = _lowp_cfg(cfg, is_lowp)
             ratio_base = float(cfg.get("follow_ratio") or 0.0)
