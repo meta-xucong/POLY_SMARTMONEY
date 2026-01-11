@@ -12,6 +12,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "managed_order_ids": [],
     "intent_keys": {},
     "last_mid_price_by_token_id": {},
+    "last_mid_price_update_ts": 0,
     "last_sync_ts": 0,
     "target_last_shares": {},
     "target_last_seen_ts": {},
@@ -64,6 +65,10 @@ def load_state(path: str) -> Dict[str, Any]:
         state["last_mid_price_by_token_id"], dict
     ):
         state["last_mid_price_by_token_id"] = {}
+    if "last_mid_price_update_ts" not in state or not isinstance(
+        state["last_mid_price_update_ts"], (int, float)
+    ):
+        state["last_mid_price_update_ts"] = 0
     if "target_last_shares" not in state or not isinstance(state["target_last_shares"], dict):
         state["target_last_shares"] = {}
     if "target_last_seen_ts" not in state or not isinstance(state["target_last_seen_ts"], dict):
