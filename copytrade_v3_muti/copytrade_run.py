@@ -1326,6 +1326,10 @@ def main() -> None:
         now_wall = time.time()
         active_target_entries: list[Dict[str, Any]] = []
         disabled_targets: list[tuple[str, int, str]] = []
+        actions_missing_ratio = 0.0
+        total_actions_count = 0
+        total_actions_missing = 0
+        unresolved_trade_candidates: list[Dict[str, Any]] = []
         _, _, _, _, disable_log_every = _target_disable_params(cfg)
 
         for entry in target_entries:
@@ -1541,11 +1545,6 @@ def main() -> None:
         force_shares_raw = cfg.get("sell_confirm_force_shares")
         sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
         now_ms = int(now_ts * 1000)
-        actions_missing_ratio = 0.0
-        total_actions_count = 0
-        total_actions_missing = 0
-        unresolved_trade_candidates: list[Dict[str, Any]] = []
-
         def _record_action(token_id: str, side: str, size: float) -> None:
             if not token_id or size <= 0:
                 return
