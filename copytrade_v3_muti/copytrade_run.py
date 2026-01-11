@@ -221,6 +221,50 @@ def _get_env_first(keys: list[str]) -> Optional[str]:
     return None
 
 
+def _update_recent_token_ids(
+    buffer_list: list[str],
+    token_id: str,
+    *,
+    max_len: int,
+) -> None:
+    if max_len <= 0:
+        return
+    tid = str(token_id)
+    if tid in buffer_list:
+        buffer_list.remove(tid)
+    buffer_list.append(tid)
+    if len(buffer_list) > max_len:
+        del buffer_list[:-max_len]
+
+
+def _hash_token_ids(token_ids: Set[str]) -> str:
+    if not token_ids:
+        return ""
+    joined = ",".join(sorted(token_ids))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest()
+
+
+def _filter_positions_by_size(
+    positions: list[dict],
+    size_threshold: float,
+) -> list[dict]:
+    min_size = float(size_threshold or 0.0)
+    keep: list[dict] = []
+    for pos in positions:
+        try:
+            size = float(pos.get("size") or 0.0)
+        except Exception:
+            continue
+        if min_size > 0:
+            if size < min_size:
+                continue
+        else:
+            if size <= 0:
+                continue
+        keep.append(pos)
+    return keep
+
+
 def _shorten_address(address: str) -> str:
     text = address.strip()
     if len(text) <= 12:
@@ -1118,6 +1162,20 @@ def main() -> None:
         state["my_trades_cursor_ms"] = 0
     if not isinstance(state.get("my_trades_unreliable_until"), (int, float)):
         state["my_trades_unreliable_until"] = 0
+    if not isinstance(state.get("recent_action_token_ids"), list):
+        state["recent_action_token_ids"] = []
+    if not isinstance(state.get("recent_trade_token_ids"), list):
+        state["recent_trade_token_ids"] = []
+    if not isinstance(state.get("recent_resolved_token_ids"), list):
+        state["recent_resolved_token_ids"] = []
+    if not isinstance(state.get("active_token_hash"), str):
+        state["active_token_hash"] = ""
+    if not isinstance(state.get("positions_active_hash"), str):
+        state["positions_active_hash"] = ""
+    if not isinstance(state.get("inactive_token_cooldown"), dict):
+        state["inactive_token_cooldown"] = {}
+    if not isinstance(state.get("invalid_token_ids"), dict):
+        state["invalid_token_ids"] = {}
 
     state_targets = state.setdefault("targets", {})
     for address in resolved_target_addresses:
@@ -1163,6 +1221,18 @@ def main() -> None:
     orderbook_refresh_sec = 0
     max_orderbook_fetch_per_loop = 0
     orderbook_cache_max_items = 0
+    low_freq_mode = False
+    low_freq_positions_limit = 200
+    low_freq_positions_max_pages = 5
+    low_freq_actions_page_size = 120
+    low_freq_actions_max_offset = 3000
+    low_freq_poll_interval_sec = 60
+    positions_light_refresh_sec = 120
+    active_token_recent_actions = 200
+    active_token_recent_trades = 200
+    active_token_recent_resolved = 200
+    inactive_token_cooldown_sec = 1800
+    laggy_sleep_sec = 0
     last_config_reload_ts = time.time()
     last_config_mtime: Optional[float] = None
     resolved_target_address = resolved_target_addresses[0]
@@ -1197,6 +1267,18 @@ def main() -> None:
         nonlocal orderbook_refresh_sec
         nonlocal max_orderbook_fetch_per_loop
         nonlocal orderbook_cache_max_items
+        nonlocal low_freq_mode
+        nonlocal low_freq_positions_limit
+        nonlocal low_freq_positions_max_pages
+        nonlocal low_freq_actions_page_size
+        nonlocal low_freq_actions_max_offset
+        nonlocal low_freq_poll_interval_sec
+        nonlocal positions_light_refresh_sec
+        nonlocal active_token_recent_actions
+        nonlocal active_token_recent_trades
+        nonlocal active_token_recent_resolved
+        nonlocal inactive_token_cooldown_sec
+        nonlocal laggy_sleep_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         per_target_poll_interval_sec = int(
@@ -1228,6 +1310,28 @@ def main() -> None:
         orderbook_refresh_sec = int(cfg.get("orderbook_refresh_sec") or 0)
         max_orderbook_fetch_per_loop = int(cfg.get("max_orderbook_fetch_per_loop") or 0)
         orderbook_cache_max_items = int(cfg.get("orderbook_cache_max_items") or 0)
+        low_freq_mode = bool(cfg.get("low_freq_mode", False))
+        low_freq_positions_limit = int(cfg.get("low_freq_positions_limit") or 200)
+        low_freq_positions_max_pages = int(cfg.get("low_freq_positions_max_pages") or 5)
+        low_freq_actions_page_size = int(cfg.get("low_freq_actions_page_size") or 120)
+        low_freq_actions_max_offset = int(cfg.get("low_freq_actions_max_offset") or 3000)
+        low_freq_poll_interval_sec = int(cfg.get("low_freq_poll_interval_sec") or 60)
+        positions_light_refresh_sec = int(cfg.get("positions_light_refresh_sec") or 120)
+        active_token_recent_actions = int(cfg.get("active_token_recent_actions") or 200)
+        active_token_recent_trades = int(cfg.get("active_token_recent_trades") or 200)
+        active_token_recent_resolved = int(cfg.get("active_token_recent_resolved") or 200)
+        inactive_token_cooldown_sec = int(cfg.get("inactive_token_cooldown_sec") or 1800)
+        laggy_sleep_sec = int(cfg.get("laggy_sleep_sec") or 0)
+        if low_freq_mode:
+            poll_interval = max(poll_interval, low_freq_poll_interval_sec)
+            poll_interval_exiting = max(poll_interval_exiting, low_freq_poll_interval_sec)
+            per_target_poll_interval_sec = max(
+                per_target_poll_interval_sec, low_freq_poll_interval_sec
+            )
+            positions_limit = min(positions_limit, low_freq_positions_limit)
+            positions_max_pages = min(positions_max_pages, low_freq_positions_max_pages)
+            actions_page_size = min(actions_page_size, low_freq_actions_page_size)
+            actions_max_offset = min(actions_max_offset, low_freq_actions_max_offset)
 
     def _refresh_log_level() -> None:
         level_name = str(cfg.get("log_level") or "INFO").upper()
@@ -1287,6 +1391,7 @@ def main() -> None:
     except Exception:
         last_config_mtime = None
     last_heartbeat_ts = 0
+    laggy_extra_sleep_sec = 0
 
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
@@ -1306,12 +1411,14 @@ def main() -> None:
     missing_notice_tokens: set[str] = set()
 
     def _get_poll_interval() -> int:
+        base = poll_interval
         topic_state = state.get("topic_state", {})
         if isinstance(topic_state, dict):
             for st in topic_state.values():
                 if (st or {}).get("phase") == "EXITING":
-                    return poll_interval_exiting
-        return poll_interval
+                    base = poll_interval_exiting
+                    break
+        return int(base + max(laggy_extra_sleep_sec, 0))
 
     def _broadcast_actions_replay(replay_ms: int) -> None:
         state["actions_replay_from_ms"] = replay_ms
@@ -1324,12 +1431,39 @@ def main() -> None:
     while True:
         now_ts = int(time.time())
         now_wall = time.time()
+        inactive_cooldown = state.get("inactive_token_cooldown", {})
+        if isinstance(inactive_cooldown, dict):
+            expired = [
+                token_id
+                for token_id, meta in inactive_cooldown.items()
+                if isinstance(meta, dict)
+                and meta.get("expires_at")
+                and now_ts >= int(meta.get("expires_at") or 0)
+            ]
+            for token_id in expired:
+                inactive_cooldown.pop(token_id, None)
+        else:
+            inactive_cooldown = {}
+            state["inactive_token_cooldown"] = inactive_cooldown
+        invalid_token_ids = state.get("invalid_token_ids", {})
+        if not isinstance(invalid_token_ids, dict):
+            invalid_token_ids = {}
+            state["invalid_token_ids"] = invalid_token_ids
+        active_token_hash = str(state.get("active_token_hash") or "")
+        positions_active_hash = str(state.get("positions_active_hash") or "")
+        full_positions_needed = bool(active_token_hash) and active_token_hash != positions_active_hash
         active_target_entries: list[Dict[str, Any]] = []
         disabled_targets: list[tuple[str, int, str]] = []
         actions_missing_ratio = 0.0
         total_actions_count = 0
         total_actions_missing = 0
         unresolved_trade_candidates: list[Dict[str, Any]] = []
+        max_action_lag_ms = 0
+        action_token_ids_found: set[str] = set()
+        trade_token_ids_found: set[str] = set()
+        recent_action_token_ids = state.get("recent_action_token_ids", [])
+        recent_trade_token_ids = state.get("recent_trade_token_ids", [])
+        recent_resolved_token_ids = state.get("recent_resolved_token_ids", [])
         _, _, _, _, disable_log_every = _target_disable_params(cfg)
 
         for entry in target_entries:
@@ -1701,6 +1835,7 @@ def main() -> None:
                             tid = str(token_id)
                             action["token_id"] = tid
                             _record_action(tid, side, size)
+                            action_token_ids_found.add(tid)
                         else:
                             miss_token += 1
                             if len(miss_samples) < 3:
@@ -1752,6 +1887,7 @@ def main() -> None:
                         if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
                             t_state["actions_replay_from_ms"] = 0
                         lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
+                        max_action_lag_ms = max(max_action_lag_ms, lag_ms)
                         if lag_ms > actions_lag_threshold_sec * 1000:
                             t_state["actions_replay_from_ms"] = max(
                                 0, now_ms - actions_replay_window_sec * 1000
@@ -1779,17 +1915,23 @@ def main() -> None:
             target_info: Dict[str, object] = {"ok": True, "incomplete": False}
             if should_poll:
                 try:
+                    positions_refresh_sec = (
+                        target_positions_refresh_sec
+                        if full_positions_needed
+                        else positions_light_refresh_sec
+                    )
                     target_pos, target_info = fetch_positions_norm(
                         data_client,
                         address,
                         size_threshold,
                         positions_limit=positions_limit,
                         positions_max_pages=positions_max_pages,
-                        refresh_sec=target_positions_refresh_sec,
+                        refresh_sec=positions_refresh_sec,
                         force_http=True,
                         cache_bust_mode=target_cache_mode,
                         header_keys=header_keys,
                     )
+                    target_pos = _filter_positions_by_size(target_pos, size_threshold)
                     http_status = target_info.get("http_status")
                     if target_info.get("ok"):
                         _target_mark_ok(t_state, now_ts)
@@ -1938,12 +2080,14 @@ def main() -> None:
             miss_trade_samples: list[list[str]] = []
             for trade in my_trades:
                 side = str(trade.get("side") or "").upper()
-                if side != "BUY":
-                    continue
-                token_key = trade.get("token_key")
                 token_id = trade.get("token_id") or _extract_token_id_from_raw(
                     trade.get("raw") or {}
                 )
+                if token_id:
+                    trade_token_ids_found.add(str(token_id))
+                if side != "BUY":
+                    continue
+                token_key = trade.get("token_key")
                 if not token_id:
                     miss_trade_token += 1
                     if token_key:
@@ -1987,6 +2131,18 @@ def main() -> None:
         except Exception as exc:
             state["my_trades_unreliable_until"] = now_ts + my_trades_unreliable_hold_sec
             logger.exception("[ERR] fetch my trades failed: %s", exc)
+        for token_id in action_token_ids_found:
+            _update_recent_token_ids(
+                recent_action_token_ids,
+                token_id,
+                max_len=active_token_recent_actions,
+            )
+        for token_id in trade_token_ids_found:
+            _update_recent_token_ids(
+                recent_trade_token_ids,
+                token_id,
+                max_len=active_token_recent_trades,
+            )
         has_new_actions = bool(actions_list)
         actions_unreliable_until = 0
         actions_replay_from_ms = 0
@@ -2014,22 +2170,31 @@ def main() -> None:
             state["actions_replay_from_ms"] = actions_replay_from_ms
         else:
             state.pop("actions_replay_from_ms", None)
+        laggy_mode = (
+            actions_lag_threshold_sec > 0
+            and max_action_lag_ms > actions_lag_threshold_sec * 1000
+        )
+        laggy_extra_sleep_sec = laggy_sleep_sec if laggy_mode else 0
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
             logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
+        my_positions_refresh_sec = (
+            target_positions_refresh_sec if full_positions_needed else positions_light_refresh_sec
+        )
         my_pos, my_info = fetch_positions_norm(
             data_client,
             cfg["my_address"],
-            0.0,
+            size_threshold,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
-            refresh_sec=target_positions_refresh_sec if my_positions_force_http else None,
+            refresh_sec=my_positions_refresh_sec if my_positions_force_http else None,
             force_http=my_positions_force_http,
             cache_bust_mode=target_cache_bust_mode,
             header_keys=header_keys,
         )
+        my_pos = _filter_positions_by_size(my_pos, size_threshold)
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
             logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
@@ -2098,6 +2263,13 @@ def main() -> None:
             save_state(args.state, state)
             time.sleep(_get_poll_interval())
             continue
+        positions_full_ok = (
+            full_positions_needed
+            and bool(target_info.get("ok"))
+            and not bool(target_info.get("incomplete"))
+            and bool(my_info.get("ok"))
+            and not bool(my_info.get("incomplete"))
+        )
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
         fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
@@ -2215,6 +2387,10 @@ def main() -> None:
                 len(target_pos),
             )
 
+        for token_id in list(invalid_token_ids.keys()):
+            if token_id in target_shares_now_by_token_id:
+                invalid_token_ids.pop(token_id, None)
+
         # My positions are usually small; still prefer fast-path and fall back to resolver if needed.
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
@@ -2230,11 +2406,25 @@ def main() -> None:
                 except Exception as exc:
                     logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
                     continue
+                _update_recent_token_ids(
+                    recent_resolved_token_ids,
+                    str(token_id),
+                    max_len=active_token_recent_resolved,
+                )
 
             tid = str(token_id)
             token_map[token_key] = tid
             my_by_token_id[tid] = size
             token_key_by_token_id.setdefault(tid, token_key)
+
+        active_token_ids_seed: Set[str] = set(my_by_token_id.keys())
+        active_token_ids_seed.update(str(token_id) for token_id in recent_action_token_ids)
+        active_token_ids_seed.update(str(token_id) for token_id in recent_trade_token_ids)
+        active_token_ids_seed.update(str(token_id) for token_id in recent_resolved_token_ids)
+        if invalid_token_ids:
+            active_token_ids_seed.difference_update(set(invalid_token_ids.keys()))
+        if inactive_cooldown:
+            active_token_ids_seed.difference_update(set(inactive_cooldown.keys()))
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
@@ -2267,6 +2457,8 @@ def main() -> None:
                 continue
             if resolve_budget <= 0:
                 continue
+            if active_token_ids_seed and token_key not in target_shares_now_by_token_key:
+                continue
             resolve_budget -= 1
             try:
                 token_id = resolve_token_id(
@@ -2283,11 +2475,17 @@ def main() -> None:
             except Exception as exc:
                 logger.warning("[WARN] resolver 失败(actions): %s -> %s", token_key, exc)
                 continue
+            _update_recent_token_ids(
+                recent_resolved_token_ids,
+                str(token_id),
+                max_len=active_token_recent_resolved,
+            )
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             tid = str(token_id)
             token_map[str(token_key)] = tid
             _record_action(tid, side, size)
+            action_token_ids_found.add(tid)
             token_key_by_token_id.setdefault(tid, str(token_key))
 
         resolve_trade_budget = int(cfg.get("max_resolve_trades_per_loop") or 10)
@@ -2305,15 +2503,37 @@ def main() -> None:
                     continue
                 if token_map.get(token_key):
                     continue
+                if active_token_ids_seed and token_key not in target_shares_now_by_token_key:
+                    continue
                 resolve_trade_budget -= 1
                 try:
                     token_id = resolve_token_id(token_key, trade, token_map)
                 except Exception as exc:
                     logger.warning("[WARN] resolver 失败(trades): %s -> %s", token_key, exc)
                     continue
+                _update_recent_token_ids(
+                    recent_resolved_token_ids,
+                    str(token_id),
+                    max_len=active_token_recent_resolved,
+                )
+                trade_token_ids_found.add(str(token_id))
                 tid = str(token_id)
                 token_map[token_key] = tid
                 token_key_by_token_id.setdefault(tid, token_key)
+
+        active_token_ids: Set[str] = set(my_by_token_id.keys())
+        active_token_ids.update(str(token_id) for token_id in recent_action_token_ids)
+        active_token_ids.update(str(token_id) for token_id in recent_trade_token_ids)
+        active_token_ids.update(str(token_id) for token_id in recent_resolved_token_ids)
+        if invalid_token_ids:
+            active_token_ids.difference_update(set(invalid_token_ids.keys()))
+        if inactive_cooldown:
+            active_token_ids.difference_update(set(inactive_cooldown.keys()))
+        active_token_hash = _hash_token_ids(active_token_ids)
+        state["active_token_hash"] = active_token_hash
+        state["active_token_ids"] = sorted(active_token_ids)
+        if positions_full_ok and active_token_hash:
+            state["positions_active_hash"] = active_token_hash
 
         reconcile_set: Set[str] = set(target_shares_now_by_token_id)
         reconcile_set.update(state.get("target_last_shares", {}).keys())
@@ -2334,14 +2554,28 @@ def main() -> None:
             ignored.pop(token_id, None)
         status_cache = state["market_status_cache"]
         if skip_closed:
+            query_set = set(reconcile_set)
+            if active_token_ids:
+                query_set = query_set.intersection(active_token_ids)
+            if invalid_token_ids:
+                query_set.difference_update(set(invalid_token_ids.keys()))
+            if inactive_cooldown:
+                query_set.difference_update(set(inactive_cooldown.keys()))
             need_query = []
-            for token_id in reconcile_set:
+            for token_id in query_set:
                 if token_id in ignored:
                     continue
                 cached = status_cache.get(token_id)
                 if not cached or now_ts - int(cached.get("ts") or 0) >= refresh_sec:
                     need_query.append(token_id)
 
+            if need_query and laggy_mode:
+                logger.info(
+                    "[SAFE] lag_ms=%s skip gamma-api requests=%s",
+                    max_action_lag_ms,
+                    len(need_query),
+                )
+                need_query = []
             if need_query:
                 meta_map = gamma_fetch_markets_by_clob_token_ids(need_query)
                 for token_id in need_query:
@@ -2530,6 +2764,17 @@ def main() -> None:
                                 shadow_ttl_sec,
                             )
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
+                    if token_id not in invalid_token_ids:
+                        invalid_token_ids[token_id] = {
+                            "ts": now_ts,
+                            "reason": "closed_or_not_tradeable",
+                        }
+                    if inactive_token_cooldown_sec > 0:
+                        inactive_cooldown[token_id] = {
+                            "ts": now_ts,
+                            "reason": "closed_or_not_tradeable",
+                            "expires_at": now_ts + inactive_token_cooldown_sec,
+                        }
                     meta = cached.get("meta") or {}
                     slug = meta.get("slug") or ""
                     logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
@@ -2779,6 +3024,18 @@ def main() -> None:
                     str(order.get("side") or "").upper() == "BUY" for order in open_orders or []
                 )
                 if should_probe and not has_buy_open:
+                    if token_id in invalid_token_ids:
+                        logger.info(
+                            "[SKIP] token_id=%s reason=invalid_pool_probe",
+                            token_id,
+                        )
+                        continue
+                    if active_token_ids and token_id not in active_token_ids:
+                        logger.info(
+                            "[SKIP] token_id=%s reason=inactive_probe",
+                            token_id,
+                        )
+                        continue
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
                     else:
