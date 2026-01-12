@@ -7,6 +7,7 @@ import os
 import re
 import sys
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
@@ -220,6 +221,33 @@ def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
         return bid
     if ask is not None:
         return ask
+    return None
+
+
+def _parse_market_end_ts(meta: Optional[Dict[str, Any]]) -> Optional[int]:
+    if not isinstance(meta, dict):
+        return None
+    value = meta.get("end_date") or meta.get("endDate") or meta.get("end_time") or meta.get("endTime")
+    if value is None:
+        return None
+    try:
+        if isinstance(value, (int, float)):
+            num = float(value)
+            if num > 1e12:
+                num /= 1000.0
+            return int(num)
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return int(parsed.timestamp())
+    except Exception:
+        return None
     return None
 
 
@@ -1876,6 +1904,29 @@ def main() -> None:
             ignored.pop(token_id, None)
         status_cache = state["market_status_cache"]
         if skip_closed:
+            def _ensure_long_ignore(token_id: str, meta: Optional[Dict[str, Any]]) -> None:
+                end_date = None
+                if isinstance(meta, dict):
+                    end_date = meta.get("end_date") or meta.get("endDate")
+                expires_at = _parse_market_end_ts(meta) or now_ts + 24 * 3600
+                existing = ignored.get(token_id) if isinstance(ignored.get(token_id), dict) else {}
+                should_log = not existing or not existing.get("logged")
+                ignored[token_id] = {
+                    "ts": now_ts,
+                    "reason": "closed_or_not_tradeable",
+                    "expires_at": int(expires_at),
+                    "end_date": end_date,
+                    "logged": bool(existing.get("logged")),
+                }
+                if should_log:
+                    logger.info(
+                        "[SKIP] long_ignore token_id=%s expires_at=%s end_date=%s",
+                        token_id,
+                        int(expires_at),
+                        end_date,
+                    )
+                    ignored[token_id]["logged"] = True
+
             need_query = []
             for token_id in reconcile_set:
                 if token_id in ignored:
@@ -1890,6 +1941,23 @@ def main() -> None:
                     meta = meta_map.get(token_id)
                     tradeable = market_tradeable_state(meta)
                     status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
+                    if tradeable is False:
+                        _ensure_long_ignore(token_id, meta)
+
+            for token_id in reconcile_set:
+                cached = status_cache.get(token_id) or {}
+                if cached.get("tradeable") is False:
+                    _ensure_long_ignore(token_id, cached.get("meta"))
+
+        active_ignored = {
+            token_id
+            for token_id, meta in ignored.items()
+            if isinstance(meta, dict)
+            and meta.get("expires_at")
+            and now_ts < int(meta.get("expires_at") or 0)
+        }
+        if active_ignored:
+            reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
