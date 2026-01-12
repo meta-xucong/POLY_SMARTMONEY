@@ -1918,7 +1918,11 @@ def main() -> None:
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
         reconcile_set.update(state.get("topic_state", {}).keys())
         lag_high = lag_ms > actions_lag_threshold_sec * 1000
-        reduce_reconcile = (not actions_list) or lag_high
+        actions_unreliable = bool(state.get("actions_unreliable"))
+        actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
+        if not actions_unreliable:
+            actions_unreliable = actions_unreliable_until > now_ts
+        reduce_reconcile = ((not actions_list) and (not actions_unreliable)) or lag_high
         if reduce_reconcile:
             recent_event_sec = int(cfg.get("reconcile_recent_event_sec") or 600)
             cutoff_ts = now_ts - max(recent_event_sec, 0)
@@ -1939,12 +1943,13 @@ def main() -> None:
             reconcile_set = reduced_set
             reason = "lag_high" if lag_high else "actions_empty"
             logger.info(
-                "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s",
+                "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s actions_unreliable=%s",
                 reason,
                 len(reconcile_set),
                 recent_event_sec,
                 lag_ms,
                 len(actions_list),
+                actions_unreliable,
             )
 
         ignored = state["ignored_tokens"]
