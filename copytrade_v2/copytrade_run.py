@@ -2017,6 +2017,18 @@ def main() -> None:
             and now_ts < int(meta.get("expires_at") or 0)
         }
         if active_ignored:
+            for token_id in sorted(active_ignored):
+                meta = ignored.get(token_id)
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("active_logged"):
+                    continue
+                logger.info(
+                    "[SKIP] active_ignore token_id=%s expires_at=%s",
+                    token_id,
+                    int(meta.get("expires_at") or 0),
+                )
+                meta["active_logged"] = True
             reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
@@ -2096,6 +2108,8 @@ def main() -> None:
             )
 
         for token_id in reconcile_set:
+            if token_id in active_ignored:
+                continue
             open_orders = state.get("open_orders", {}).get(token_id, [])
             cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
             cooldown_active = cooldown_sec > 0 and now_ts < cooldown_until
