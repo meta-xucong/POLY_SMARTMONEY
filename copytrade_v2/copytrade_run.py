@@ -1260,6 +1260,7 @@ def main() -> None:
         sell_confirm_force_ratio = 0.5 if force_ratio_raw is None else float(force_ratio_raw)
         force_shares_raw = cfg.get("sell_confirm_force_shares")
         sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
+        lag_ms = 0
         now_ms = int(now_ts * 1000)
         replay_from_ms = int(state.get("actions_replay_from_ms") or 0)
         if replay_from_ms > 0 and replay_from_ms != actions_cursor_ms:
@@ -1833,6 +1834,35 @@ def main() -> None:
         reconcile_set.update(state.get("open_orders", {}).keys())
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
         reconcile_set.update(state.get("topic_state", {}).keys())
+        lag_high = lag_ms > actions_lag_threshold_sec * 1000
+        reduce_reconcile = (not actions_list) or lag_high
+        if reduce_reconcile:
+            recent_event_sec = int(cfg.get("reconcile_recent_event_sec") or 600)
+            cutoff_ts = now_ts - max(recent_event_sec, 0)
+            reduced_set: Set[str] = set(state.get("open_orders", {}).keys())
+            reduced_set.update(my_by_token_id)
+            reduced_set.update(has_buy_by_token.keys())
+            reduced_set.update(has_sell_by_token.keys())
+            for token_id, ts in state.get("target_last_event_ts", {}).items():
+                try:
+                    if int(ts or 0) >= cutoff_ts:
+                        reduced_set.add(str(token_id))
+                except Exception:
+                    continue
+            for action in actions_list:
+                token_id = action.get("token_id")
+                if token_id:
+                    reduced_set.add(str(token_id))
+            reconcile_set = reduced_set
+            reason = "lag_high" if lag_high else "actions_empty"
+            logger.info(
+                "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s",
+                reason,
+                len(reconcile_set),
+                recent_event_sec,
+                lag_ms,
+                len(actions_list),
+            )
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
