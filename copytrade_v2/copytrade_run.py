@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import random
 import sys
 import time
 from datetime import datetime, timezone
@@ -906,6 +907,8 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
+    state.setdefault("missing_data_freeze", {})
+    state.setdefault("resolver_fail_cache", {})
     state.setdefault("target_positions_nonce_last_ts", 0)
     state.setdefault("target_positions_nonce_actions", 0)
     if not isinstance(state.get("open_orders"), dict):
@@ -968,6 +971,10 @@ def main() -> None:
         state["target_positions_nonce_last_ts"] = 0
     if not isinstance(state.get("target_positions_nonce_actions"), (int, float)):
         state["target_positions_nonce_actions"] = 0
+    if not isinstance(state.get("missing_data_freeze"), dict):
+        state["missing_data_freeze"] = {}
+    if not isinstance(state.get("resolver_fail_cache"), dict):
+        state["resolver_fail_cache"] = {}
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -1126,6 +1133,21 @@ def main() -> None:
         now_wall = time.time()
         actions_missing_ratio = 0.0
         unresolved_trade_candidates: list[Dict[str, Any]] = []
+        resolver_fail_cooldown_sec = int(cfg.get("resolver_fail_cooldown_sec") or 300)
+        resolver_fail_cache = state.setdefault("resolver_fail_cache", {})
+        if not isinstance(resolver_fail_cache, dict):
+            resolver_fail_cache = {}
+            state["resolver_fail_cache"] = resolver_fail_cache
+        if resolver_fail_cooldown_sec > 0:
+            expired_keys = [
+                token_key
+                for token_key, ts in resolver_fail_cache.items()
+                if now_ts - int(ts or 0) >= resolver_fail_cooldown_sec
+            ]
+            for token_key in expired_keys:
+                resolver_fail_cache.pop(token_key, None)
+        else:
+            resolver_fail_cache.clear()
         if now_wall - last_config_reload_ts >= max(config_reload_sec, 1):
             reason = "interval"
             try:
@@ -1721,11 +1743,20 @@ def main() -> None:
                     resolved_by_raw += 1
                 elif resolve_target_budget > 0:
                     resolve_target_budget -= 1
+                    fail_ts = resolver_fail_cache.get(token_key)
+                    if (
+                        fail_ts
+                        and resolver_fail_cooldown_sec > 0
+                        and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                    ):
+                        unresolved_target += 1
+                        continue
                     try:
                         token_id = resolve_token_id(token_key, pos, token_map)
                     except Exception as exc:
                         resolver_fail += 1
                         logger.warning("[WARN] resolver 失败(target): %s -> %s", token_key, exc)
+                        resolver_fail_cache[token_key] = now_ts
                         unresolved_target += 1
                         continue
                     token_map[token_key] = str(token_id)
@@ -1762,10 +1793,18 @@ def main() -> None:
 
             token_id = token_map.get(token_key) or _extract_token_id_from_raw(pos.get("raw") or {})
             if not token_id:
+                fail_ts = resolver_fail_cache.get(token_key)
+                if (
+                    fail_ts
+                    and resolver_fail_cooldown_sec > 0
+                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                ):
+                    continue
                 try:
                     token_id = resolve_token_id(token_key, pos, token_map)
                 except Exception as exc:
                     logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
+                    resolver_fail_cache[token_key] = now_ts
                     continue
 
             tid = str(token_id)
@@ -1809,6 +1848,13 @@ def main() -> None:
             if resolve_budget <= 0:
                 continue
             resolve_budget -= 1
+            fail_ts = resolver_fail_cache.get(str(token_key))
+            if (
+                fail_ts
+                and resolver_fail_cooldown_sec > 0
+                and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+            ):
+                continue
             try:
                 token_id = resolve_token_id(
                     token_key,
@@ -1823,6 +1869,7 @@ def main() -> None:
                 )
             except Exception as exc:
                 logger.warning("[WARN] resolver 失败(actions): %s -> %s", token_key, exc)
+                resolver_fail_cache[str(token_key)] = now_ts
                 continue
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
@@ -1847,10 +1894,18 @@ def main() -> None:
                 if token_map.get(token_key):
                     continue
                 resolve_trade_budget -= 1
+                fail_ts = resolver_fail_cache.get(token_key)
+                if (
+                    fail_ts
+                    and resolver_fail_cooldown_sec > 0
+                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                ):
+                    continue
                 try:
                     token_id = resolve_token_id(token_key, trade, token_map)
                 except Exception as exc:
                     logger.warning("[WARN] resolver 失败(trades): %s -> %s", token_key, exc)
+                    resolver_fail_cache[token_key] = now_ts
                     continue
                 tid = str(token_id)
                 token_map[token_key] = tid
@@ -1972,6 +2027,14 @@ def main() -> None:
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
+        missing_freeze_streak = int(cfg.get("missing_freeze_streak") or 5)
+        missing_freeze_min_sec = int(cfg.get("missing_freeze_min_sec") or 600)
+        missing_freeze_max_sec = int(cfg.get("missing_freeze_max_sec") or 1800)
+        if missing_freeze_min_sec > missing_freeze_max_sec:
+            missing_freeze_min_sec, missing_freeze_max_sec = (
+                missing_freeze_max_sec,
+                missing_freeze_min_sec,
+            )
         missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 0)
         orphan_cancel_rounds = int(cfg.get("orphan_cancel_rounds") or 3)
         orphan_ignore_sec = int(cfg.get("orphan_ignore_sec") or 120)
@@ -2045,6 +2108,33 @@ def main() -> None:
                     token_id,
                     place_fail_until,
                 )
+
+            missing_freeze = state.setdefault("missing_data_freeze", {})
+            freeze_meta = missing_freeze.get(token_id)
+            if isinstance(freeze_meta, dict) and freeze_meta.get("expires_at"):
+                expires_at = int(freeze_meta.get("expires_at") or 0)
+                if expires_at > 0 and now_ts >= expires_at:
+                    missing_freeze.pop(token_id, None)
+                    logger.info(
+                        "[UNFREEZE] token_id=%s reason=%s expired_at=%s",
+                        token_id,
+                        freeze_meta.get("reason") or "missing_streak",
+                        expires_at,
+                    )
+                    freeze_meta = None
+            if (
+                isinstance(freeze_meta, dict)
+                and freeze_meta.get("expires_at")
+                and freeze_meta.get("reason") == "missing_streak"
+                and token_id not in my_by_token_id
+                and not open_orders
+            ):
+                logger.info(
+                    "[SKIP] token_id=%s reason=missing_streak_freeze until=%s",
+                    token_id,
+                    freeze_meta.get("expires_at"),
+                )
+                continue
 
             if skip_closed:
                 if token_id in ignored:
@@ -2240,6 +2330,43 @@ def main() -> None:
                     and now_ts - last_seen_ts >= missing_timeout_sec
                 )
                 missing = t_now is None
+                if (
+                    missing
+                    and missing_freeze_streak > 0
+                    and missing_streak >= missing_freeze_streak
+                ):
+                    missing_freeze = state.setdefault("missing_data_freeze", {})
+                    existing_freeze = missing_freeze.get(token_id)
+                    has_expiring_freeze = isinstance(existing_freeze, dict) and existing_freeze.get(
+                        "expires_at"
+                    )
+                    if not existing_freeze or has_expiring_freeze:
+                        if has_expiring_freeze:
+                            expires_at = int(existing_freeze.get("expires_at") or 0)
+                            if expires_at > 0 and now_ts < expires_at:
+                                pass
+                            else:
+                                existing_freeze = None
+                        if not existing_freeze:
+                            freeze_min = max(0, missing_freeze_min_sec)
+                            freeze_max = max(freeze_min, missing_freeze_max_sec)
+                            if freeze_max == freeze_min:
+                                freeze_sec = freeze_min
+                            else:
+                                freeze_sec = random.randint(freeze_min, freeze_max)
+                            until_ts = now_ts + freeze_sec
+                            missing_freeze[token_id] = {
+                                "ts": now_ts,
+                                "expires_at": until_ts,
+                                "reason": "missing_streak",
+                                "streak": missing_streak,
+                            }
+                            logger.warning(
+                                "[FREEZE] token_id=%s reason=missing_streak streak=%s until=%s",
+                                token_id,
+                                missing_streak,
+                                until_ts,
+                            )
                 should_log_missing = (
                     missing
                     and (my_shares > 0 or open_orders_count > 0)
@@ -2645,20 +2772,31 @@ def main() -> None:
                     if not missing_data and token_id:
                         state.get("missing_buy_attempts", {}).pop(token_id, None)
                         cap_limit = min(cap_shares, cap_shares_notional)
-                        if my_shares <= cap_limit + eps:
-                            missing_freeze.pop(token_id, None)
-                        else:
-                            missing_freeze[token_id] = {
-                                "ts": now_ts,
-                                "shares": my_shares,
-                                "cap": cap_limit,
-                            }
-                            logger.warning(
-                                "[FREEZE] token_id=%s reason=position_exceeds_cap shares=%s cap=%s",
-                                token_id,
-                                my_shares,
-                                cap_limit,
-                            )
+                        existing_freeze = missing_freeze.get(token_id)
+                        active_streak_freeze = (
+                            isinstance(existing_freeze, dict)
+                            and existing_freeze.get("reason") == "missing_streak"
+                            and int(existing_freeze.get("expires_at") or 0) > now_ts
+                        )
+                        if not active_streak_freeze:
+                            if my_shares <= cap_limit + eps:
+                                missing_freeze.pop(token_id, None)
+                            else:
+                                missing_freeze[token_id] = {
+                                    "ts": now_ts,
+                                    "shares": my_shares,
+                                    "cap": cap_limit,
+                                    "reason": "position_exceeds_cap",
+                                }
+                                logger.warning(
+                                    "[FREEZE] token_id=%s reason=position_exceeds_cap shares=%s cap=%s",
+                                    token_id,
+                                    my_shares,
+                                    cap_limit,
+                                )
+                        elif my_shares > cap_limit + eps:
+                            existing_freeze["shares"] = my_shares
+                            existing_freeze["cap"] = cap_limit
                     if token_id and token_id in missing_freeze and any(
                         act.get("type") == "place"
                         and str(act.get("side") or "").upper() == "BUY"
