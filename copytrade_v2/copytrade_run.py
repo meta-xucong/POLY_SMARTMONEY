@@ -365,7 +365,7 @@ def _calc_used_notional_totals(
     for token_id, shares in my_by_token_id.items():
         mid = float(mid_cache.get(token_id, 0.0))
         if mid <= 0:
-            # 拿不到价格/无盘口：按 0 估值（不占用总仓位上限）
+            # 拿不到价格/无盘口：使用 fallback_mid_price 兜底，避免持仓估值被清零
             mid = 0.0
             if fallback_mid_price > 0 and abs(shares) > 0:
                 mid = fallback_mid_price
@@ -512,7 +512,7 @@ def _calc_planned_notional_with_fallback(
         state,
         now_ts,
         shadow_ttl_sec,
-        0.0,
+        fallback_mid_price,
         include_shadow=include_shadow,
     )
     if total > 0 or not my_by_token_id or fallback_mid_price <= 0:
