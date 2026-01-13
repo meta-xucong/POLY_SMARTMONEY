@@ -1918,10 +1918,8 @@ def main() -> None:
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
         reconcile_set.update(state.get("topic_state", {}).keys())
         lag_high = lag_ms > actions_lag_threshold_sec * 1000
-        actions_unreliable = bool(state.get("actions_unreliable"))
         actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
-        if not actions_unreliable:
-            actions_unreliable = actions_unreliable_until > now_ts
+        actions_unreliable = actions_unreliable_until > now_ts
         reduce_reconcile = ((not actions_list) and (not actions_unreliable)) or lag_high
         if reduce_reconcile:
             recent_event_sec = int(cfg.get("reconcile_recent_event_sec") or 600)
@@ -1962,6 +1960,27 @@ def main() -> None:
         ]
         for token_id in expired_ignored:
             ignored.pop(token_id, None)
+        active_ignored = {
+            token_id
+            for token_id, meta in ignored.items()
+            if isinstance(meta, dict)
+            and meta.get("expires_at")
+            and now_ts < int(meta.get("expires_at") or 0)
+        }
+        if active_ignored:
+            for token_id in sorted(active_ignored):
+                meta = ignored.get(token_id)
+                if not isinstance(meta, dict):
+                    continue
+                if meta.get("active_logged"):
+                    continue
+                logger.info(
+                    "[SKIP] active_ignore token_id=%s expires_at=%s",
+                    token_id,
+                    int(meta.get("expires_at") or 0),
+                )
+                meta["active_logged"] = True
+            reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
         status_cache = state["market_status_cache"]
         if skip_closed:
             def _ensure_long_ignore(token_id: str, meta: Optional[Dict[str, Any]]) -> None:
@@ -2008,28 +2027,6 @@ def main() -> None:
                 cached = status_cache.get(token_id) or {}
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
-
-        active_ignored = {
-            token_id
-            for token_id, meta in ignored.items()
-            if isinstance(meta, dict)
-            and meta.get("expires_at")
-            and now_ts < int(meta.get("expires_at") or 0)
-        }
-        if active_ignored:
-            for token_id in sorted(active_ignored):
-                meta = ignored.get(token_id)
-                if not isinstance(meta, dict):
-                    continue
-                if meta.get("active_logged"):
-                    continue
-                logger.info(
-                    "[SKIP] active_ignore token_id=%s expires_at=%s",
-                    token_id,
-                    int(meta.get("expires_at") or 0),
-                )
-                meta["active_logged"] = True
-            reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
