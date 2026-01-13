@@ -456,6 +456,7 @@ def _calc_planned_notional_totals(
     now_ts: int,
     shadow_ttl_sec: int,
     fallback_mid_price: float,
+    include_shadow: bool = True,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
     total, by_token, order_info_by_id = _calc_used_notional_totals(
         my_by_token_id,
@@ -467,7 +468,7 @@ def _calc_planned_notional_totals(
     shadow_total, shadow_by_token = _calc_shadow_buy_notional(
         state, now_ts, shadow_ttl_sec
     )
-    if shadow_total > 0:
+    if include_shadow and shadow_total > 0:
         total += shadow_total
         for token_id, usd in shadow_by_token.items():
             by_token[token_id] = by_token.get(token_id, 0.0) + usd
@@ -501,6 +502,7 @@ def _calc_planned_notional_with_fallback(
     shadow_ttl_sec: int,
     fallback_mid_price: float,
     logger: logging.Logger,
+    include_shadow: bool = True,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
     total, by_token, order_info_by_id, shadow_total = _calc_planned_notional_totals(
         my_by_token_id,
@@ -511,6 +513,7 @@ def _calc_planned_notional_with_fallback(
         now_ts,
         shadow_ttl_sec,
         0.0,
+        include_shadow=include_shadow,
     )
     if total > 0 or not my_by_token_id or fallback_mid_price <= 0:
         state["planned_zero_streak"] = 0
@@ -525,6 +528,7 @@ def _calc_planned_notional_with_fallback(
         now_ts,
         shadow_ttl_sec,
         fallback_mid_price,
+        include_shadow=include_shadow,
     )
     planned_zero_streak = int(state.get("planned_zero_streak") or 0) + 1
     state["planned_zero_streak"] = planned_zero_streak
@@ -2138,17 +2142,37 @@ def main() -> None:
             shadow_ttl_sec,
             fallback_mid_price,
             logger,
+            include_shadow=False,
+        )
+        (
+            planned_total_notional_shadow,
+            planned_by_token_usd_shadow,
+            _shadow_order_info_by_id,
+            _shadow_buy_usd,
+        ) = _calc_planned_notional_with_fallback(
+            my_by_token_id,
+            state.get("open_orders", {}),
+            state.get("last_mid_price_by_token_id", {}),
+            max_position_usd_per_token,
+            state,
+            now_ts,
+            shadow_ttl_sec,
+            fallback_mid_price,
+            logger,
+            include_shadow=True,
         )
         open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
-        open_buy_orders_usd += shadow_buy_usd
         top_tokens = sorted(planned_by_token_usd.items(), key=lambda item: item[1], reverse=True)[:5]
         top_tokens_fmt = [
             f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
         ]
         logger.info(
-            "[RISK_SUMMARY] used_total=%s open_buy_orders_usd=%s top_tokens=%s",
+            "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
+            "top_tokens=%s",
             planned_total_notional,
+            planned_total_notional_shadow,
             open_buy_orders_usd,
+            shadow_buy_usd,
             top_tokens_fmt,
         )
         my_trades_unreliable_until = int(state.get("my_trades_unreliable_until") or 0)
@@ -2263,6 +2287,24 @@ def main() -> None:
                                 shadow_ttl_sec,
                                 fallback_mid_price,
                                 logger,
+                                include_shadow=False,
+                            )
+                            (
+                                planned_total_notional_shadow,
+                                planned_by_token_usd_shadow,
+                                _shadow_order_info_by_id,
+                                _shadow_buy_usd,
+                            ) = _calc_planned_notional_with_fallback(
+                                my_by_token_id,
+                                state.get("open_orders", {}),
+                                state.get("last_mid_price_by_token_id", {}),
+                                max_position_usd_per_token,
+                                state,
+                                now_ts,
+                                shadow_ttl_sec,
+                                fallback_mid_price,
+                                logger,
+                                include_shadow=True,
                             )
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
                     meta = cached.get("meta") or {}
@@ -2506,6 +2548,41 @@ def main() -> None:
                             shadow_ttl_sec,
                             fallback_mid_price,
                             logger,
+                            include_shadow=False,
+                        )
+                        (
+                            planned_total_notional_shadow,
+                            planned_by_token_usd_shadow,
+                            _shadow_order_info_by_id,
+                            _shadow_buy_usd,
+                        ) = _calc_planned_notional_with_fallback(
+                            my_by_token_id,
+                            state.get("open_orders", {}),
+                            state.get("last_mid_price_by_token_id", {}),
+                            max_position_usd_per_token,
+                            state,
+                            now_ts,
+                            shadow_ttl_sec,
+                            fallback_mid_price,
+                            logger,
+                            include_shadow=True,
+                        )
+                        (
+                            planned_total_notional_shadow,
+                            planned_by_token_usd_shadow,
+                            _shadow_order_info_by_id,
+                            _shadow_buy_usd,
+                        ) = _calc_planned_notional_with_fallback(
+                            my_by_token_id,
+                            state.get("open_orders", {}),
+                            state.get("last_mid_price_by_token_id", {}),
+                            max_position_usd_per_token,
+                            state,
+                            now_ts,
+                            shadow_ttl_sec,
+                            fallback_mid_price,
+                            logger,
+                            include_shadow=True,
                         )
                         if orphan_ignore_sec > 0:
                             state.setdefault("ignored_tokens", {})[token_id] = {
@@ -2684,6 +2761,24 @@ def main() -> None:
                                     shadow_ttl_sec,
                                     fallback_mid_price,
                                     logger,
+                                    include_shadow=False,
+                                )
+                                (
+                                    planned_total_notional_shadow,
+                                    planned_by_token_usd_shadow,
+                                    _shadow_order_info_by_id,
+                                    _shadow_buy_usd,
+                                ) = _calc_planned_notional_with_fallback(
+                                    my_by_token_id,
+                                    state.get("open_orders", {}),
+                                    state.get("last_mid_price_by_token_id", {}),
+                                    max_position_usd_per_token,
+                                    state,
+                                    now_ts,
+                                    shadow_ttl_sec,
+                                    fallback_mid_price,
+                                    logger,
+                                    include_shadow=True,
                                 )
                                 # NOTE: cancel-intent should NOT extend cooldown.
                                 # Cooldown is applied only on successful place actions.
@@ -2713,6 +2808,9 @@ def main() -> None:
                     pending_cancel_actions = []
                     pending_cancel_usd = 0.0
                     token_planned_before = float(planned_by_token_usd.get(token_id, 0.0))
+                    token_planned_before_shadow = float(
+                        planned_by_token_usd_shadow.get(token_id, 0.0)
+                    )
 
                     for act in actions:
                         act_type = act.get("type")
@@ -2724,8 +2822,12 @@ def main() -> None:
                                 pending_cancel_actions.append(act)
                                 pending_cancel_usd += usd
                                 planned_total_notional -= usd
+                                planned_total_notional_shadow -= usd
                                 planned_by_token_usd[token_id] = max(
                                     0.0, planned_by_token_usd.get(token_id, 0.0) - usd
+                                )
+                                planned_by_token_usd_shadow[token_id] = max(
+                                    0.0, planned_by_token_usd_shadow.get(token_id, 0.0) - usd
                                 )
                             else:
                                 filtered_actions.append(act)
@@ -2745,6 +2847,15 @@ def main() -> None:
                             continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                        planned_token_notional_shadow = float(
+                            planned_by_token_usd_shadow.get(token_id, 0.0)
+                        )
+                        planned_total_notional_risk = max(
+                            planned_total_notional, planned_total_notional_shadow
+                        )
+                        planned_token_notional_risk = max(
+                            planned_token_notional, planned_token_notional_shadow
+                        )
                         cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
                         ok, reason = risk_check(
                             token_key,
@@ -2753,8 +2864,8 @@ def main() -> None:
                             price,
                             cfg_for_action,
                             side=side,
-                            planned_total_notional=planned_total_notional,
-                            planned_token_notional=planned_token_notional,
+                            planned_total_notional=planned_total_notional_risk,
+                            planned_token_notional=planned_token_notional_risk,
                             cumulative_total_usd=None,
                             cumulative_token_usd=None,
                         )
@@ -2762,9 +2873,9 @@ def main() -> None:
                             resized = _shrink_on_risk_limit(
                                 act,
                                 max_notional_total,
-                                planned_total_notional,
+                                planned_total_notional_risk,
                                 float(cfg_for_action.get("max_notional_per_token") or 0.0),
-                                planned_token_notional,
+                                planned_token_notional_risk,
                                 float(cfg_for_action.get("min_order_usd") or 0.0),
                                 float(cfg_for_action.get("min_order_shares") or 0.0),
                                 token_key,
@@ -2775,6 +2886,10 @@ def main() -> None:
                                 if has_any_place and pending_cancel_actions:
                                     planned_total_notional += pending_cancel_usd
                                     planned_by_token_usd[token_id] = token_planned_before
+                                    planned_total_notional_shadow += pending_cancel_usd
+                                    planned_by_token_usd_shadow[token_id] = (
+                                        token_planned_before_shadow
+                                    )
                                     pending_cancel_actions = []
                                     pending_cancel_usd = 0.0
                                 blocked_reasons.add(reason or "risk_check")
@@ -2784,6 +2899,15 @@ def main() -> None:
                             price = float(act.get("price") or 0.0)
                             size = float(act.get("size") or 0.0)
                             planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                            planned_token_notional_shadow = float(
+                                planned_by_token_usd_shadow.get(token_id, 0.0)
+                            )
+                            planned_total_notional_risk = max(
+                                planned_total_notional, planned_total_notional_shadow
+                            )
+                            planned_token_notional_risk = max(
+                                planned_token_notional, planned_token_notional_shadow
+                            )
                             ok2, reason2 = risk_check(
                                 token_key,
                                 size,
@@ -2791,8 +2915,8 @@ def main() -> None:
                                 price,
                                 cfg_for_action,
                                 side=side,
-                                planned_total_notional=planned_total_notional,
-                                planned_token_notional=planned_token_notional,
+                                planned_total_notional=planned_total_notional_risk,
+                                planned_token_notional=planned_token_notional_risk,
                                 cumulative_total_usd=None,
                                 cumulative_token_usd=None,
                             )
@@ -2800,6 +2924,10 @@ def main() -> None:
                                 if has_any_place and pending_cancel_actions:
                                     planned_total_notional += pending_cancel_usd
                                     planned_by_token_usd[token_id] = token_planned_before
+                                    planned_total_notional_shadow += pending_cancel_usd
+                                    planned_by_token_usd_shadow[token_id] = (
+                                        token_planned_before_shadow
+                                    )
                                     pending_cancel_actions = []
                                     pending_cancel_usd = 0.0
                                 blocked_reasons.add(reason2 or reason or "risk_check")
@@ -2814,13 +2942,19 @@ def main() -> None:
                         if side == "BUY":
                             usd = abs(size) * price
                             planned_total_notional += usd
+                            planned_total_notional_shadow += usd
                             planned_by_token_usd[token_id] = (
                                 planned_by_token_usd.get(token_id, 0.0) + usd
+                            )
+                            planned_by_token_usd_shadow[token_id] = (
+                                planned_by_token_usd_shadow.get(token_id, 0.0) + usd
                             )
 
                     if has_any_place and pending_cancel_actions:
                         planned_total_notional += pending_cancel_usd
                         planned_by_token_usd[token_id] = token_planned_before
+                        planned_total_notional_shadow += pending_cancel_usd
+                        planned_by_token_usd_shadow[token_id] = token_planned_before_shadow
                         pending_cancel_actions = []
                         pending_cancel_usd = 0.0
                     elif (not has_any_place) and pending_cancel_actions:
@@ -2946,6 +3080,24 @@ def main() -> None:
                         shadow_ttl_sec,
                         fallback_mid_price,
                         logger,
+                        include_shadow=False,
+                    )
+                    (
+                        planned_total_notional_shadow,
+                        planned_by_token_usd_shadow,
+                        _shadow_order_info_by_id,
+                        _shadow_buy_usd,
+                    ) = _calc_planned_notional_with_fallback(
+                        my_by_token_id,
+                        state.get("open_orders", {}),
+                        state.get("last_mid_price_by_token_id", {}),
+                        max_position_usd_per_token,
+                        state,
+                        now_ts,
+                        shadow_ttl_sec,
+                        fallback_mid_price,
+                        logger,
+                        include_shadow=True,
                     )
 
                     has_any_place_final = any(
@@ -3338,6 +3490,7 @@ def main() -> None:
                             shadow_ttl_sec,
                             fallback_mid_price,
                             logger,
+                            include_shadow=False,
                         )
                         # NOTE: cancel-intent should NOT extend cooldown.
                         # Cooldown is applied only on successful place actions.
@@ -3561,6 +3714,24 @@ def main() -> None:
                 shadow_ttl_sec,
                 fallback_mid_price,
                 logger,
+                include_shadow=False,
+            )
+            (
+                planned_total_notional_shadow,
+                planned_by_token_usd_shadow,
+                _shadow_order_info_by_id,
+                _shadow_buy_usd,
+            ) = _calc_planned_notional_with_fallback(
+                my_by_token_id,
+                state.get("open_orders", {}),
+                state.get("last_mid_price_by_token_id", {}),
+                max_position_usd_per_token,
+                state,
+                now_ts,
+                shadow_ttl_sec,
+                fallback_mid_price,
+                logger,
+                include_shadow=True,
             )
 
             has_any_place_final = any(act.get("type") == "place" for act in actions)
