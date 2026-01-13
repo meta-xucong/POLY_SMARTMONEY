@@ -592,6 +592,7 @@ def _calc_used_notional_totals(
     open_orders_by_token_id: Dict[str, list[dict]],
     mid_cache: Dict[str, float],
     max_position_usd_per_token: float,
+    fallback_mid_price: float,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]]]:
     total = 0.0
     by_token: Dict[str, float] = {}
@@ -600,8 +601,10 @@ def _calc_used_notional_totals(
     for token_id, shares in my_by_token_id.items():
         mid = float(mid_cache.get(token_id, 0.0))
         if mid <= 0:
-            # 拿不到价格/无盘口：按 0 估值（不占用总仓位上限）
+            # 拿不到价格/无盘口：使用 fallback_mid_price 兜底，避免持仓估值被清零
             mid = 0.0
+            if fallback_mid_price > 0 and abs(shares) > 0:
+                mid = fallback_mid_price
         if mid < 0:
             mid = 0.0
         elif mid > 1.0:
@@ -688,10 +691,15 @@ def _calc_planned_notional_totals(
     state: Dict[str, Any],
     now_ts: int,
     shadow_ttl_sec: int,
+    fallback_mid_price: float,
     include_shadow: bool = True,
 ) -> tuple[float, Dict[str, float], Dict[str, Dict[str, object]], float]:
     total, by_token, order_info_by_id = _calc_used_notional_totals(
-        my_by_token_id, open_orders_by_token_id, mid_cache, max_position_usd_per_token
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        fallback_mid_price,
     )
     shadow_total, shadow_by_token = _calc_shadow_buy_notional(
         state, now_ts, shadow_ttl_sec
@@ -708,9 +716,14 @@ def _calc_used_notional_total(
     open_orders_by_token_id: Dict[str, list[dict]],
     mid_cache: Dict[str, float],
     max_position_usd_per_token: float,
+    fallback_mid_price: float,
 ) -> float:
     total, _, _ = _calc_used_notional_totals(
-        my_by_token_id, open_orders_by_token_id, mid_cache, max_position_usd_per_token
+        my_by_token_id,
+        open_orders_by_token_id,
+        mid_cache,
+        max_position_usd_per_token,
+        fallback_mid_price,
     )
     return total
 
@@ -2718,6 +2731,7 @@ def main() -> None:
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
         max_notional_total = float(cfg.get("max_notional_total") or 0.0)
+        fallback_mid_price = float(cfg.get("missing_mid_fallback_price") or 1.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
@@ -2753,6 +2767,7 @@ def main() -> None:
             state,
             now_ts,
             shadow_ttl_sec,
+            fallback_mid_price,
             include_shadow=False,
         )
         (
@@ -2768,6 +2783,7 @@ def main() -> None:
             state,
             now_ts,
             shadow_ttl_sec,
+            fallback_mid_price,
             include_shadow=True,
         )
         open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
@@ -2865,6 +2881,7 @@ def main() -> None:
                                 state,
                                 now_ts,
                                 shadow_ttl_sec,
+                                fallback_mid_price,
                                 include_shadow=False,
                             )
                             (
@@ -2880,6 +2897,7 @@ def main() -> None:
                                 state,
                                 now_ts,
                                 shadow_ttl_sec,
+                                fallback_mid_price,
                                 include_shadow=True,
                             )
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
@@ -3110,6 +3128,7 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
                             include_shadow=False,
                         )
                         (
@@ -3125,6 +3144,7 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
                             include_shadow=True,
                         )
                         if orphan_ignore_sec > 0:
@@ -3323,6 +3343,7 @@ def main() -> None:
                                     state,
                                     now_ts,
                                     shadow_ttl_sec,
+                                    fallback_mid_price,
                                     include_shadow=False,
                                 )
                                 (
@@ -3338,6 +3359,7 @@ def main() -> None:
                                     state,
                                     now_ts,
                                     shadow_ttl_sec,
+                                    fallback_mid_price,
                                     include_shadow=True,
                                 )
                                 # NOTE: cancel-intent should NOT extend cooldown.
@@ -3627,6 +3649,7 @@ def main() -> None:
                         state,
                         now_ts,
                         shadow_ttl_sec,
+                        fallback_mid_price,
                         include_shadow=False,
                     )
                     (
@@ -3642,6 +3665,7 @@ def main() -> None:
                         state,
                         now_ts,
                         shadow_ttl_sec,
+                        fallback_mid_price,
                         include_shadow=True,
                     )
 
@@ -4042,6 +4066,7 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
                             include_shadow=False,
                         )
                         (
@@ -4057,6 +4082,7 @@ def main() -> None:
                             state,
                             now_ts,
                             shadow_ttl_sec,
+                            fallback_mid_price,
                             include_shadow=True,
                         )
                         # NOTE: cancel-intent should NOT extend cooldown.
@@ -4318,6 +4344,7 @@ def main() -> None:
                 state,
                 now_ts,
                 shadow_ttl_sec,
+                fallback_mid_price,
                 include_shadow=False,
             )
             (
@@ -4333,6 +4360,7 @@ def main() -> None:
                 state,
                 now_ts,
                 shadow_ttl_sec,
+                fallback_mid_price,
                 include_shadow=True,
             )
 
