@@ -252,6 +252,33 @@ def _parse_market_end_ts(meta: Optional[Dict[str, Any]]) -> Optional[int]:
     return None
 
 
+def _is_closed_by_end_date(pos: Dict[str, Any], now_ts: int) -> tuple[bool, Optional[int]]:
+    end_date = pos.get("end_date") or pos.get("endDate")
+    if not end_date:
+        return False, None
+    end_ts = _parse_market_end_ts({"end_date": end_date})
+    if end_ts is None:
+        return False, None
+    return end_ts <= now_ts, end_ts
+
+
+def _filter_closed_positions(
+    positions: list[Dict[str, Any]],
+    closed_keys: Dict[str, int],
+) -> tuple[list[Dict[str, Any]], int]:
+    if not positions or not closed_keys:
+        return positions, 0
+    kept: list[Dict[str, Any]] = []
+    removed = 0
+    for pos in positions:
+        token_key = pos.get("token_key")
+        if token_key and token_key in closed_keys:
+            removed += 1
+            continue
+        kept.append(pos)
+    return kept, removed
+
+
 def _extract_mid_cache_meta(state: Dict[str, Any]) -> tuple[Optional[float], Dict[str, Any]]:
     meta_keys = (
         "mid_cache_ttl_sec",
@@ -975,6 +1002,8 @@ def main() -> None:
         state["missing_data_freeze"] = {}
     if not isinstance(state.get("resolver_fail_cache"), dict):
         state["resolver_fail_cache"] = {}
+    if not isinstance(state.get("closed_token_keys"), dict):
+        state["closed_token_keys"] = {}
 
     data_client = DataApiClient()
     clob_client = init_clob_client()
@@ -1599,6 +1628,32 @@ def main() -> None:
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
             logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
+
+        closed_token_keys = state.get("closed_token_keys")
+        if not isinstance(closed_token_keys, dict):
+            closed_token_keys = {}
+            state["closed_token_keys"] = closed_token_keys
+        new_closed = 0
+        for pos in target_pos + my_pos:
+            token_key = pos.get("token_key")
+            if not token_key or token_key in closed_token_keys:
+                continue
+            closed, end_ts = _is_closed_by_end_date(pos, now_ts)
+            if closed:
+                closed_token_keys[str(token_key)] = int(end_ts or now_ts)
+                new_closed += 1
+        if new_closed:
+            logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
+
+        if closed_token_keys:
+            target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
+            my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
+            if removed_target or removed_my:
+                logger.info(
+                    "[SKIP] closed_positions filtered target=%s my=%s",
+                    removed_target,
+                    removed_my,
+                )
 
         should_log_heartbeat = has_new_actions or (
             now_ts - last_heartbeat_ts >= heartbeat_interval_sec
