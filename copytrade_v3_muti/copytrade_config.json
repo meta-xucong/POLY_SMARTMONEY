@@ -45,13 +45,13 @@
   "max_order_usd": 10,
   "max_position_usd_per_token": 25,
   "boot_sync_mode": "baseline_only",
-  "fresh_boot_on_start": true,
+  "fresh_boot_on_start": false,
   "ignore_boot_tokens": false,
   "ignore_boot_tokens_scope": "probe_only",
   "probe_buy_on_first_seen": true,
   "probe_order_usd": 2,
   "follow_new_topics_only": false,
-  "adopt_existing_orders_on_boot": false,
+  "adopt_existing_orders_on_boot": true,
 
   "tick_size": 0.001,
 
