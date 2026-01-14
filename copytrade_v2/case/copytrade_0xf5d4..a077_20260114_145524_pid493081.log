@@ -1,0 +1,256 @@
+2026-01-14 14:55:24 INFO __main__ 日志初始化完成: /home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v2/logs/copytrade_0xf5d4..a077_20260114_145524_pid493081.log
+2026-01-14 14:55:24 INFO __main__ [STATE] per-target state: /home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v2/state.json -> /home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v2/state_f5d4_a077.json
+2026-01-14 14:55:24 INFO __main__ [STATE] path=/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v2/state_f5d4_a077.json run_start_ms=1768402524706
+2026-01-14 14:55:24 INFO __main__ [CFG] target=0xf5d4c1341267162afc3749908631087db95aa077 my=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f ratio=0.05
+2026-01-14 14:55:25 DEBUG rlp.codec Consider installing rusty-rlp to improve pyrlp performance with a rust basedbackend. Not currently functional for Python 3.11
+2026-01-14 14:55:25 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:55:25 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /auth/derive-api-key HTTP/1.1" 200 None
+2026-01-14 14:55:25 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:55:25 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:55:25 INFO __main__ [BOOT] adopt_existing_orders_on_boot: adopted=1
+2026-01-14 14:55:25 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:55:26 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:55:26 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:55:26 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:55:27 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402526 HTTP/1.1" 200 None
+2026-01-14 14:55:28 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402526 HTTP/1.1" 200 None
+2026-01-14 14:55:28 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:55:28 INFO __main__ [SKIP] closed_token_keys added count=221
+2026-01-14 14:55:28 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:55:28 INFO __main__ [POS] target_count=1 my_count=1 target_incomplete=False my_incomplete=False | t_src=http_positions t_cb=1768402526 t_rsec=25 t_mode=sec t_http=200 t_hit=None
+2026-01-14 14:55:28 INFO __main__ [POS] target cache_headers_first={'CF-Cache-Status': 'DYNAMIC', 'Date': 'Wed, 14 Jan 2026 14:55:27 GMT', 'Server': 'cloudflare'}
+2026-01-14 14:55:28 INFO __main__ [POS] target cache_headers_last={'CF-Cache-Status': 'DYNAMIC', 'Date': 'Wed, 14 Jan 2026 14:55:28 GMT', 'Server': 'cloudflare'}
+2026-01-14 14:55:28 INFO __main__ [BOOT] baseline_only: baseline_keys=1 baseline_ids=0 cursor_ms=1768402524706
+2026-01-14 14:55:48 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:55:48 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:55:49 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:55:49 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:55:49 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:55:50 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402549 HTTP/1.1" 200 None
+2026-01-14 14:55:50 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402549 HTTP/1.1" 200 None
+2026-01-14 14:55:50 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:55:50 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:55:50 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): gamma-api.polymarket.com:443
+2026-01-14 14:55:51 DEBUG urllib3.connectionpool https://gamma-api.polymarket.com:443 "GET /markets/slug/nba-nyk-sac-2026-01-14 HTTP/1.1" 200 None
+2026-01-14 14:55:51 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=2 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:55:51 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): gamma-api.polymarket.com:443
+2026-01-14 14:55:52 DEBUG urllib3.connectionpool https://gamma-api.polymarket.com:443 "GET /markets?clob_token_ids=22122465653874781019676289016043243344051283701706410535159713745280277370361&clob_token_ids=64038552166615737973143802674075482033802621896357045712542344392659181118707&limit=2 HTTP/1.1" 200 None
+2026-01-14 14:55:52 INFO __main__ [RISK_SUMMARY] used_total=7.9492 used_total_shadow=7.9492 open_buy_orders_usd=2.0991999999999997 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500', '64038552166615737973143802674075482033802621896357045712542344392659181118707=2.0992']
+2026-01-14 14:55:52 INFO __main__ [DBG] token_id=64038552166615737973143802674075482033802621896357045712542344392659181118707 missing=True missing_streak=1 t_now=None t_last=None my_shares=0.0 open_orders_count=1
+2026-01-14 14:55:52 INFO __main__ [DBG] token_id=64038552166615737973143802674075482033802621896357045712542344392659181118707 legacy_desired=0.0
+2026-01-14 14:56:12 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:56:12 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:56:12 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:13 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:13 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:56:13 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402573 HTTP/1.1" 200 None
+2026-01-14 14:56:14 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402573 HTTP/1.1" 200 None
+2026-01-14 14:56:14 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:56:14 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:56:14 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=2 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:56:14 INFO __main__ [RISK_SUMMARY] used_total=7.9492 used_total_shadow=7.9492 open_buy_orders_usd=2.0991999999999997 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500', '64038552166615737973143802674075482033802621896357045712542344392659181118707=2.0992']
+2026-01-14 14:56:34 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:56:35 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:56:35 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:35 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:35 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:56:36 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402595 HTTP/1.1" 200 None
+2026-01-14 14:56:37 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402595 HTTP/1.1" 200 None
+2026-01-14 14:56:37 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:56:37 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:56:37 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=2 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:56:37 INFO __main__ [RISK_SUMMARY] used_total=7.9492 used_total_shadow=7.9492 open_buy_orders_usd=2.0991999999999997 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500', '64038552166615737973143802674075482033802621896357045712542344392659181118707=2.0992']
+2026-01-14 14:56:37 INFO __main__ [ORPHAN] token_id=64038552166615737973143802674075482033802621896357045712542344392659181118707 missing_streak=3 open_orders=1
+2026-01-14 14:56:37 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:56:37 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "DELETE /order HTTP/1.1" 200 None
+2026-01-14 14:56:57 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:56:58 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:56:58 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:58 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:56:59 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:56:59 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402619 HTTP/1.1" 200 None
+2026-01-14 14:57:00 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402619 HTTP/1.1" 200 None
+2026-01-14 14:57:00 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:57:00 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:57:00 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:57:00 INFO __main__ [SKIP] active_ignore token_id=64038552166615737973143802674075482033802621896357045712542344392659181118707 expires_at=1768402714
+2026-01-14 14:57:00 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:57:20 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:57:21 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:57:21 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:57:21 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:57:22 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:57:22 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402642 HTTP/1.1" 200 None
+2026-01-14 14:57:23 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402642 HTTP/1.1" 200 None
+2026-01-14 14:57:23 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:57:23 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:57:23 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:57:23 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:57:43 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:57:43 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:57:44 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:57:44 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:57:44 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:57:45 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402664 HTTP/1.1" 200 None
+2026-01-14 14:57:45 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402664 HTTP/1.1" 200 None
+2026-01-14 14:57:46 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:57:46 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:57:46 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:57:46 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:58:06 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:58:06 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:58:06 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:07 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:07 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:58:08 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402687 HTTP/1.1" 200 None
+2026-01-14 14:58:08 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402687 HTTP/1.1" 200 None
+2026-01-14 14:58:09 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:58:09 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:58:09 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:58:09 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:58:29 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:58:29 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:58:30 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:30 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:30 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:58:30 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402710 HTTP/1.1" 200 None
+2026-01-14 14:58:31 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402710 HTTP/1.1" 200 None
+2026-01-14 14:58:32 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:58:32 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:58:32 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:58:32 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:58:52 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:58:52 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:58:52 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:53 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:58:53 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:58:53 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402733 HTTP/1.1" 200 None
+2026-01-14 14:58:54 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402733 HTTP/1.1" 200 None
+2026-01-14 14:58:54 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:58:54 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:58:54 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:58:54 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:59:14 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:59:14 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:59:15 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:59:16 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:59:16 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:59:16 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402756 HTTP/1.1" 200 None
+2026-01-14 14:59:17 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402756 HTTP/1.1" 200 None
+2026-01-14 14:59:17 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:59:17 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:59:17 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:59:17 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:59:37 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 14:59:37 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 14:59:38 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:59:38 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 14:59:38 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 14:59:39 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402778 HTTP/1.1" 200 None
+2026-01-14 14:59:39 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402778 HTTP/1.1" 200 None
+2026-01-14 14:59:39 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 14:59:39 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 14:59:39 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 14:59:39 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 14:59:59 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:00:00 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:00:00 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:00 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:00 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:00:01 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402800 HTTP/1.1" 200 None
+2026-01-14 15:00:02 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402800 HTTP/1.1" 200 None
+2026-01-14 15:00:02 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:00:02 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:00:02 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:00:02 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:00:22 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:00:23 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:00:23 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:23 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:23 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:00:24 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402823 HTTP/1.1" 200 None
+2026-01-14 15:00:24 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402823 HTTP/1.1" 200 None
+2026-01-14 15:00:25 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:00:25 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:00:25 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:00:25 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:00:45 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:00:45 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:00:45 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:46 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:00:46 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:00:46 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402846 HTTP/1.1" 200 None
+2026-01-14 15:00:47 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402846 HTTP/1.1" 200 None
+2026-01-14 15:00:48 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:00:48 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:00:48 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:00:48 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:01:08 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:01:08 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:01:08 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:09 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:09 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:01:09 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402869 HTTP/1.1" 200 None
+2026-01-14 15:01:10 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402869 HTTP/1.1" 200 None
+2026-01-14 15:01:10 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:01:10 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:01:10 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:01:10 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): gamma-api.polymarket.com:443
+2026-01-14 15:01:11 DEBUG urllib3.connectionpool https://gamma-api.polymarket.com:443 "GET /markets?clob_token_ids=22122465653874781019676289016043243344051283701706410535159713745280277370361&limit=1 HTTP/1.1" 200 None
+2026-01-14 15:01:11 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:01:31 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:01:31 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:01:31 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:32 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:32 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:01:32 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402892 HTTP/1.1" 200 None
+2026-01-14 15:01:33 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402892 HTTP/1.1" 200 None
+2026-01-14 15:01:33 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:01:33 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:01:33 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:01:33 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:01:53 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:01:54 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:01:54 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:55 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:01:55 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:01:56 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402915 HTTP/1.1" 200 None
+2026-01-14 15:01:56 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402915 HTTP/1.1" 200 None
+2026-01-14 15:01:57 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:01:57 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:01:57 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:01:57 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:02:17 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:02:17 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:02:17 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:02:18 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:02:18 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:02:19 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402938 HTTP/1.1" 200 None
+2026-01-14 15:02:19 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402938 HTTP/1.1" 200 None
+2026-01-14 15:02:20 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:02:20 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:02:20 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:02:20 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:02:40 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:02:41 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:02:41 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:02:42 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:02:43 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:02:43 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402963 HTTP/1.1" 200 None
+2026-01-14 15:02:44 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402963 HTTP/1.1" 200 None
+2026-01-14 15:02:45 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:02:45 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:02:45 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:02:45 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
+2026-01-14 15:03:05 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): clob.polymarket.com:443
+2026-01-14 15:03:05 DEBUG urllib3.connectionpool https://clob.polymarket.com:443 "GET /data/orders?next_cursor=MA== HTTP/1.1" 200 None
+2026-01-14 15:03:05 DEBUG urllib3.connectionpool Resetting dropped connection: data-api.polymarket.com
+2026-01-14 15:03:06 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:03:06 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /trades?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=300&offset=0&takerOnly=False HTTP/1.1" 200 None
+2026-01-14 15:03:06 DEBUG urllib3.connectionpool Starting new HTTPS connection (1): data-api.polymarket.com:443
+2026-01-14 15:03:07 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=0&sizeThreshold=0.0&_cb=1768402986 HTTP/1.1" 200 None
+2026-01-14 15:03:08 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0xf5d4c1341267162afc3749908631087db95aa077&limit=500&offset=500&sizeThreshold=0.0&_cb=1768402986 HTTP/1.1" 200 None
+2026-01-14 15:03:08 DEBUG urllib3.connectionpool https://data-api.polymarket.com:443 "GET /positions?user=0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f&limit=500&offset=0&sizeThreshold=0.0&sortBy=TOKENS&sortDirection=DESC HTTP/1.1" 200 None
+2026-01-14 15:03:08 INFO __main__ [SKIP] closed_positions filtered target=215 my=6
+2026-01-14 15:03:08 INFO __main__ [SAFE] actions_empty reduce_reconcile_set size=1 recent_sec=600 lag_ms=0 actions=0 actions_unreliable=False
+2026-01-14 15:03:08 INFO __main__ [RISK_SUMMARY] used_total=5.8500000000000005 used_total_shadow=5.8500000000000005 open_buy_orders_usd=0 shadow_buy_usd=0.0 top_tokens=['0xb737312b350df08fa9d1cdb2a5cb8ddb1349141cafec251c9cc7d1cdd1754e46:1=5.8500']
