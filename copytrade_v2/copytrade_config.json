@@ -62,7 +62,7 @@
   "skip_closed_markets": true,
   "block_on_unknown_market_state": false,
 
-  "max_notional_per_token": 8,
+  "max_notional_per_token": 6,
   "max_notional_total": 40,
   "shadow_buy_ttl_sec": 900,
 
