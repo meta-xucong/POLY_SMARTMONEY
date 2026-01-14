@@ -258,6 +258,14 @@ def reconcile_one(
     if price is None or price <= 0:
         return actions
 
+    min_price = float(cfg.get("min_price") or 0.01)
+    if min_price > 0 and price < min_price:
+        price = min_price
+        if tick_size > 0:
+            price = round_to_tick(price, tick_size, direction="up")
+    if min_price > 0 and price < min_price:
+        price = min_price
+
     if mode == "auto_usd" and target_order_usd is not None:
         size = target_order_usd / price
 

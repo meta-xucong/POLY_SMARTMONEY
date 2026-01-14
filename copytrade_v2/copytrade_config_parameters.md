@@ -57,6 +57,7 @@
 ## 价格与撮合
 
 - `tick_size`: 价格最小变动单位。
+- `min_price`: 价格下限（低于该值将自动抬至该值）。
 
 - `maker_only`: 是否仅挂 maker 单。
 - `reprice_ticks`: 改价偏移的 tick 数。
@@ -68,6 +69,7 @@
 ## 风控与容错
 
 - `cooldown_sec_per_token`: 每个 token 的冷却时间（秒）。
+- `orderbook_empty_close_streak`: 盘口为空连续次数达到该值时，将 token 视为已结束并跳过。
 - `missing_timeout_sec`: 目标仓位缺失超时时间（秒）。
 - `missing_to_zero_rounds`: 目标仓位缺失达到次数后是否视为零仓位。
 - `sell_confirm_max`: 在没有 SELL 动作时，卖出确认的最大次数。
