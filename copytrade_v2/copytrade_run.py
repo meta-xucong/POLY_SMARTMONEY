@@ -767,7 +767,9 @@ def _record_orderbook_empty(
     state: Dict[str, Any],
     token_id: str,
     logger: logging.Logger,
-) -> None:
+    cfg: Dict[str, Any],
+    now_ts: int,
+) -> bool:
     streaks = state.setdefault("orderbook_empty_streak", {})
     if not isinstance(streaks, dict):
         streaks = {}
@@ -781,6 +783,18 @@ def _record_orderbook_empty(
             token_id,
             current,
         )
+    close_streak = int(cfg.get("orderbook_empty_close_streak") or 3)
+    if close_streak > 0 and current >= close_streak:
+        closed_token_keys = state.setdefault("closed_token_keys", {})
+        if isinstance(closed_token_keys, dict) and str(token_id) not in closed_token_keys:
+            closed_token_keys[str(token_id)] = int(now_ts)
+            logger.warning(
+                "[CLOSE] orderbook_empty token_id=%s streak=%s",
+                token_id,
+                current,
+            )
+            return True
+    return False
 
 
 def _clear_orderbook_empty(state: Dict[str, Any], token_id: str) -> None:
@@ -2650,7 +2664,18 @@ def main() -> None:
                             best_bid,
                             best_ask,
                         )
-                        _record_orderbook_empty(state, token_id, logger)
+                        closed_now = _record_orderbook_empty(
+                            state,
+                            token_id,
+                            logger,
+                            cfg,
+                            now_ts,
+                        )
+                        if closed_now:
+                            logger.info(
+                                "[SKIP] closed_by_orderbook_empty token_id=%s",
+                                token_id,
+                            )
                         continue
 
                     _clear_orderbook_empty(state, token_id)
@@ -3260,7 +3285,18 @@ def main() -> None:
                     best_bid,
                     best_ask,
                 )
-                _record_orderbook_empty(state, token_id, logger)
+                closed_now = _record_orderbook_empty(
+                    state,
+                    token_id,
+                    logger,
+                    cfg,
+                    now_ts,
+                )
+                if closed_now:
+                    logger.info(
+                        "[SKIP] closed_by_orderbook_empty token_id=%s",
+                        token_id,
+                    )
                 logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 continue
             _clear_orderbook_empty(state, token_id)
