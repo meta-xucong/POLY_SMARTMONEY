@@ -62,21 +62,23 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
 
     best_ask: Optional[float] = None
     best_bid: Optional[float] = None
+    price_bid_raw: Any = None
+    price_ask_raw: Any = None
 
     try:
-        price = client.get_price(tid, side="BUY")
-        if isinstance(price, dict):
-            best_bid = safe_float(price.get("price"))
+        price_bid_raw = client.get_price(tid, side="BUY")
+        if isinstance(price_bid_raw, dict):
+            best_bid = safe_float(price_bid_raw.get("price"))
         else:
-            best_bid = safe_float(price)
+            best_bid = safe_float(price_bid_raw)
     except Exception:
         pass
     try:
-        price = client.get_price(tid, side="SELL")
-        if isinstance(price, dict):
-            best_ask = safe_float(price.get("price"))
+        price_ask_raw = client.get_price(tid, side="SELL")
+        if isinstance(price_ask_raw, dict):
+            best_ask = safe_float(price_ask_raw.get("price"))
         else:
-            best_ask = safe_float(price)
+            best_ask = safe_float(price_ask_raw)
     except Exception:
         pass
 
@@ -87,6 +89,15 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
             best_bid = None
         if best_ask is not None and best_bid is not None:
             if best_bid <= best_ask:
+                logger.debug(
+                    "[ORDERBOOK_PRICE] token_id=%s price_bid=%s price_ask=%s "
+                    "best_bid=%s best_ask=%s",
+                    tid,
+                    price_bid_raw,
+                    price_ask_raw,
+                    best_bid,
+                    best_ask,
+                )
                 return {"best_bid": best_bid, "best_ask": best_ask}
             best_ask = None
             best_bid = None
@@ -134,6 +145,17 @@ def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
         # This avoids "orderbook_empty" NOOPs that can freeze existing orders at stale prices.
         if best_bid is not None and best_ask is not None and best_bid > best_ask:
             return {"best_bid": None, "best_ask": None}
+        logger.debug(
+            "[ORDERBOOK] token_id=%s price_bid=%s price_ask=%s best_bid=%s best_ask=%s "
+            "book_bid=%s book_ask=%s",
+            tid,
+            price_bid_raw,
+            price_ask_raw,
+            best_bid,
+            best_ask,
+            book_bid,
+            book_ask,
+        )
         return {"best_bid": best_bid, "best_ask": best_ask}
     except Exception:
         return {"best_bid": None, "best_ask": None}
