@@ -303,7 +303,9 @@ def reconcile_one(
         size = min(size, my_shares)
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
-    if min_shares > 0 and size < min_shares:
+    if open_orders and use_taker and min_shares > 0 and size < min_shares:
+        size = max(size, min_shares)
+    elif min_shares > 0 and size < min_shares:
         if is_exiting and side == "SELL":
             logger.info(
                 "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; treat as exited",
