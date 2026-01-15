@@ -335,7 +335,7 @@ def reconcile_one(
             except Exception:
                 continue
         if use_taker and effective_min_shares > 0 and size < effective_min_shares:
-            size = max(size, effective_min_shares, total_open)
+            size = max(size, effective_min_shares)
         elif not use_taker and effective_min_shares > 0 and size < effective_min_shares:
             actions = []
             for order in open_orders:
