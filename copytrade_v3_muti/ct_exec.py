@@ -238,6 +238,19 @@ def reconcile_one(
         and spread is not None
         and spread <= (taker_spread_thr + 1e-12)
     )
+    logger.debug(
+        "[TAKER_CHECK] token_id=%s side=%s best_bid=%s best_ask=%s spread=%s thr=%s "
+        "taker_enabled=%s use_taker=%s open_orders=%s",
+        token_id,
+        side,
+        best_bid,
+        best_ask,
+        spread,
+        taker_spread_thr,
+        taker_enabled,
+        use_taker,
+        len(open_orders),
+    )
 
     if use_taker:
         if side == "BUY":
@@ -303,13 +316,50 @@ def reconcile_one(
         size = min(size, my_shares)
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
-    if min_shares > 0 and size < min_shares:
+    api_min_shares = 0.0
+    if state is not None:
+        status_cache = state.get("market_status_cache")
+        if isinstance(status_cache, dict):
+            cached = status_cache.get(token_id) or {}
+            if isinstance(cached, dict):
+                meta = cached.get("meta") or {}
+                if isinstance(meta, dict):
+                    api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
+    effective_min_shares = max(min_shares, api_min_shares)
+    if open_orders:
+        total_open = 0.0
+        for order in open_orders:
+            try:
+                total_open += float(order.get("size") or order.get("original_size") or 0.0)
+            except Exception:
+                continue
+        if use_taker and effective_min_shares > 0 and size < effective_min_shares:
+            size = max(size, effective_min_shares, total_open)
+        elif not use_taker and effective_min_shares > 0 and size < effective_min_shares:
+            actions = []
+            for order in open_orders:
+                order_id = order.get("order_id") or order.get("id")
+                if order_id:
+                    actions.append(
+                        {
+                            "type": "cancel",
+                            "order_id": order_id,
+                            "token_id": token_id,
+                            "ts": now_ts,
+                        }
+                    )
+            return actions
+    if size > max_shares_cap:
+        size = max_shares_cap
+    if side == "SELL" and not allow_short:
+        size = min(size, my_shares)
+    if effective_min_shares > 0 and size < effective_min_shares:
         if is_exiting and side == "SELL":
             logger.info(
                 "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; treat as exited",
                 token_id,
                 my_shares,
-                min_shares,
+                effective_min_shares,
             )
             state.setdefault("dust_exits", {})[token_id] = {
                 "ts": now_ts,
