@@ -239,6 +239,19 @@ def reconcile_one(
         and spread is not None
         and spread <= (taker_spread_thr + 1e-12)
     )
+    logger.debug(
+        "[TAKER_CHECK] token_id=%s side=%s best_bid=%s best_ask=%s spread=%s thr=%s "
+        "taker_enabled=%s use_taker=%s open_orders=%s",
+        token_id,
+        side,
+        best_bid,
+        best_ask,
+        spread,
+        taker_spread_thr,
+        taker_enabled,
+        use_taker,
+        len(open_orders),
+    )
 
     if use_taker:
         if side == "BUY":
