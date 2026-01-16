@@ -9,6 +9,7 @@ def risk_check(
     my_shares: float,
     ref_price: float,
     cfg: Dict[str, object],
+    token_title: Optional[str] = None,
     side: Optional[str] = None,
     planned_total_notional: Optional[float] = None,
     planned_token_notional: Optional[float] = None,
@@ -16,8 +17,17 @@ def risk_check(
     cumulative_token_usd: Optional[float] = None,
 ) -> Tuple[bool, str]:
     blacklist = cfg.get("blacklist_token_keys") or []
-    if token_key in blacklist:
-        return False, "blacklist"
+    if blacklist:
+        token_title_l = (str(token_title).lower() if token_title is not None else "")
+        for item in blacklist:
+            if item is None:
+                continue
+            item_str = str(item)
+            if token_key == item_str:
+                return False, "blacklist"
+            if token_title_l and item_str.strip():
+                if item_str.lower() in token_title_l:
+                    return False, "blacklist"
 
     max_per_token = float(cfg.get("max_notional_per_token") or 0)
     max_position_per_token = float(cfg.get("max_position_usd_per_token") or 0)
