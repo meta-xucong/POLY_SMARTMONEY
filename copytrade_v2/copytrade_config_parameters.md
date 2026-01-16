@@ -108,4 +108,4 @@
 
 ## 黑名单
 
-- `blacklist_token_keys`: 黑名单 token 关键字列表。
+- `blacklist_token_keys`: 黑名单列表，支持精确匹配 `token_key`，也支持按标题关键词匹配（不区分大小写）。

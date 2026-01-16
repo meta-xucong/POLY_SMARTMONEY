@@ -2244,6 +2244,17 @@ def main() -> None:
             if token_id in active_ignored:
                 continue
             open_orders = state.get("open_orders", {}).get(token_id, [])
+            cached = status_cache.get(token_id) or {}
+            token_meta = cached.get("meta") if isinstance(cached, dict) else None
+            if isinstance(token_meta, dict):
+                token_title = (
+                    token_meta.get("title")
+                    or token_meta.get("question")
+                    or token_meta.get("marketTitle")
+                    or token_meta.get("market_title")
+                )
+            else:
+                token_title = None
             cooldown_until = int(state.get("cooldown_until", {}).get(token_id) or 0)
             cooldown_active = cooldown_sec > 0 and now_ts < cooldown_until
             place_fail_until = int(state.get("place_fail_until", {}).get(token_id) or 0)
@@ -2297,8 +2308,6 @@ def main() -> None:
                             len(open_orders),
                         )
                     continue
-
-                cached = status_cache.get(token_id) or {}
                 tradeable = cached.get("tradeable")
 
                 if tradeable is False:
@@ -2946,6 +2955,7 @@ def main() -> None:
                             my_shares,
                             price,
                             cfg_for_action,
+                            token_title=token_title,
                             side=side,
                             planned_total_notional=planned_total_notional_risk,
                             planned_token_notional=planned_token_notional_risk,
@@ -2997,6 +3007,7 @@ def main() -> None:
                                 my_shares,
                                 price,
                                 cfg_for_action,
+                                token_title=token_title,
                                 side=side,
                                 planned_total_notional=planned_total_notional_risk,
                                 planned_token_notional=planned_token_notional_risk,
@@ -3694,6 +3705,7 @@ def main() -> None:
                     my_shares,
                     price,
                     cfg_for_action,
+                    token_title=token_title,
                     side=side,
                     planned_total_notional=planned_total_notional_risk,
                     planned_token_notional=planned_token_notional,
@@ -3735,6 +3747,7 @@ def main() -> None:
                         my_shares,
                         price,
                         cfg_for_action,
+                        token_title=token_title,
                         side=side,
                         planned_total_notional=planned_total_notional_risk,
                         planned_token_notional=planned_token_notional,
