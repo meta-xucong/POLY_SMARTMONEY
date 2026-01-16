@@ -1017,8 +1017,7 @@ def apply_actions(
             )
         order_id = response.get("order_id")
         if (
-            is_taker
-            and state is not None
+            state is not None
             and side_u == "BUY"
             and price > 0
             and size_for_record > 0
@@ -1026,17 +1025,29 @@ def apply_actions(
             token_id = str(action.get("token_id") or "")
             usd = abs(size_for_record) * price
             if token_id and usd > 0:
-                taker_orders = state.setdefault("taker_buy_orders", [])
-                if not isinstance(taker_orders, list):
-                    state["taker_buy_orders"] = []
-                    taker_orders = state["taker_buy_orders"]
-                taker_orders.append(
+                recent_orders = state.setdefault("recent_buy_orders", [])
+                if not isinstance(recent_orders, list):
+                    state["recent_buy_orders"] = []
+                    recent_orders = state["recent_buy_orders"]
+                recent_orders.append(
                     {
                         "token_id": token_id,
                         "usd": float(usd),
                         "ts": int(now_ts),
                     }
                 )
+                if is_taker:
+                    taker_orders = state.setdefault("taker_buy_orders", [])
+                    if not isinstance(taker_orders, list):
+                        state["taker_buy_orders"] = []
+                        taker_orders = state["taker_buy_orders"]
+                    taker_orders.append(
+                        {
+                            "token_id": token_id,
+                            "usd": float(usd),
+                            "ts": int(now_ts),
+                        }
+                    )
         if order_id:
             if state is not None:
                 token_id = str(action.get("token_id") or "")
