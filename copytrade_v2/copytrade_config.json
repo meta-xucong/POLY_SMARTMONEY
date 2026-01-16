@@ -84,5 +84,5 @@
   "place_fail_backoff_cap_sec": 60,
   "place_fail_backoff_sec": 300,
 
-  "blacklist_token_keys": []
+  "blacklist_token_keys": ["Bitcoin"]
 }
