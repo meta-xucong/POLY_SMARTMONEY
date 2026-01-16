@@ -34,6 +34,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "adopted_existing_orders": False,
     "shadow_buy_orders": [],
     "taker_buy_orders": [],
+    "recent_buy_orders": [],
     "seen_my_trade_ids": [],
     "my_trades_cursor_ms": 0,
     "my_trades_unreliable_until": 0,
@@ -124,6 +125,8 @@ def load_state(path: str) -> Dict[str, Any]:
         state["shadow_buy_orders"] = []
     if "taker_buy_orders" not in state or not isinstance(state["taker_buy_orders"], list):
         state["taker_buy_orders"] = []
+    if "recent_buy_orders" not in state or not isinstance(state["recent_buy_orders"], list):
+        state["recent_buy_orders"] = []
     if "seen_my_trade_ids" not in state or not isinstance(state["seen_my_trade_ids"], list):
         state["seen_my_trade_ids"] = []
     if "my_trades_cursor_ms" not in state or not isinstance(

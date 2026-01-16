@@ -447,6 +447,40 @@ def _calc_shadow_buy_notional(
     return total, by_token
 
 
+def _calc_recent_buy_notional(
+    state: Dict[str, Any],
+    now_ts: int,
+    window_sec: int,
+) -> tuple[float, Dict[str, float]]:
+    if window_sec <= 0:
+        state["recent_buy_orders"] = []
+        return 0.0, {}
+    recent_orders = state.get("recent_buy_orders")
+    if not isinstance(recent_orders, list):
+        state["recent_buy_orders"] = []
+        return 0.0, {}
+    kept: list[dict] = []
+    total = 0.0
+    by_token: Dict[str, float] = {}
+    for order in recent_orders:
+        if not isinstance(order, dict):
+            continue
+        token_id = str(order.get("token_id") or "")
+        if not token_id:
+            continue
+        ts = int(order.get("ts") or 0)
+        if ts <= 0 or (now_ts - ts) > window_sec:
+            continue
+        usd = float(order.get("usd") or 0.0)
+        if usd <= 0:
+            continue
+        kept.append(order)
+        total += usd
+        by_token[token_id] = by_token.get(token_id, 0.0) + usd
+    state["recent_buy_orders"] = kept
+    return total, by_token
+
+
 def _calc_planned_notional_totals(
     my_by_token_id: Dict[str, float],
     open_orders_by_token_id: Dict[str, list[dict]],
@@ -2110,6 +2144,9 @@ def main() -> None:
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
         max_notional_total = float(cfg.get("max_notional_total") or 0.0)
+        buy_window_sec = int(cfg.get("buy_window_sec") or 0)
+        buy_window_max_usd_per_token = float(cfg.get("buy_window_max_usd_per_token") or 0.0)
+        buy_window_max_usd_total = float(cfg.get("buy_window_max_usd_total") or 0.0)
         fallback_mid_price = float(cfg.get("missing_mid_fallback_price") or 1.0)
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
@@ -2176,17 +2213,23 @@ def main() -> None:
             include_shadow=True,
         )
         open_buy_orders_usd = sum(float(info.get("usd") or 0.0) for info in order_info_by_id.values())
+        recent_buy_total, recent_buy_by_token = _calc_recent_buy_notional(
+            state,
+            now_ts,
+            buy_window_sec,
+        )
         top_tokens = sorted(planned_by_token_usd.items(), key=lambda item: item[1], reverse=True)[:5]
         top_tokens_fmt = [
             f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
         ]
         logger.info(
             "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
-            "top_tokens=%s",
+            "recent_buy_usd=%s top_tokens=%s",
             planned_total_notional,
             planned_total_notional_shadow,
             open_buy_orders_usd,
             shadow_buy_usd,
+            recent_buy_total,
             top_tokens_fmt,
         )
         my_trades_unreliable_until = int(state.get("my_trades_unreliable_until") or 0)
@@ -2870,6 +2913,21 @@ def main() -> None:
                         if my_trades_unreliable and side == "BUY":
                             blocked_reasons.add("my_trades_unreliable")
                             continue
+                        if side == "BUY" and buy_window_sec > 0:
+                            order_notional = abs(size) * price
+                            recent_token = float(recent_buy_by_token.get(token_id, 0.0))
+                            if (
+                                buy_window_max_usd_per_token > 0
+                                and recent_token + order_notional > buy_window_max_usd_per_token
+                            ):
+                                blocked_reasons.add("buy_window_max_usd_per_token")
+                                continue
+                            if (
+                                buy_window_max_usd_total > 0
+                                and recent_buy_total + order_notional > buy_window_max_usd_total
+                            ):
+                                blocked_reasons.add("buy_window_max_usd_total")
+                                continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                         planned_token_notional_shadow = float(
@@ -3606,8 +3664,29 @@ def main() -> None:
                 if my_trades_unreliable and side == "BUY":
                     blocked_reasons.add("my_trades_unreliable")
                     continue
+                if side == "BUY" and buy_window_sec > 0:
+                    order_notional = abs(size) * price
+                    recent_token = float(recent_buy_by_token.get(token_id, 0.0))
+                    if (
+                        buy_window_max_usd_per_token > 0
+                        and recent_token + order_notional > buy_window_max_usd_per_token
+                    ):
+                        blocked_reasons.add("buy_window_max_usd_per_token")
+                        continue
+                    if (
+                        buy_window_max_usd_total > 0
+                        and recent_buy_total + order_notional > buy_window_max_usd_total
+                    ):
+                        blocked_reasons.add("buy_window_max_usd_total")
+                        continue
 
-                planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                planned_token_notional = max(
+                    float(planned_by_token_usd.get(token_id, 0.0)),
+                    float(planned_by_token_usd_shadow.get(token_id, 0.0)),
+                )
+                planned_total_notional_risk = max(
+                    planned_total_notional, planned_total_notional_shadow
+                )
                 cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
                 ok, reason = risk_check(
                     token_key,
@@ -3616,7 +3695,7 @@ def main() -> None:
                     price,
                     cfg_for_action,
                     side=side,
-                    planned_total_notional=planned_total_notional,
+                    planned_total_notional=planned_total_notional_risk,
                     planned_token_notional=planned_token_notional,
                     cumulative_total_usd=None,
                     cumulative_token_usd=None,
@@ -3625,7 +3704,7 @@ def main() -> None:
                     resized = _shrink_on_risk_limit(
                         act,
                         max_notional_total,
-                        planned_total_notional,
+                        planned_total_notional_risk,
                         float(cfg_for_action.get("max_notional_per_token") or 0.0),
                         planned_token_notional,
                         float(cfg_for_action.get("min_order_usd") or 0.0),
@@ -3646,7 +3725,10 @@ def main() -> None:
                     act, allowed_usd = resized
                     price = float(act.get("price") or 0.0)
                     size = float(act.get("size") or 0.0)
-                    planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
+                    planned_token_notional = max(
+                        float(planned_by_token_usd.get(token_id, 0.0)),
+                        float(planned_by_token_usd_shadow.get(token_id, 0.0)),
+                    )
                     ok2, reason2 = risk_check(
                         token_key,
                         size,
@@ -3654,7 +3736,7 @@ def main() -> None:
                         price,
                         cfg_for_action,
                         side=side,
-                        planned_total_notional=planned_total_notional,
+                        planned_total_notional=planned_total_notional_risk,
                         planned_token_notional=planned_token_notional,
                         cumulative_total_usd=None,
                         cumulative_token_usd=None,

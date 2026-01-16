@@ -69,6 +69,9 @@
 ## 风控与容错
 
 - `cooldown_sec_per_token`: 每个 token 的冷却时间（秒）。
+- `buy_window_sec`: 快速买入统计窗口（秒），为 0 则关闭。
+- `buy_window_max_usd_per_token`: 窗口内单个 token 的买入上限（USD）。
+- `buy_window_max_usd_total`: 窗口内总体买入上限（USD）。
 - `orderbook_empty_close_streak`: 盘口为空连续次数达到该值时，将 token 视为已结束并跳过。
 - `missing_timeout_sec`: 目标仓位缺失超时时间（秒）。
 - `missing_to_zero_rounds`: 目标仓位缺失达到次数后是否视为零仓位。

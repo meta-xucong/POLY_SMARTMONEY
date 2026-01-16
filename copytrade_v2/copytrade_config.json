@@ -50,6 +50,9 @@
   "exit_ignore_cooldown": true,
 
   "cooldown_sec_per_token": 20,
+  "buy_window_sec": 0,
+  "buy_window_max_usd_per_token": 0,
+  "buy_window_max_usd_total": 0,
   "missing_timeout_sec": 600,
   "missing_to_zero_rounds": 0,
   "sell_confirm_max": 5,
