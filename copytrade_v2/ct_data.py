@@ -3,7 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import random
 import time
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import requests
 
@@ -11,21 +11,69 @@ from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 from smartmoney_query.poly_martmoney_query.models import Position, Trade
 
 
+def _extract_token_id_from_raw(raw: Dict[str, object] | None) -> Optional[str]:
+    if not isinstance(raw, dict):
+        return None
+    for key in (
+        "tokenId",
+        "token_id",
+        "clobTokenId",
+        "clob_token_id",
+        "assetId",
+        "asset_id",
+        "outcomeTokenId",
+        "outcome_token_id",
+    ):
+        value = raw.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    value = raw.get("id")
+    if value is not None:
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
 def _normalize_position(pos: Position) -> Dict[str, object] | None:
+    raw = pos.raw
     if pos.outcome_index is None:
+        raw_norm = _normalize_position_raw(raw) if isinstance(raw, dict) else None
+        if raw_norm is not None:
+            return raw_norm
+        token_id = _extract_token_id_from_raw(raw)
+        if token_id:
+            return {
+                "token_key": "",
+                "token_id": token_id,
+                "condition_id": pos.condition_id,
+                "outcome_index": None,
+                "size": float(pos.size),
+                "avg_price": float(pos.avg_price),
+                "cur_price": float(getattr(pos, "cur_price", 0.0) or 0.0),
+                "slug": pos.slug,
+                "title": pos.title,
+                "end_date": pos.end_date.isoformat() if pos.end_date is not None else None,
+                "raw": raw,
+            }
         return None
     token_key = f"{pos.condition_id}:{pos.outcome_index}"
     end_date = pos.end_date.isoformat() if pos.end_date is not None else None
     return {
         "token_key": token_key,
+        "token_id": _extract_token_id_from_raw(raw),
         "condition_id": pos.condition_id,
         "outcome_index": int(pos.outcome_index),
         "size": float(pos.size),
         "avg_price": float(pos.avg_price),
+        "cur_price": float(getattr(pos, "cur_price", 0.0) or 0.0),
         "slug": pos.slug,
         "title": pos.title,
         "end_date": end_date,
-        "raw": pos.raw,
+        "raw": raw,
     }
 
 
@@ -61,8 +109,10 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
     end_date = raw.get("endDate") or raw.get("end_date")
 
     token_key = f"{condition_id}:{idx}"
+    token_id = _extract_token_id_from_raw(raw)
     return {
         "token_key": token_key,
+        "token_id": token_id,
         "condition_id": str(condition_id),
         "outcome_index": idx,
         "size": size_f,

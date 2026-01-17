@@ -1894,12 +1894,13 @@ def main() -> None:
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
             token_key = str(pos.get("token_key") or "")
-            if not token_key:
-                continue
             size = float(pos.get("size") or 0.0)
 
-            token_id = token_map.get(token_key) or _extract_token_id_from_raw(pos.get("raw") or {})
-            if not token_id:
+            token_id = pos.get("token_id") or None
+            if token_key:
+                token_id = token_id or token_map.get(token_key)
+            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+            if not token_id and token_key:
                 fail_ts = resolver_fail_cache.get(token_key)
                 if (
                     fail_ts
@@ -1913,15 +1914,18 @@ def main() -> None:
                     logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
                     resolver_fail_cache[token_key] = now_ts
                     continue
+            if not token_id:
+                continue
 
             tid = str(token_id)
-            token_map[token_key] = tid
-            my_by_token_id[tid] = size
-            token_key_by_token_id.setdefault(tid, token_key)
+            if token_key:
+                token_map[token_key] = tid
+                token_key_by_token_id.setdefault(tid, token_key)
             cur_price = float(pos.get("cur_price") or 0.0)
             if cur_price > 0:
                 state.setdefault("last_mid_price_by_token_id", {})[tid] = cur_price
                 state["last_mid_price_update_ts"] = now_ts
+            my_by_token_id[tid] = size
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
