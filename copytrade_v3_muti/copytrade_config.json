@@ -39,6 +39,7 @@
   "slice_min": 5,
   "slice_max": 25,
   "order_size_mode": "auto_usd",
+  "_auto_order_k": 1,
   "min_order_usd": 1,
   "min_order_shares": 5,
   "dust_exit_eps": 0.000001,
