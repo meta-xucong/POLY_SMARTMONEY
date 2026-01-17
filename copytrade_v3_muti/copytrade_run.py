@@ -2507,12 +2507,13 @@ def main() -> None:
         my_by_token_id: Dict[str, float] = {}
         for pos in my_pos:
             token_key = str(pos.get("token_key") or "")
-            if not token_key:
-                continue
             size = float(pos.get("size") or 0.0)
 
-            token_id = token_map.get(token_key) or _extract_token_id_from_raw(pos.get("raw") or {})
-            if not token_id:
+            token_id = pos.get("token_id") or None
+            if token_key:
+                token_id = token_id or token_map.get(token_key)
+            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+            if not token_id and token_key:
                 try:
                     token_id = resolve_token_id(token_key, pos, token_map)
                 except Exception as exc:
@@ -2523,11 +2524,14 @@ def main() -> None:
                     str(token_id),
                     max_len=active_token_recent_resolved,
                 )
+            if not token_id:
+                continue
 
             tid = str(token_id)
-            token_map[token_key] = tid
+            if token_key:
+                token_map[token_key] = tid
+                token_key_by_token_id.setdefault(tid, token_key)
             my_by_token_id[tid] = size
-            token_key_by_token_id.setdefault(tid, token_key)
 
         active_token_ids_seed: Set[str] = set(my_by_token_id.keys())
         active_token_ids_seed.update(str(token_id) for token_id in recent_action_token_ids)
