@@ -1692,6 +1692,16 @@ def main() -> None:
                 continue
             closed, end_ts = _is_closed_by_end_date(pos, now_ts)
             if closed:
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
+                        "[SKIP_DEBUG] closed_by_end_date token_key=%s token_id=%s slug=%s end_date=%s end_ts=%s now_ts=%s",
+                        token_key,
+                        pos.get("token_id"),
+                        pos.get("slug"),
+                        pos.get("end_date") or pos.get("endDate"),
+                        end_ts,
+                        now_ts,
+                    )
                 closed_token_keys[str(token_key)] = int(end_ts or now_ts)
                 new_closed += 1
         if new_closed:
