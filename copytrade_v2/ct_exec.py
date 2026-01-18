@@ -327,6 +327,28 @@ def reconcile_one(
                 if isinstance(meta, dict):
                     api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
+    cap_shares = None
+    if price > 0 and side == "BUY":
+        max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
+        max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
+        caps = []
+        if max_position_usd_per_token > 0:
+            caps.append(max_position_usd_per_token / price)
+        if max_notional_per_token > 0:
+            caps.append(max_notional_per_token / price)
+        if caps:
+            cap_shares = min(caps)
+
+    if effective_min_shares > 0 and size < effective_min_shares and side == "BUY":
+        bumped_size = effective_min_shares
+        if cap_shares is not None:
+            remaining = cap_shares - my_shares
+            if remaining <= 0:
+                return actions
+            bumped_size = min(bumped_size, remaining)
+        if bumped_size + 1e-12 < effective_min_shares:
+            return actions
+        size = bumped_size
     if open_orders:
         total_open = 0.0
         for order in open_orders:
