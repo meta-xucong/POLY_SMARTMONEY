@@ -11,6 +11,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
+from zoneinfo import ZoneInfo
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -228,7 +229,13 @@ def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
 def _parse_market_end_ts(meta: Optional[Dict[str, Any]]) -> Optional[int]:
     if not isinstance(meta, dict):
         return None
-    value = meta.get("end_date") or meta.get("endDate") or meta.get("end_time") or meta.get("endTime")
+    value = (
+        meta.get("end_time")
+        or meta.get("endTime")
+        or meta.get("end_date")
+        or meta.get("endDate")
+        or meta.get("endDateIso")
+    )
     if value is None:
         return None
     try:
@@ -241,11 +248,19 @@ def _parse_market_end_ts(meta: Optional[Dict[str, Any]]) -> Optional[int]:
             text = value.strip()
             if not text:
                 return None
+            if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+                parsed = datetime.strptime(text, "%Y-%m-%d").replace(
+                    hour=23,
+                    minute=59,
+                    second=59,
+                    tzinfo=ZoneInfo("America/New_York"),
+                )
+                return int(parsed.timestamp())
             if text.endswith("Z"):
                 text = text[:-1] + "+00:00"
             parsed = datetime.fromisoformat(text)
             if parsed.tzinfo is None:
-                parsed = parsed.replace(tzinfo=timezone.utc)
+                parsed = parsed.replace(tzinfo=ZoneInfo("America/New_York"))
             return int(parsed.timestamp())
     except Exception:
         return None
@@ -253,10 +268,7 @@ def _parse_market_end_ts(meta: Optional[Dict[str, Any]]) -> Optional[int]:
 
 
 def _is_closed_by_end_date(pos: Dict[str, Any], now_ts: int) -> tuple[bool, Optional[int]]:
-    end_date = pos.get("end_date") or pos.get("endDate")
-    if not end_date:
-        return False, None
-    end_ts = _parse_market_end_ts({"end_date": end_date})
+    end_ts = _parse_market_end_ts(pos)
     if end_ts is None:
         return False, None
     return end_ts <= now_ts, end_ts
