@@ -340,9 +340,8 @@ def reconcile_one(
             caps.append(max_notional_per_token / price)
         if caps:
             cap_shares = min(caps)
-            used_notional = my_shares * price + planned_token_notional
             max_notional = cap_shares * price
-            remaining_notional = max_notional - used_notional
+            remaining_notional = max_notional - planned_token_notional
             cap_shares_remaining = remaining_notional / price if price > 0 else 0
 
     if effective_min_shares > 0 and size < effective_min_shares and side == "BUY":
@@ -786,6 +785,7 @@ def apply_actions(
     dry_run: bool,
     cfg: Optional[Dict[str, Any]] = None,
     state: Optional[Dict[str, Any]] = None,
+    planned_by_token_usd: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
 
@@ -905,13 +905,11 @@ def apply_actions(
         size = float(action.get("size") or 0.0)
         try:
             if is_taker:
-                if side_u == "BUY" and cfg is not None and state is not None:
+                if side_u == "BUY" and cfg is not None and planned_by_token_usd is not None:
                     max_per_token = float(cfg.get("max_notional_per_token") or 0.0)
                     if max_per_token > 0:
                         token_id_check = str(action.get("token_id"))
-                        planned = float(
-                            state.get("planned_by_token_usd_shadow", {}).get(token_id_check, 0.0)
-                        )
+                        planned = float(planned_by_token_usd.get(token_id_check, 0.0))
                         order_usd = abs(size) * price
                         if planned + order_usd > max_per_token:
                             logger.warning(
@@ -921,8 +919,9 @@ def apply_actions(
                                 order_usd,
                                 max_per_token,
                             )
-                            state.setdefault("taker_blocked_count", 0)
-                            state["taker_blocked_count"] = state["taker_blocked_count"] + 1
+                            if state is not None:
+                                state.setdefault("taker_blocked_count", 0)
+                                state["taker_blocked_count"] = state["taker_blocked_count"] + 1
                             continue
 
                 if side_u == "BUY":
