@@ -3193,6 +3193,7 @@ def main() -> None:
                         args.dry_run,
                         cfg=cfg,
                         state=state,
+                        planned_by_token_usd=planned_by_token_usd_shadow,
                     )
                     if updated_orders:
                         state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -3864,6 +3865,7 @@ def main() -> None:
                 args.dry_run,
                 cfg=cfg,
                 state=state,
+                planned_by_token_usd=planned_by_token_usd_shadow,
             )
             if updated_orders:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
