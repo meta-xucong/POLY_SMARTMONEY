@@ -169,6 +169,7 @@ def reconcile_one(
     now_ts: int,
     cfg: Dict[str, Any],
     state: Dict[str, Any],
+    planned_token_notional: float = 0.0,
 ) -> List[Dict[str, Any]]:
     actions: List[Dict[str, Any]] = []
     deadband = float(cfg.get("deadband_shares") or 0)
@@ -327,6 +328,7 @@ def reconcile_one(
                     api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
     cap_shares = None
+    cap_shares_remaining = None
     if price > 0 and side == "BUY":
         max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
         max_notional_per_token = float(cfg.get("max_notional_per_token") or 0.0)
@@ -337,16 +339,40 @@ def reconcile_one(
             caps.append(max_notional_per_token / price)
         if caps:
             cap_shares = min(caps)
+            max_notional = cap_shares * price
+            remaining_notional = max_notional - planned_token_notional
+            cap_shares_remaining = remaining_notional / price if price > 0 else 0
 
     if effective_min_shares > 0 and size < effective_min_shares and side == "BUY":
         bumped_size = effective_min_shares
-        if cap_shares is not None:
-            remaining = cap_shares - my_shares
-            if remaining <= 0:
+        if cap_shares_remaining is not None:
+            if cap_shares_remaining <= 0:
+                logger.debug(
+                    "[MIN_BUMP_SKIP] token_id=%s no_remaining cap_shares_remaining=%s "
+                    "planned_notional=%s my_shares=%s price=%s",
+                    token_id,
+                    cap_shares_remaining,
+                    planned_token_notional,
+                    my_shares,
+                    price,
+                )
                 return actions
-            bumped_size = min(bumped_size, remaining)
+            bumped_size = min(bumped_size, cap_shares_remaining)
         if bumped_size + 1e-12 < effective_min_shares:
+            logger.debug(
+                "[MIN_BUMP_SKIP] token_id=%s bumped_below_min bumped=%s min=%s",
+                token_id,
+                bumped_size,
+                effective_min_shares,
+            )
             return actions
+        logger.info(
+            "[MIN_BUMP] token_id=%s old_size=%s bumped_size=%s remaining=%s",
+            token_id,
+            size,
+            bumped_size,
+            cap_shares_remaining,
+        )
         size = bumped_size
     if open_orders:
         total_open = 0.0
@@ -758,6 +784,7 @@ def apply_actions(
     dry_run: bool,
     cfg: Optional[Dict[str, Any]] = None,
     state: Optional[Dict[str, Any]] = None,
+    planned_by_token_usd: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
 
@@ -877,6 +904,25 @@ def apply_actions(
         size = float(action.get("size") or 0.0)
         try:
             if is_taker:
+                if side_u == "BUY" and cfg is not None and planned_by_token_usd is not None:
+                    max_per_token = float(cfg.get("max_notional_per_token") or 0.0)
+                    if max_per_token > 0:
+                        token_id_check = str(action.get("token_id"))
+                        planned = float(planned_by_token_usd.get(token_id_check, 0.0))
+                        order_usd = abs(size) * price
+                        if planned + order_usd > max_per_token:
+                            logger.warning(
+                                "[TAKER_BLOCKED] token_id=%s would_exceed planned=%s order=%s max=%s",
+                                token_id_check,
+                                planned,
+                                order_usd,
+                                max_per_token,
+                            )
+                            if state is not None:
+                                state.setdefault("taker_blocked_count", 0)
+                                state["taker_blocked_count"] = state["taker_blocked_count"] + 1
+                            continue
+
                 if side_u == "BUY":
                     amount = abs(size) * price
                 else:
