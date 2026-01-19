@@ -2893,6 +2893,20 @@ def main() -> None:
 
                     token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
                     cfg_for_reconcile = cfg_lowp if (is_lowp and desired_side == "BUY") else cfg
+
+                    token_planned = float(planned_by_token_usd_shadow.get(token_id, 0.0))
+
+                    if desired_side == "BUY":
+                        max_notional = float(cfg_for_reconcile.get("max_notional_per_token") or 0.0)
+                        if max_notional > 0 and token_planned >= max_notional * 0.95:
+                            logger.debug(
+                                "[SKIP_PREFLIGHT] %s near_limit planned=%s max=%s",
+                                token_key,
+                                token_planned,
+                                max_notional,
+                            )
+                            continue
+
                     actions = reconcile_one(
                         token_id,
                         my_target,
@@ -2902,6 +2916,7 @@ def main() -> None:
                         now_ts,
                         cfg_for_reconcile,
                         state,
+                        planned_token_notional=token_planned,
                     )
                     if not actions:
                         continue
