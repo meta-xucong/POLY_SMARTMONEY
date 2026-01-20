@@ -1964,7 +1964,35 @@ def main() -> None:
             if token_key:
                 token_id = token_id or token_map.get(token_key)
             token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+
+            # CRITICAL FIX: Add resolver fallback for risk baseline (same as my_by_token_id)
+            # This prevents position limit breaches when API returns positions without token_id
+            if not token_id and token_key:
+                fail_ts = resolver_fail_cache.get(token_key)
+                if (
+                    fail_ts
+                    and resolver_fail_cooldown_sec > 0
+                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                ):
+                    logger.warning(
+                        "[RISK] skip position due to recent resolver fail: %s (cooldown)",
+                        token_key,
+                    )
+                    continue
+                try:
+                    token_id = resolve_token_id(token_key, pos, token_map)
+                    logger.debug("[RISK] resolved token_id via resolver: %s -> %s", token_key, token_id)
+                except Exception as exc:
+                    logger.warning("[RISK] resolver fail for position: %s -> %s", token_key, exc)
+                    resolver_fail_cache[token_key] = now_ts
+                    continue
+
             if not token_id:
+                logger.warning(
+                    "[RISK] skip position: missing token_id token_key=%s size=%.2f",
+                    token_key,
+                    size,
+                )
                 continue
             tid = str(token_id)
             my_by_token_id_for_risk[tid] = size
@@ -3011,6 +3039,25 @@ def main() -> None:
                         planned_token_notional_risk = max(
                             planned_token_notional, planned_token_notional_shadow
                         )
+
+                        # CRITICAL ALERT: Detect position sync anomaly
+                        # If my_shares=0 but shadow shows significant recent orders, position may not be synced
+                        if (
+                            side == "BUY"
+                            and my_shares <= 0.0
+                            and planned_token_notional_shadow > 2.0
+                            and planned_token_notional_shadow > planned_token_notional + 1.0
+                        ):
+                            logger.warning(
+                                "[ALERT] position_sync_anomaly detected: my_shares=%.2f but "
+                                "shadow_notional=%.2f (planned=%.2f) token=%s - position may not be synced, "
+                                "risk baseline weakened",
+                                my_shares,
+                                planned_token_notional_shadow,
+                                planned_token_notional,
+                                token_id,
+                            )
+
                         cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
                         ok, reason = risk_check(
                             token_key,

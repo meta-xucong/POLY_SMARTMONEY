@@ -19,6 +19,7 @@ def _extract_token_id_from_raw(raw: Dict[str, object] | None) -> Optional[str]:
         "token_id",
         "clobTokenId",
         "clob_token_id",
+        "asset",  # CRITICAL FIX: Add support for 'asset' field from Polymarket Data API
         "assetId",
         "asset_id",
         "outcomeTokenId",
