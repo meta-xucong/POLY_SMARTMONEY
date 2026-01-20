@@ -1719,12 +1719,17 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
+        # CRITICAL FIX: Save unfiltered my_pos for risk calculation
+        # This prevents skip_closed_markets from weakening risk baseline
+        # and causing position limit breaches after balance top-ups
+        my_pos_for_risk = list(my_pos)  # Deep copy for risk baseline
+
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
             my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
             if removed_target or removed_my:
                 logger.info(
-                    "[SKIP] closed_positions filtered target=%s my=%s",
+                    "[SKIP] closed_positions filtered target=%s my=%s (trading only, risk still uses unfiltered)",
                     removed_target,
                     removed_my,
                 )
@@ -1948,6 +1953,21 @@ def main() -> None:
                 state.setdefault("last_mid_price_by_token_id", {})[tid] = cur_price
                 state["last_mid_price_update_ts"] = now_ts
             my_by_token_id[tid] = size
+
+        # CRITICAL FIX: Build unfiltered position dict for risk calculation
+        # This ensures risk baseline includes positions from closed markets that may still be tradeable
+        my_by_token_id_for_risk: Dict[str, float] = {}
+        for pos in my_pos_for_risk:
+            token_key = str(pos.get("token_key") or "")
+            size = float(pos.get("size") or 0.0)
+            token_id = pos.get("token_id") or None
+            if token_key:
+                token_id = token_id or token_map.get(token_key)
+            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+            if not token_id:
+                continue
+            tid = str(token_id)
+            my_by_token_id_for_risk[tid] = size
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
@@ -2204,13 +2224,15 @@ def main() -> None:
 
         delta_usd_samples = []
 
+        # CRITICAL FIX: Use unfiltered positions for risk calculation
+        # This prevents position limit breaches from weakened risk baseline
         (
             planned_total_notional,
             planned_by_token_usd,
             order_info_by_id,
             shadow_buy_usd,
         ) = _calc_planned_notional_with_fallback(
-            my_by_token_id,
+            my_by_token_id_for_risk,  # Use unfiltered positions
             state.get("open_orders", {}),
             state.get("last_mid_price_by_token_id", {}),
             max_position_usd_per_token,
@@ -2227,7 +2249,7 @@ def main() -> None:
             _shadow_order_info_by_id,
             _shadow_buy_usd,
         ) = _calc_planned_notional_with_fallback(
-            my_by_token_id,
+            my_by_token_id_for_risk,  # Use unfiltered positions
             state.get("open_orders", {}),
             state.get("last_mid_price_by_token_id", {}),
             max_position_usd_per_token,
