@@ -9,10 +9,15 @@ def accumulator_check(
     state: Dict[str, Any],
     cfg: Dict[str, object],
     side: Optional[str] = None,
+    local_delta: float = 0.0,
 ) -> Tuple[bool, str]:
     """
     First line of defense: check local buy notional accumulator.
     This provides a hard limit independent of position API synchronization.
+
+    Args:
+        local_delta: Accumulator delta from previous orders in the same batch
+                     (to prevent batch bypass vulnerability)
     """
     side_u = str(side).upper() if side is not None else ""
     if side_u != "BUY":
@@ -23,18 +28,21 @@ def accumulator_check(
 
     accumulator = state.get("buy_notional_accumulator")
     if not isinstance(accumulator, dict):
-        return True, "ok"
-
-    token_acc = accumulator.get(token_id)
-    if not isinstance(token_acc, dict):
         current_usd = 0.0
     else:
-        current_usd = float(token_acc.get("usd", 0.0))
+        token_acc = accumulator.get(token_id)
+        if not isinstance(token_acc, dict):
+            current_usd = 0.0
+        else:
+            current_usd = float(token_acc.get("usd", 0.0))
 
-    if max_per_token > 0 and current_usd + order_notional > max_per_token:
+    # CRITICAL: Add local_delta to account for orders in same batch
+    effective_current = current_usd + local_delta
+
+    if max_per_token > 0 and effective_current + order_notional > max_per_token:
         return False, "accumulator_max_notional_per_token"
 
-    if max_position_per_token > 0 and current_usd + order_notional > max_position_per_token:
+    if max_position_per_token > 0 and effective_current + order_notional > max_position_per_token:
         return False, "accumulator_max_position_usd_per_token"
 
     return True, "ok"
