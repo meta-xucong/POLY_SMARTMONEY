@@ -2987,6 +2987,8 @@ def main() -> None:
                     token_planned_before_shadow = float(
                         planned_by_token_usd_shadow.get(token_id, 0.0)
                     )
+                    # Track accumulator delta within this batch to prevent batch bypass
+                    local_accumulator_delta = 0.0
 
                     for act in actions:
                         act_type = act.get("type")
@@ -3042,13 +3044,19 @@ def main() -> None:
                             order_notional = abs(size) * price
                             cfg_for_acc = cfg_lowp if is_lowp else cfg
                             acc_ok, acc_reason = accumulator_check(
-                                token_id, order_notional, state, cfg_for_acc, side=side
+                                token_id,
+                                order_notional,
+                                state,
+                                cfg_for_acc,
+                                side=side,
+                                local_delta=local_accumulator_delta,
                             )
                             if not acc_ok:
                                 logger.warning(
-                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s reason=%s",
+                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s current_delta=%s reason=%s",
                                     token_id,
                                     order_notional,
+                                    local_accumulator_delta,
                                     acc_reason,
                                 )
                                 blocked_reasons.add(acc_reason or "accumulator_check")
@@ -3178,6 +3186,8 @@ def main() -> None:
                             planned_by_token_usd_shadow[token_id] = (
                                 planned_by_token_usd_shadow.get(token_id, 0.0) + usd
                             )
+                            # CRITICAL: Update local accumulator delta to prevent batch bypass
+                            local_accumulator_delta += usd
 
                     if has_any_place and pending_cancel_actions:
                         planned_total_notional += pending_cancel_usd
@@ -3797,6 +3807,8 @@ def main() -> None:
             pending_cancel_actions = []
             pending_cancel_usd = 0.0
             token_planned_before = float(planned_by_token_usd.get(token_id, 0.0))
+            # Track accumulator delta within this batch to prevent batch bypass
+            local_accumulator_delta = 0.0
 
             for act in actions:
                 act_type = act.get("type")
@@ -3848,13 +3860,19 @@ def main() -> None:
                     order_notional = abs(size) * price
                     cfg_for_acc = cfg_lowp if is_lowp else cfg
                     acc_ok, acc_reason = accumulator_check(
-                        token_id, order_notional, state, cfg_for_acc, side=side
+                        token_id,
+                        order_notional,
+                        state,
+                        cfg_for_acc,
+                        side=side,
+                        local_delta=local_accumulator_delta,
                     )
                     if not acc_ok:
                         logger.warning(
-                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s reason=%s",
+                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s current_delta=%s reason=%s",
                             token_id,
                             order_notional,
+                            local_accumulator_delta,
                             acc_reason,
                         )
                         blocked_reasons.add(acc_reason or "accumulator_check")
@@ -3942,6 +3960,8 @@ def main() -> None:
                     usd = abs(size) * price
                     planned_total_notional += usd
                     planned_by_token_usd[token_id] = planned_by_token_usd.get(token_id, 0.0) + usd
+                    # CRITICAL: Update local accumulator delta to prevent batch bypass
+                    local_accumulator_delta += usd
 
             if has_any_place and pending_cancel_actions:
                 planned_total_notional += pending_cancel_usd
