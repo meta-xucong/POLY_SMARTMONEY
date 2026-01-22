@@ -3134,6 +3134,38 @@ def main() -> None:
                             act, allowed_usd = resized
                             price = float(act.get("price") or 0.0)
                             size = float(act.get("size") or 0.0)
+
+                            # CRITICAL: Re-check accumulator after shrink
+                            shrink_notional = abs(size) * price
+                            acc_ok_shrink, acc_reason_shrink = accumulator_check(
+                                token_id,
+                                shrink_notional,
+                                state,
+                                cfg_for_action,
+                                side=side,
+                                local_delta=local_accumulator_delta,
+                            )
+                            if not acc_ok_shrink:
+                                logger.warning(
+                                    "[ACCUMULATOR_BLOCK_SHRINK] token_id=%s shrink_usd=%s "
+                                    "current_delta=%s reason=%s",
+                                    token_id,
+                                    shrink_notional,
+                                    local_accumulator_delta,
+                                    acc_reason_shrink,
+                                )
+                                if has_any_place and pending_cancel_actions:
+                                    planned_total_notional += pending_cancel_usd
+                                    planned_by_token_usd[token_id] = token_planned_before
+                                    planned_total_notional_shadow += pending_cancel_usd
+                                    planned_by_token_usd_shadow[token_id] = (
+                                        token_planned_before_shadow
+                                    )
+                                    pending_cancel_actions = []
+                                    pending_cancel_usd = 0.0
+                                blocked_reasons.add(acc_reason_shrink or "accumulator_check_shrink")
+                                continue
+
                             planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                             planned_token_notional_shadow = float(
                                 planned_by_token_usd_shadow.get(token_id, 0.0)
@@ -3924,6 +3956,34 @@ def main() -> None:
                     act, allowed_usd = resized
                     price = float(act.get("price") or 0.0)
                     size = float(act.get("size") or 0.0)
+
+                    # CRITICAL: Re-check accumulator after shrink
+                    shrink_notional = abs(size) * price
+                    acc_ok_shrink, acc_reason_shrink = accumulator_check(
+                        token_id,
+                        shrink_notional,
+                        state,
+                        cfg_for_action,
+                        side=side,
+                        local_delta=local_accumulator_delta,
+                    )
+                    if not acc_ok_shrink:
+                        logger.warning(
+                            "[ACCUMULATOR_BLOCK_SHRINK] token_id=%s shrink_usd=%s "
+                            "current_delta=%s reason=%s",
+                            token_id,
+                            shrink_notional,
+                            local_accumulator_delta,
+                            acc_reason_shrink,
+                        )
+                        if has_any_place and pending_cancel_actions:
+                            planned_total_notional += pending_cancel_usd
+                            planned_by_token_usd[token_id] = token_planned_before
+                            pending_cancel_actions = []
+                            pending_cancel_usd = 0.0
+                        blocked_reasons.add(acc_reason_shrink or "accumulator_check_shrink")
+                        continue
+
                     planned_token_notional = max(
                         float(planned_by_token_usd.get(token_id, 0.0)),
                         float(planned_by_token_usd_shadow.get(token_id, 0.0)),
