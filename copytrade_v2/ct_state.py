@@ -38,6 +38,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "seen_my_trade_ids": [],
     "my_trades_cursor_ms": 0,
     "my_trades_unreliable_until": 0,
+    "buy_notional_accumulator": {},
 }
 
 
@@ -137,6 +138,10 @@ def load_state(path: str) -> Dict[str, Any]:
         state["my_trades_unreliable_until"], (int, float)
     ):
         state["my_trades_unreliable_until"] = 0
+    if "buy_notional_accumulator" not in state or not isinstance(
+        state["buy_notional_accumulator"], dict
+    ):
+        state["buy_notional_accumulator"] = {}
     return state
 
 
