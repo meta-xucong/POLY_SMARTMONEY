@@ -2309,43 +2309,12 @@ def main() -> None:
             top_tokens_fmt,
         )
 
-        # CRITICAL: Reconcile accumulator with actual positions (prevent long-term drift)
-        accumulator = state.get("buy_notional_accumulator")
-        if isinstance(accumulator, dict) and accumulator:
-            for token_id, acc_data in list(accumulator.items()):
-                if not isinstance(acc_data, dict):
-                    continue
-                acc_usd = float(acc_data.get("usd", 0.0))
-                if acc_usd <= 0:
-                    continue
-
-                # Check if position exists
-                my_shares = float(my_by_token_id.get(token_id, 0.0))
-                if my_shares <= 0:
-                    # Position cleared, reset accumulator
-                    logger.info(
-                        "[ACCUMULATOR_RESET] token_id=%s acc_usd=%s reason=position_cleared",
-                        token_id,
-                        acc_usd,
-                    )
-                    accumulator.pop(token_id, None)
-                    continue
-
-                # Compare accumulator with planned notional
-                planned_usd = float(planned_by_token_usd_shadow.get(token_id, 0.0))
-                if planned_usd > acc_usd * 1.5:
-                    # Planned exceeds accumulator significantly, update accumulator conservatively
-                    old_acc = acc_usd
-                    accumulator[token_id]["usd"] = planned_usd
-                    accumulator[token_id]["last_ts"] = now_ts
-                    logger.warning(
-                        "[ACCUMULATOR_SYNC_UP] token_id=%s old_acc=%s new_acc=%s planned=%s "
-                        "reason=planned_exceeds_accumulator",
-                        token_id,
-                        old_acc,
-                        planned_usd,
-                        planned_usd,
-                    )
+        # CRITICAL: Accumulator is maintained ONLY by local BUY/SELL operations
+        # DO NOT reconcile with API data to preserve independence from position API sync issues
+        # Accumulator updates happen in ct_exec.py:
+        # - Incremented on successful BUY (both taker and maker)
+        # - Decremented on successful SELL
+        # - Cleared when SELL reduces it below threshold (0.01)
 
         my_trades_unreliable_until = int(state.get("my_trades_unreliable_until") or 0)
         my_trades_unreliable = my_trades_unreliable_until > now_ts
@@ -3878,8 +3847,6 @@ def main() -> None:
                 if side == "BUY":
                     order_notional = abs(size) * price
                     cfg_for_acc = cfg_lowp if is_lowp else cfg
-                    from ct_risk import accumulator_check
-
                     acc_ok, acc_reason = accumulator_check(
                         token_id, order_notional, state, cfg_for_acc, side=side
                     )
