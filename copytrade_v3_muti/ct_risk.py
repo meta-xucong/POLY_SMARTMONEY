@@ -1,6 +1,79 @@
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
+
+
+def accumulator_check(
+    token_id: str,
+    order_notional: float,
+    state: Dict[str, Any],
+    cfg: Dict[str, object],
+    side: Optional[str] = None,
+    local_delta: float = 0.0,
+    planned_token_notional: Optional[float] = None,
+) -> Tuple[bool, str, float]:
+    """
+    First line of defense: check local buy notional accumulator.
+    This provides a hard limit independent of position API synchronization.
+
+    Args:
+        local_delta: Accumulator delta from previous orders in the same batch
+                     (to prevent batch bypass vulnerability)
+        planned_token_notional: Actual position value (shares * mid_price + open buy orders)
+                                 If provided, uses min(accumulator, planned) as baseline
+
+    Returns:
+        (ok, reason, available_notional)
+        - ok: True if order can proceed as-is, False if exceeds limit
+        - reason: "ok" or the limit that was hit
+        - available_notional: How much USD is available for this order (0 if none)
+    """
+    side_u = str(side).upper() if side is not None else ""
+    if side_u != "BUY":
+        return True, "ok", float("inf")
+
+    max_per_token = float(cfg.get("max_notional_per_token") or 0)
+    max_position_per_token = float(cfg.get("max_position_usd_per_token") or 0)
+
+    accumulator = state.get("buy_notional_accumulator")
+    if not isinstance(accumulator, dict):
+        accumulator_usd = 0.0
+    else:
+        token_acc = accumulator.get(token_id)
+        if not isinstance(token_acc, dict):
+            accumulator_usd = 0.0
+        else:
+            accumulator_usd = float(token_acc.get("usd", 0.0))
+
+    # CRITICAL: Use actual position value if provided, otherwise use accumulator
+    # This prevents blocking orders when accumulator is high due to historical cost
+    # but actual position value is low due to price drops
+    if planned_token_notional is not None:
+        # Use the minimum of accumulator and planned as the "used" amount
+        # This provides safety (accumulator) while respecting actual position value
+        effective_current = min(accumulator_usd, planned_token_notional) + local_delta
+    else:
+        # Fallback to accumulator only (legacy behavior)
+        effective_current = accumulator_usd + local_delta
+
+    # Check limits and calculate available notional
+    if max_per_token > 0:
+        available = max_per_token - effective_current
+        if available <= 0:
+            return False, "accumulator_max_notional_per_token", 0.0
+        if order_notional > available:
+            # Order exceeds limit, but some room is available
+            return False, "accumulator_max_notional_per_token", available
+
+    if max_position_per_token > 0:
+        available = max_position_per_token - effective_current
+        if available <= 0:
+            return False, "accumulator_max_position_usd_per_token", 0.0
+        if order_notional > available:
+            return False, "accumulator_max_position_usd_per_token", available
+
+    # Order is within limits
+    return True, "ok", float("inf")
 
 
 def risk_check(

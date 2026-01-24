@@ -1082,6 +1082,36 @@ def apply_actions(
                 old_usd,
                 new_usd,
             )
+        # CRITICAL: Update accumulator for SELL orders (reduce on sell)
+        if state is not None and side_u == "SELL" and price > 0 and size_for_record > 0:
+            token_id = str(action.get("token_id") or "")
+            sell_usd = abs(size_for_record) * price
+            if token_id and sell_usd > 0:
+                accumulator = state.get("buy_notional_accumulator")
+                if isinstance(accumulator, dict) and token_id in accumulator:
+                    acc_data = accumulator[token_id]
+                    if isinstance(acc_data, dict):
+                        old_usd = float(acc_data.get("usd", 0.0))
+                        new_usd = max(0.0, old_usd - sell_usd)
+                        if new_usd <= 0.01:
+                            # Position effectively cleared
+                            accumulator.pop(token_id, None)
+                            logger.info(
+                                "[ACCUMULATOR_CLEAR_SELL] token_id=%s old=%s sell=%s reason=cleared",
+                                token_id,
+                                old_usd,
+                                sell_usd,
+                            )
+                        else:
+                            accumulator[token_id]["usd"] = new_usd
+                            accumulator[token_id]["last_ts"] = int(now_ts)
+                            logger.info(
+                                "[ACCUMULATOR_REDUCE_SELL] token_id=%s old=%s sell=%s new=%s",
+                                token_id,
+                                old_usd,
+                                sell_usd,
+                                new_usd,
+                            )
         order_id = response.get("order_id")
         if (
             is_taker
@@ -1103,6 +1133,22 @@ def apply_actions(
                         "usd": float(usd),
                         "ts": int(now_ts),
                     }
+                )
+                # CRITICAL: Update buy notional accumulator (first line of defense)
+                accumulator = state.setdefault("buy_notional_accumulator", {})
+                if not isinstance(accumulator, dict):
+                    state["buy_notional_accumulator"] = {}
+                    accumulator = state["buy_notional_accumulator"]
+                if token_id not in accumulator:
+                    accumulator[token_id] = {"usd": 0.0, "last_ts": now_ts}
+                accumulator[token_id]["usd"] = float(accumulator[token_id].get("usd", 0.0)) + float(usd)
+                accumulator[token_id]["last_ts"] = int(now_ts)
+                logger.info(
+                    "[ACCUMULATOR_UPDATE] token_id=%s added_usd=%s total_usd=%s is_taker=%s",
+                    token_id,
+                    usd,
+                    accumulator[token_id]["usd"],
+                    is_taker,
                 )
         if order_id:
             if state is not None:

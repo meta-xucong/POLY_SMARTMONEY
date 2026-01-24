@@ -35,7 +35,7 @@ from ct_resolver import (
     market_tradeable_state,
     resolve_token_id,
 )
-from ct_risk import risk_check
+from ct_risk import accumulator_check, risk_check
 from ct_state import load_state, save_state
 
 
@@ -3458,6 +3458,8 @@ def main() -> None:
                     token_planned_before_shadow = float(
                         planned_by_token_usd_shadow.get(token_id, 0.0)
                     )
+                    # Track accumulator delta within this batch to prevent batch bypass
+                    local_accumulator_delta = 0.0
 
                     for act in actions:
                         act_type = act.get("type")
@@ -3492,6 +3494,88 @@ def main() -> None:
                         if my_trades_unreliable and side == "BUY":
                             blocked_reasons.add("my_trades_unreliable")
                             continue
+
+                        # CRITICAL: Check accumulator first (independent of position API)
+                        if side == "BUY":
+                            order_notional = abs(size) * price
+                            cfg_for_acc = cfg_lowp if is_lowp else cfg
+                            planned_token_notional_for_acc = float(planned_by_token_usd.get(token_id, 0.0))
+                            acc_ok, acc_reason, acc_available = accumulator_check(
+                                token_id,
+                                order_notional,
+                                state,
+                                cfg_for_acc,
+                                side=side,
+                                local_delta=local_accumulator_delta,
+                                planned_token_notional=planned_token_notional_for_acc,
+                            )
+                            if not acc_ok:
+                                # Get accumulator actual values for detailed logging
+                                accumulator = state.get("buy_notional_accumulator")
+                                acc_current = 0.0
+                                if isinstance(accumulator, dict):
+                                    token_acc = accumulator.get(token_id)
+                                    if isinstance(token_acc, dict):
+                                        acc_current = float(token_acc.get("usd", 0.0))
+                                max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
+
+                                # Try to shrink order to fit within accumulator limit
+                                if acc_available > 0:
+                                    min_order_usd = float(cfg_for_acc.get("min_order_usd") or 0.0)
+                                    min_order_shares = float(cfg_for_acc.get("min_order_shares") or 0.0)
+                                    effective_min_usd = max(min_order_usd, min_order_shares * price)
+
+                                    if acc_available >= effective_min_usd:
+                                        # Shrink order to available amount
+                                        old_size = size
+                                        old_usd = order_notional
+                                        size = acc_available / price
+                                        act["size"] = size
+                                        order_notional = acc_available
+                                        logger.warning(
+                                            "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                            token_id,
+                                            old_usd,
+                                            acc_available,
+                                            acc_current,
+                                            max_per_token,
+                                            planned_token_notional_for_acc,
+                                            is_lowp,
+                                            acc_reason,
+                                        )
+                                        # Continue with shrunken order (don't skip)
+                                    else:
+                                        # Available amount is below minimum order size
+                                        logger.warning(
+                                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
+                                            token_id,
+                                            order_notional,
+                                            acc_current,
+                                            local_accumulator_delta,
+                                            max_per_token,
+                                            acc_available,
+                                            effective_min_usd,
+                                            planned_token_notional_for_acc,
+                                            is_lowp,
+                                            acc_reason,
+                                        )
+                                        blocked_reasons.add(acc_reason or "accumulator_check")
+                                        continue
+                                else:
+                                    # No room available
+                                    logger.warning(
+                                        "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                        token_id,
+                                        order_notional,
+                                        acc_current,
+                                        local_accumulator_delta,
+                                        max_per_token,
+                                        planned_token_notional_for_acc,
+                                        is_lowp,
+                                        acc_reason,
+                                    )
+                                    blocked_reasons.add(acc_reason or "accumulator_check")
+                                    continue
 
                         planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                         planned_token_notional_shadow = float(
@@ -3546,6 +3630,38 @@ def main() -> None:
                             act, allowed_usd = resized
                             price = float(act.get("price") or 0.0)
                             size = float(act.get("size") or 0.0)
+
+                            # CRITICAL: Re-check accumulator after shrink
+                            shrink_notional = abs(size) * price
+                            acc_ok_shrink, acc_reason_shrink, _ = accumulator_check(
+                                token_id,
+                                shrink_notional,
+                                state,
+                                cfg_for_action,
+                                side=side,
+                                local_delta=local_accumulator_delta,
+                            )
+                            if not acc_ok_shrink:
+                                logger.warning(
+                                    "[ACCUMULATOR_BLOCK_SHRINK] token_id=%s shrink_usd=%s "
+                                    "current_delta=%s reason=%s",
+                                    token_id,
+                                    shrink_notional,
+                                    local_accumulator_delta,
+                                    acc_reason_shrink,
+                                )
+                                if has_any_place and pending_cancel_actions:
+                                    planned_total_notional += pending_cancel_usd
+                                    planned_by_token_usd[token_id] = token_planned_before
+                                    planned_total_notional_shadow += pending_cancel_usd
+                                    planned_by_token_usd_shadow[token_id] = (
+                                        token_planned_before_shadow
+                                    )
+                                    pending_cancel_actions = []
+                                    pending_cancel_usd = 0.0
+                                blocked_reasons.add(acc_reason_shrink or "accumulator_check_shrink")
+                                continue
+
                             planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                             planned_token_notional_shadow = float(
                                 planned_by_token_usd_shadow.get(token_id, 0.0)
@@ -3598,6 +3714,8 @@ def main() -> None:
                             planned_by_token_usd_shadow[token_id] = (
                                 planned_by_token_usd_shadow.get(token_id, 0.0) + usd
                             )
+                            # Update accumulator delta for batch bypass prevention
+                            local_accumulator_delta += usd
 
                     if has_any_place and pending_cancel_actions:
                         planned_total_notional += pending_cancel_usd
@@ -4231,6 +4349,8 @@ def main() -> None:
             token_planned_before_shadow = float(
                 planned_by_token_usd_shadow.get(token_id, 0.0)
             )
+            # Track accumulator delta within this batch to prevent batch bypass
+            local_accumulator_delta = 0.0
 
             for act in actions:
                 act_type = act.get("type")
@@ -4265,6 +4385,88 @@ def main() -> None:
                 if my_trades_unreliable and side == "BUY":
                     blocked_reasons.add("my_trades_unreliable")
                     continue
+
+                # CRITICAL: Check accumulator first (independent of position API)
+                if side == "BUY":
+                    order_notional = abs(size) * price
+                    cfg_for_acc = cfg_lowp if is_lowp else cfg
+                    planned_token_notional_for_acc = float(planned_by_token_usd.get(token_id, 0.0))
+                    acc_ok, acc_reason, acc_available = accumulator_check(
+                        token_id,
+                        order_notional,
+                        state,
+                        cfg_for_acc,
+                        side=side,
+                        local_delta=local_accumulator_delta,
+                        planned_token_notional=planned_token_notional_for_acc,
+                    )
+                    if not acc_ok:
+                        # Get accumulator actual values for detailed logging
+                        accumulator = state.get("buy_notional_accumulator")
+                        acc_current = 0.0
+                        if isinstance(accumulator, dict):
+                            token_acc = accumulator.get(token_id)
+                            if isinstance(token_acc, dict):
+                                acc_current = float(token_acc.get("usd", 0.0))
+                        max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
+
+                        # Try to shrink order to fit within accumulator limit
+                        if acc_available > 0:
+                            min_order_usd = float(cfg_for_acc.get("min_order_usd") or 0.0)
+                            min_order_shares = float(cfg_for_acc.get("min_order_shares") or 0.0)
+                            effective_min_usd = max(min_order_usd, min_order_shares * price)
+
+                            if acc_available >= effective_min_usd:
+                                # Shrink order to available amount
+                                old_size = size
+                                old_usd = order_notional
+                                size = acc_available / price
+                                act["size"] = size
+                                order_notional = acc_available
+                                logger.warning(
+                                    "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                    token_id,
+                                    old_usd,
+                                    acc_available,
+                                    acc_current,
+                                    max_per_token,
+                                    planned_token_notional_for_acc,
+                                    is_lowp,
+                                    acc_reason,
+                                )
+                                # Continue with shrunken order (don't skip)
+                            else:
+                                # Available amount is below minimum order size
+                                logger.warning(
+                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
+                                    token_id,
+                                    order_notional,
+                                    acc_current,
+                                    local_accumulator_delta,
+                                    max_per_token,
+                                    acc_available,
+                                    effective_min_usd,
+                                    planned_token_notional_for_acc,
+                                    is_lowp,
+                                    acc_reason,
+                                )
+                                blocked_reasons.add(acc_reason or "accumulator_check")
+                                continue
+                        else:
+                            # No room available
+                            logger.warning(
+                                "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                token_id,
+                                order_notional,
+                                acc_current,
+                                local_accumulator_delta,
+                                max_per_token,
+                                planned_token_notional_for_acc,
+                                is_lowp,
+                                acc_reason,
+                            )
+                            blocked_reasons.add(acc_reason or "accumulator_check")
+                            continue
 
                 planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                 planned_token_notional_shadow = float(
@@ -4319,6 +4521,38 @@ def main() -> None:
                     act, allowed_usd = resized
                     price = float(act.get("price") or 0.0)
                     size = float(act.get("size") or 0.0)
+
+                    # CRITICAL: Re-check accumulator after shrink
+                    shrink_notional = abs(size) * price
+                    acc_ok_shrink, acc_reason_shrink, _ = accumulator_check(
+                        token_id,
+                        shrink_notional,
+                        state,
+                        cfg_for_action,
+                        side=side,
+                        local_delta=local_accumulator_delta,
+                    )
+                    if not acc_ok_shrink:
+                        logger.warning(
+                            "[ACCUMULATOR_BLOCK_SHRINK] token_id=%s shrink_usd=%s "
+                            "current_delta=%s reason=%s",
+                            token_id,
+                            shrink_notional,
+                            local_accumulator_delta,
+                            acc_reason_shrink,
+                        )
+                        if has_any_place and pending_cancel_actions:
+                            planned_total_notional += pending_cancel_usd
+                            planned_by_token_usd[token_id] = token_planned_before
+                            planned_total_notional_shadow += pending_cancel_usd
+                            planned_by_token_usd_shadow[token_id] = (
+                                token_planned_before_shadow
+                            )
+                            pending_cancel_actions = []
+                            pending_cancel_usd = 0.0
+                        blocked_reasons.add(acc_reason_shrink or "accumulator_check_shrink")
+                        continue
+
                     planned_token_notional = float(planned_by_token_usd.get(token_id, 0.0))
                     planned_token_notional_shadow = float(
                         planned_by_token_usd_shadow.get(token_id, 0.0)
@@ -4369,6 +4603,8 @@ def main() -> None:
                     planned_by_token_usd_shadow[token_id] = (
                         planned_by_token_usd_shadow.get(token_id, 0.0) + usd
                     )
+                    # Update accumulator delta for batch bypass prevention
+                    local_accumulator_delta += usd
 
             if has_any_place and pending_cancel_actions:
                 planned_total_notional += pending_cancel_usd

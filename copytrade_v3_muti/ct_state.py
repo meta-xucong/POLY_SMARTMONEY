@@ -40,6 +40,7 @@ DEFAULT_STATE: Dict[str, Any] = {
     "seen_my_trade_ids": [],
     "my_trades_cursor_ms": 0,
     "my_trades_unreliable_until": 0,
+    "buy_notional_accumulator": {},
 }
 
 
