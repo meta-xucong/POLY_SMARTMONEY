@@ -3052,11 +3052,22 @@ def main() -> None:
                                 local_delta=local_accumulator_delta,
                             )
                             if not acc_ok:
+                                # Get accumulator actual values for detailed logging
+                                accumulator = state.get("buy_notional_accumulator")
+                                acc_current = 0.0
+                                if isinstance(accumulator, dict):
+                                    token_acc = accumulator.get(token_id)
+                                    if isinstance(token_acc, dict):
+                                        acc_current = float(token_acc.get("usd", 0.0))
+                                max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
                                 logger.warning(
-                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s current_delta=%s reason=%s",
+                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s is_lowp=%s reason=%s",
                                     token_id,
                                     order_notional,
+                                    acc_current,
                                     local_accumulator_delta,
+                                    max_per_token,
+                                    is_lowp,
                                     acc_reason,
                                 )
                                 blocked_reasons.add(acc_reason or "accumulator_check")
@@ -3900,11 +3911,22 @@ def main() -> None:
                         local_delta=local_accumulator_delta,
                     )
                     if not acc_ok:
+                        # Get accumulator actual values for detailed logging
+                        accumulator = state.get("buy_notional_accumulator")
+                        acc_current = 0.0
+                        if isinstance(accumulator, dict):
+                            token_acc = accumulator.get(token_id)
+                            if isinstance(token_acc, dict):
+                                acc_current = float(token_acc.get("usd", 0.0))
+                        max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
                         logger.warning(
-                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s current_delta=%s reason=%s",
+                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s is_lowp=%s reason=%s",
                             token_id,
                             order_notional,
+                            acc_current,
                             local_accumulator_delta,
+                            max_per_token,
+                            is_lowp,
                             acc_reason,
                         )
                         blocked_reasons.add(acc_reason or "accumulator_check")
