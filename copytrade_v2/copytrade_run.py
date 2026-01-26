@@ -3196,13 +3196,15 @@ def main() -> None:
 
                             # CRITICAL: Re-check accumulator after shrink
                             shrink_notional = abs(size) * price
-                            acc_ok_shrink, acc_reason_shrink = accumulator_check(
-                                token_id,
-                                shrink_notional,
-                                state,
-                                cfg_for_action,
-                                side=side,
-                                local_delta=local_accumulator_delta,
+                            acc_ok_shrink, acc_reason_shrink, _acc_available_shrink = (
+                                accumulator_check(
+                                    token_id,
+                                    shrink_notional,
+                                    state,
+                                    cfg_for_action,
+                                    side=side,
+                                    local_delta=local_accumulator_delta,
+                                )
                             )
                             if not acc_ok_shrink:
                                 logger.warning(
@@ -4077,13 +4079,15 @@ def main() -> None:
 
                     # CRITICAL: Re-check accumulator after shrink
                     shrink_notional = abs(size) * price
-                    acc_ok_shrink, acc_reason_shrink = accumulator_check(
-                        token_id,
-                        shrink_notional,
-                        state,
-                        cfg_for_action,
-                        side=side,
-                        local_delta=local_accumulator_delta,
+                    acc_ok_shrink, acc_reason_shrink, _acc_available_shrink = (
+                        accumulator_check(
+                            token_id,
+                            shrink_notional,
+                            state,
+                            cfg_for_action,
+                            side=side,
+                            local_delta=local_accumulator_delta,
+                        )
                     )
                     if not acc_ok_shrink:
                         logger.warning(
