@@ -49,9 +49,9 @@ def accumulator_check(
     # This prevents blocking orders when accumulator is high due to historical cost
     # but actual position value is low due to price drops
     if planned_token_notional is not None:
-        # Use the minimum of accumulator and planned as the "used" amount
-        # This provides safety (accumulator) while respecting actual position value
-        effective_current = min(accumulator_usd, planned_token_notional) + local_delta
+        # Use planned notional as the "used" amount to reflect current exposure.
+        # This allows buy capacity to recover after sells/claims reduce holdings.
+        effective_current = planned_token_notional + local_delta
     else:
         # Fallback to accumulator only (legacy behavior)
         effective_current = accumulator_usd + local_delta
