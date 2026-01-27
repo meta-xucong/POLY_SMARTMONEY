@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
-from ct_utils import round_to_tick, safe_float
+from ct_utils import round_to_step, round_to_tick, safe_float
 
 
 logger = logging.getLogger(__name__)
@@ -337,8 +337,13 @@ def reconcile_one(
     min_shares = float(cfg.get("min_order_shares") or 0.0)
     api_min_shares = 0.0
     if isinstance(meta, dict):
-        api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
+        api_min_shares = safe_float(
+            meta.get("orderMinSize")
+            or meta.get("minimum_order_size")
+            or meta.get("min_order_size")
+        ) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
+    size_step = api_min_shares if api_min_shares > 0 else 0.0
     cap_shares = None
     cap_shares_remaining = None
     if price > 0 and side == "BUY":
@@ -375,6 +380,8 @@ def reconcile_one(
         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
         if min_order_usd > 0 and price > 0:
             size = max(size, min_order_usd / price)
+        if size_step > 0:
+            size = round_to_step(size, size_step, direction="up")
         if open_orders:
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
@@ -397,6 +404,21 @@ def reconcile_one(
         and taker_enabled
     )
     if small_exit_taker_override:
+        if size_step > 0 and abs_delta + 1e-12 < size_step:
+            logger.info(
+                "[DUST_EXIT] token_id=%s remaining=%s < min_step=%s; treat as exited",
+                token_id,
+                my_shares,
+                size_step,
+            )
+            state.setdefault("dust_exits", {})[token_id] = {
+                "ts": now_ts,
+                "shares": my_shares,
+            }
+            topic_state = state.get("topic_state")
+            if isinstance(topic_state, dict):
+                topic_state.pop(token_id, None)
+            return actions
         if best_bid is None:
             logger.info(
                 "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; no_bid_exit",
@@ -504,6 +526,14 @@ def reconcile_one(
         size = max_shares_cap
     if side == "SELL" and not allow_short:
         size = min(size, my_shares)
+    if size_step > 0 and not small_taker_override:
+        size = round_to_step(size, size_step, direction="down")
+        if side == "BUY" and size + 1e-12 < effective_min_shares:
+            size = round_to_step(effective_min_shares, size_step, direction="up")
+        if size > max_shares_cap:
+            size = max_shares_cap
+        if side == "SELL" and not allow_short:
+            size = min(size, my_shares)
     if (
         effective_min_shares > 0
         and size < effective_min_shares
