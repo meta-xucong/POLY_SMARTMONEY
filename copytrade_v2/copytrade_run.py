@@ -158,9 +158,33 @@ def _setup_logging(
     root_logger.addHandler(stream_handler)
     root_logger.addHandler(file_handler)
 
+    # Suppress verbose third-party HTTP request logs unless in DEBUG mode
+    # These libraries log every HTTP request at INFO level, which clutters output
+    _suppress_verbose_third_party_loggers(level)
+
     logger = logging.getLogger(__name__)
     logger.info("日志初始化完成: %s", log_path)
     return logger
+
+
+def _suppress_verbose_third_party_loggers(app_level: int) -> None:
+    """
+    Suppress verbose INFO-level logs from third-party HTTP libraries.
+    Only show their logs in DEBUG mode; otherwise set them to WARNING.
+    """
+    verbose_loggers = [
+        "httpx",           # HTTP Request: GET/POST ... logs
+        "httpcore",        # httpx's underlying library
+        "urllib3",         # requests library's HTTP logs
+        "requests",        # requests library
+        "hpack",           # HTTP/2 header compression
+        "h2",              # HTTP/2 protocol
+        "h11",             # HTTP/1.1 protocol
+    ]
+    # Only show third-party HTTP logs in DEBUG mode
+    third_party_level = logging.DEBUG if app_level <= logging.DEBUG else logging.WARNING
+    for name in verbose_loggers:
+        logging.getLogger(name).setLevel(third_party_level)
 
 
 def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str:
@@ -1155,6 +1179,8 @@ def main() -> None:
         root_logger.setLevel(level)
         for handler in root_logger.handlers:
             handler.setLevel(level)
+        # Keep third-party loggers suppressed after level refresh
+        _suppress_verbose_third_party_loggers(level)
 
     def _reload_config(reason: str) -> None:
         nonlocal cfg, last_config_reload_ts, last_config_mtime
