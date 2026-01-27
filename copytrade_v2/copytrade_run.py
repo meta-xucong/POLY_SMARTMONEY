@@ -43,6 +43,58 @@ DEFAULT_CONFIG_PATH = Path(__file__).with_name("copytrade_config.json")
 DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
 
 
+class LogDeduplicator:
+    """
+    Deduplicate repetitive log messages within a time window.
+
+    For logs like [NOOP] that fire every loop iteration with the same reason,
+    this class suppresses duplicates and shows a count when finally logging.
+    """
+
+    def __init__(self, window_sec: float = 60.0):
+        self._window_sec = window_sec
+        self._last_log_time: Dict[str, float] = {}  # key -> timestamp of last log
+        self._suppressed_count: Dict[str, int] = {}  # key -> count of suppressed logs
+
+    def set_window(self, window_sec: float) -> None:
+        """Update the deduplication window."""
+        self._window_sec = max(0.0, window_sec)
+
+    def should_log(self, key: str) -> tuple[bool, int]:
+        """
+        Check if this log should be output.
+
+        Returns:
+            (should_log, suppressed_count): Whether to log, and how many were suppressed
+        """
+        if self._window_sec <= 0:
+            # Deduplication disabled
+            return True, 0
+
+        now = time.time()
+        last_time = self._last_log_time.get(key, 0.0)
+
+        if now - last_time >= self._window_sec:
+            # Time to log - get suppressed count and reset
+            suppressed = self._suppressed_count.get(key, 0)
+            self._last_log_time[key] = now
+            self._suppressed_count[key] = 0
+            return True, suppressed
+        else:
+            # Suppress this log
+            self._suppressed_count[key] = self._suppressed_count.get(key, 0) + 1
+            return False, 0
+
+    def clear(self) -> None:
+        """Clear all deduplication state."""
+        self._last_log_time.clear()
+        self._suppressed_count.clear()
+
+
+# Global log deduplicator instance
+_log_dedup = LogDeduplicator()
+
+
 def _state_path_for_target(state_path: Path, target_address: str) -> Path:
     """Derive per-target state file path when user didn't explicitly provide one."""
     addr = str(target_address or "").strip().lower()
@@ -1171,6 +1223,9 @@ def main() -> None:
         max_resolve_target_positions_per_loop = int(
             cfg.get("max_resolve_target_positions_per_loop") or 20
         )
+        # Log deduplication: suppress repetitive logs within this window (0 = disabled)
+        log_dedup_window = float(cfg.get("log_dedup_window_sec") or 60.0)
+        _log_dedup.set_window(log_dedup_window)
 
     def _refresh_log_level() -> None:
         level_name = str(cfg.get("log_level") or "INFO").upper()
@@ -2485,7 +2540,16 @@ def main() -> None:
                     ignored[token_id] = {"ts": now_ts, "reason": "closed_or_not_tradeable"}
                     meta = cached.get("meta") or {}
                     slug = meta.get("slug") or ""
-                    logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
+                    dedup_key = f"SKIP:{token_id}:closed_inactive"
+                    should_log, suppressed = _log_dedup.should_log(dedup_key)
+                    if should_log:
+                        if suppressed > 0:
+                            logger.info(
+                                "[SKIP] closed/inactive token_id=%s slug=%s (suppressed %d)",
+                                token_id, slug, suppressed,
+                            )
+                        else:
+                            logger.info("[SKIP] closed/inactive token_id=%s slug=%s", token_id, slug)
                     continue
 
                 if tradeable is None:
@@ -2914,7 +2978,16 @@ def main() -> None:
                                 cfg.get("cancel_intent_ignore_cooldown", True)
                             )
                             if cooldown_active and (not ignore_cd) and (not cancel_ignore_cd):
-                                logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
+                                dedup_key = f"SKIP:{token_id}:cooldown_intent"
+                                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                                if should_log:
+                                    if suppressed > 0:
+                                        logger.info(
+                                            "[SKIP] token_id=%s reason=cooldown_intent (suppressed %d)",
+                                            token_id, suppressed,
+                                        )
+                                    else:
+                                        logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                             else:
                                 updated_orders = apply_actions(
                                     clob_client,
@@ -3325,7 +3398,16 @@ def main() -> None:
                                 if blocked_reasons
                                 else "risk_check"
                             )
-                            logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
+                            dedup_key = f"NOOP:{token_id}:{reason_text}"
+                            should_log, suppressed = _log_dedup.should_log(dedup_key)
+                            if should_log:
+                                if suppressed > 0:
+                                    logger.info(
+                                        "[NOOP] token_id=%s reason=%s (suppressed %d)",
+                                        token_id, reason_text, suppressed,
+                                    )
+                                else:
+                                    logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
                         continue
                     actions = filtered_actions
                     logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
@@ -3397,15 +3479,32 @@ def main() -> None:
                     if place_backoff_active and any(
                         act.get("type") == "place" for act in actions
                     ):
-                        logger.info(
-                            "[SKIP] token_id=%s reason=place_backoff until=%s",
-                            token_id,
-                            place_fail_until,
-                        )
+                        dedup_key = f"SKIP:{token_id}:place_backoff"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            if suppressed > 0:
+                                logger.info(
+                                    "[SKIP] token_id=%s reason=place_backoff until=%s (suppressed %d)",
+                                    token_id, place_fail_until, suppressed,
+                                )
+                            else:
+                                logger.info(
+                                    "[SKIP] token_id=%s reason=place_backoff until=%s",
+                                    token_id, place_fail_until,
+                                )
                         continue
                     ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
                     if cooldown_active and (not ignore_cd) and (not is_reprice):
-                        logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
+                        dedup_key = f"SKIP:{token_id}:cooldown"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            if suppressed > 0:
+                                logger.info(
+                                    "[SKIP] token_id=%s reason=cooldown (suppressed %d)",
+                                    token_id, suppressed,
+                                )
+                            else:
+                                logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
                         continue
 
                     updated_orders = apply_actions(
@@ -3631,7 +3730,16 @@ def main() -> None:
                         "[SKIP] closed_by_orderbook_empty token_id=%s",
                         token_id,
                     )
-                logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
+                dedup_key = f"NOOP:{token_id}:orderbook_empty"
+                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                if should_log:
+                    if suppressed > 0:
+                        logger.info(
+                            "[NOOP] token_id=%s reason=orderbook_empty (suppressed %d)",
+                            token_id, suppressed,
+                        )
+                    else:
+                        logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
                 continue
             _clear_orderbook_empty(state, token_id)
             state.setdefault("last_mid_price_by_token_id", {})[token_id] = float(ref_price)
@@ -3705,7 +3813,16 @@ def main() -> None:
                     if not st.get("did_probe") and my_shares <= eps:
                         my_target = min(cap_shares, cap_shares_notional, my_shares + probe_shares)
                         probe_attempted = True
-                        logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
+                        dedup_key = f"TOPIC_PROBE:{token_id}"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            if suppressed > 0:
+                                logger.info(
+                                    "[TOPIC] PROBE token_id=%s target=%s (suppressed %d)",
+                                    token_id, my_target, suppressed,
+                                )
+                            else:
+                                logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
                     if not st.get("entry_sized"):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
@@ -3826,7 +3943,16 @@ def main() -> None:
                         cfg.get("cancel_intent_ignore_cooldown", True)
                     )
                     if cooldown_active and (not ignore_cd) and (not cancel_ignore_cd):
-                        logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
+                        dedup_key = f"SKIP:{token_id}:cooldown_intent"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            if suppressed > 0:
+                                logger.info(
+                                    "[SKIP] token_id=%s reason=cooldown_intent (suppressed %d)",
+                                    token_id, suppressed,
+                                )
+                            else:
+                                logger.info("[SKIP] token_id=%s reason=cooldown_intent", token_id)
                     else:
                         updated_orders = apply_actions(
                             clob_client,
@@ -3874,12 +4000,19 @@ def main() -> None:
             ]
             deadband_shares = float(cfg.get("deadband_shares") or 0.0)
             if abs(delta) <= deadband_shares and not open_orders_for_reconcile:
-                logger.info(
-                    "[NOOP] token_id=%s reason=deadband delta=%s deadband=%s",
-                    token_id,
-                    delta,
-                    deadband_shares,
-                )
+                dedup_key = f"NOOP:{token_id}:deadband"
+                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                if should_log:
+                    if suppressed > 0:
+                        logger.info(
+                            "[NOOP] token_id=%s reason=deadband delta=%s deadband=%s (suppressed %d)",
+                            token_id, delta, deadband_shares, suppressed,
+                        )
+                    else:
+                        logger.info(
+                            "[NOOP] token_id=%s reason=deadband delta=%s deadband=%s",
+                            token_id, delta, deadband_shares,
+                        )
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
 
@@ -4184,7 +4317,16 @@ def main() -> None:
                     reason_text = (
                         ",".join(sorted(blocked_reasons)) if blocked_reasons else "risk_check"
                     )
-                    logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
+                    dedup_key = f"NOOP:{token_id}:{reason_text}"
+                    should_log, suppressed = _log_dedup.should_log(dedup_key)
+                    if should_log:
+                        if suppressed > 0:
+                            logger.info(
+                                "[NOOP] token_id=%s reason=%s (suppressed %d)",
+                                token_id, reason_text, suppressed,
+                            )
+                        else:
+                            logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             actions = filtered_actions
@@ -4192,16 +4334,33 @@ def main() -> None:
 
             is_reprice = _is_pure_reprice(actions)
             if place_backoff_active and any(act.get("type") == "place" for act in actions):
-                logger.info(
-                    "[SKIP] token_id=%s reason=place_backoff until=%s",
-                    token_id,
-                    place_fail_until,
-                )
+                dedup_key = f"SKIP:{token_id}:place_backoff"
+                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                if should_log:
+                    if suppressed > 0:
+                        logger.info(
+                            "[SKIP] token_id=%s reason=place_backoff until=%s (suppressed %d)",
+                            token_id, place_fail_until, suppressed,
+                        )
+                    else:
+                        logger.info(
+                            "[SKIP] token_id=%s reason=place_backoff until=%s",
+                            token_id, place_fail_until,
+                        )
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
             if cooldown_active and (not ignore_cd) and (not is_reprice):
-                logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
+                dedup_key = f"SKIP:{token_id}:cooldown"
+                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                if should_log:
+                    if suppressed > 0:
+                        logger.info(
+                            "[SKIP] token_id=%s reason=cooldown (suppressed %d)",
+                            token_id, suppressed,
+                        )
+                    else:
+                        logger.info("[SKIP] token_id=%s reason=cooldown", token_id)
                 continue
 
             did_place_buy = any(
