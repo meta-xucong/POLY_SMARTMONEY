@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_DOWN, ROUND_UP
+from decimal import Decimal, ROUND_CEILING, ROUND_DOWN, ROUND_FLOOR, ROUND_UP
 from typing import Optional
 
 
@@ -15,6 +15,16 @@ def round_to_tick(price: float, tick_size: float, *, direction: str = "down") ->
     raw = Decimal(str(price))
     rounding = ROUND_DOWN if direction == "down" else ROUND_UP
     return float(raw.quantize(quant, rounding=rounding))
+
+
+def round_to_step(value: float, step: float, *, direction: str = "down") -> float:
+    if step <= 0:
+        return float(value)
+    quant = Decimal(str(step))
+    raw = Decimal(str(value))
+    rounding = ROUND_FLOOR if direction == "down" else ROUND_CEILING
+    rounded = (raw / quant).to_integral_value(rounding=rounding)
+    return float(rounded * quant)
 
 
 def safe_float(value: object) -> Optional[float]:
