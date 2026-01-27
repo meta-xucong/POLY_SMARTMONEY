@@ -361,6 +361,9 @@ def reconcile_one(
             if tick_size > 0:
                 price = round_to_tick(price, tick_size, direction="up")
         size = abs_delta
+        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+        if min_order_usd > 0 and price > 0:
+            size = max(size, min_order_usd / price)
         if open_orders:
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
