@@ -375,6 +375,46 @@ def reconcile_one(
                     )
             open_orders = []
 
+    small_exit_taker_override = (
+        is_exiting
+        and side == "SELL"
+        and effective_min_shares > 0
+        and abs_delta + 1e-12 < effective_min_shares
+        and taker_enabled
+    )
+    if small_exit_taker_override:
+        if best_bid is None:
+            logger.info(
+                "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; no_bid_exit",
+                token_id,
+                my_shares,
+                effective_min_shares,
+            )
+            state.setdefault("dust_exits", {})[token_id] = {
+                "ts": now_ts,
+                "shares": my_shares,
+            }
+            topic_state = state.get("topic_state")
+            if isinstance(topic_state, dict):
+                topic_state.pop(token_id, None)
+            return actions
+        use_taker = True
+        price = round_to_tick(float(best_bid), tick_size, direction="down")
+        size = abs_delta
+        if open_orders:
+            for order in open_orders:
+                order_id = order.get("order_id") or order.get("id")
+                if order_id:
+                    actions.append(
+                        {
+                            "type": "cancel",
+                            "order_id": order_id,
+                            "token_id": token_id,
+                            "ts": now_ts,
+                        }
+                    )
+            open_orders = []
+
     if (
         effective_min_shares > 0
         and size < effective_min_shares
@@ -423,6 +463,7 @@ def reconcile_one(
             and effective_min_shares > 0
             and size < effective_min_shares
             and not small_taker_override
+            and not small_exit_taker_override
         ):
             size = max(size, effective_min_shares, total_open)
         elif (
@@ -430,6 +471,7 @@ def reconcile_one(
             and effective_min_shares > 0
             and size < effective_min_shares
             and not small_taker_override
+            and not small_exit_taker_override
         ):
             actions = []
             for order in open_orders:
@@ -448,7 +490,12 @@ def reconcile_one(
         size = max_shares_cap
     if side == "SELL" and not allow_short:
         size = min(size, my_shares)
-    if effective_min_shares > 0 and size < effective_min_shares and not small_taker_override:
+    if (
+        effective_min_shares > 0
+        and size < effective_min_shares
+        and not small_taker_override
+        and not small_exit_taker_override
+    ):
         if is_exiting and side == "SELL":
             logger.info(
                 "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; treat as exited",
