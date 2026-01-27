@@ -344,7 +344,43 @@ def reconcile_one(
             remaining_notional = max_notional - planned_token_notional
             cap_shares_remaining = remaining_notional / price if price > 0 else 0
 
-    if effective_min_shares > 0 and size < effective_min_shares and side == "BUY":
+    small_taker_override = (
+        side == "BUY"
+        and effective_min_shares > 0
+        and abs_delta + 1e-12 < effective_min_shares
+        and taker_enabled
+    )
+    if small_taker_override:
+        if best_ask is None:
+            return actions
+        use_taker = True
+        price = round_to_tick(float(best_ask), tick_size, direction="up")
+        min_price = float(cfg.get("min_price") or 0.01)
+        if min_price > 0 and price < min_price:
+            price = min_price
+            if tick_size > 0:
+                price = round_to_tick(price, tick_size, direction="up")
+        size = abs_delta
+        if open_orders:
+            for order in open_orders:
+                order_id = order.get("order_id") or order.get("id")
+                if order_id:
+                    actions.append(
+                        {
+                            "type": "cancel",
+                            "order_id": order_id,
+                            "token_id": token_id,
+                            "ts": now_ts,
+                        }
+                    )
+            open_orders = []
+
+    if (
+        effective_min_shares > 0
+        and size < effective_min_shares
+        and side == "BUY"
+        and not small_taker_override
+    ):
         bumped_size = effective_min_shares
         if cap_shares_remaining is not None:
             if cap_shares_remaining <= 0:
@@ -382,9 +418,19 @@ def reconcile_one(
                 total_open += float(order.get("size") or order.get("original_size") or 0.0)
             except Exception:
                 continue
-        if use_taker and effective_min_shares > 0 and size < effective_min_shares:
+        if (
+            use_taker
+            and effective_min_shares > 0
+            and size < effective_min_shares
+            and not small_taker_override
+        ):
             size = max(size, effective_min_shares, total_open)
-        elif not use_taker and effective_min_shares > 0 and size < effective_min_shares:
+        elif (
+            not use_taker
+            and effective_min_shares > 0
+            and size < effective_min_shares
+            and not small_taker_override
+        ):
             actions = []
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
@@ -402,7 +448,7 @@ def reconcile_one(
         size = max_shares_cap
     if side == "SELL" and not allow_short:
         size = min(size, my_shares)
-    if effective_min_shares > 0 and size < effective_min_shares:
+    if effective_min_shares > 0 and size < effective_min_shares and not small_taker_override:
         if is_exiting and side == "SELL":
             logger.info(
                 "[DUST_EXIT] token_id=%s remaining=%s < min_order=%s; treat as exited",
