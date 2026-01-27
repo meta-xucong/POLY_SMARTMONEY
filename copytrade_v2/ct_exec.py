@@ -225,6 +225,23 @@ def reconcile_one(
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
     tick_size = float(cfg.get("tick_size") or 0)
+    meta = None
+    if state is not None:
+        status_cache = state.get("market_status_cache")
+        if isinstance(status_cache, dict):
+            cached = status_cache.get(token_id) or {}
+            if isinstance(cached, dict):
+                meta = cached.get("meta")
+    if isinstance(meta, dict):
+        market_tick_size = safe_float(
+            meta.get("orderPriceMinTickSize")
+            or meta.get("minimum_tick_size")
+            or meta.get("minimumTickSize")
+            or meta.get("tick_size")
+            or meta.get("tickSize")
+        )
+        if market_tick_size and market_tick_size > 0:
+            tick_size = market_tick_size
     taker_spread_thr = float(cfg.get("taker_spread_threshold") or 0.01)
     taker_enabled = bool(cfg.get("taker_enabled", True))
 
@@ -319,14 +336,8 @@ def reconcile_one(
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
     api_min_shares = 0.0
-    if state is not None:
-        status_cache = state.get("market_status_cache")
-        if isinstance(status_cache, dict):
-            cached = status_cache.get(token_id) or {}
-            if isinstance(cached, dict):
-                meta = cached.get("meta") or {}
-                if isinstance(meta, dict):
-                    api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
+    if isinstance(meta, dict):
+        api_min_shares = safe_float(meta.get("orderMinSize")) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
     cap_shares = None
     cap_shares_remaining = None
