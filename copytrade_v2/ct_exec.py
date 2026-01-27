@@ -380,8 +380,6 @@ def reconcile_one(
         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
         if min_order_usd > 0 and price > 0:
             size = max(size, min_order_usd / price)
-        if size_step > 0:
-            size = round_to_step(size, size_step, direction="up")
         if open_orders:
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
