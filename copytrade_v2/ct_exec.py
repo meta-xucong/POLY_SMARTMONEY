@@ -5,6 +5,8 @@ import logging
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+from decimal import Decimal, ROUND_UP
+
 from ct_utils import round_to_step, round_to_tick, safe_float
 
 
@@ -379,7 +381,13 @@ def reconcile_one(
         size = abs_delta
         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
         if min_order_usd > 0 and price > 0:
-            size = max(size, min_order_usd / price)
+            min_usd = Decimal(str(min_order_usd))
+            price_dec = Decimal(str(price))
+            buffer = Decimal("1.000001")
+            min_size = (min_usd * buffer / price_dec).quantize(
+                Decimal("0.0000000001"), rounding=ROUND_UP
+            )
+            size = max(size, float(min_size))
         if open_orders:
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
