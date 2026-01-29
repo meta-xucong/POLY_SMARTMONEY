@@ -1355,10 +1355,10 @@ def main() -> None:
         now_ts = int(time.time())
         now_wall = time.time()
 
-        # --- Daily log cleanup: run once per day at the configured hour ---
-        _now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
-        _today_str = _now_dt.strftime("%Y-%m-%d")
-        if _today_str != _last_log_cleanup_date and _now_dt.hour >= _log_cleanup_hour:
+        # --- Daily log cleanup: run once per day at the configured hour (local time) ---
+        _now_local = time.localtime(now_ts)
+        _today_str = time.strftime("%Y-%m-%d", _now_local)
+        if _today_str != _last_log_cleanup_date and _now_local.tm_hour >= _log_cleanup_hour:
             _last_log_cleanup_date = _today_str
             try:
                 _cleanup_old_logs(_log_dir_path, _log_retention_days, logger)
