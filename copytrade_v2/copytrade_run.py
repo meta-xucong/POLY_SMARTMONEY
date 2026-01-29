@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import glob
 import logging
+import logging.handlers
 import os
 import re
 import random
@@ -180,10 +182,11 @@ def _setup_logging(
     if not log_dir.is_absolute():
         log_dir = base_dir / log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    pid = os.getpid()
     short = _shorten_address(target_address)
-    log_path = log_dir / f"copytrade_{short}_{timestamp}_pid{pid}.log"
+    # Stable filename — TimedRotatingFileHandler appends date suffix on rotation
+    log_path = log_dir / f"copytrade_{short}.log"
+
+    log_retention_days = int(cfg.get("log_retention_days") or 7)
 
     level_name = str(cfg.get("log_level") or "INFO").upper()
     level = logging.INFO
@@ -203,7 +206,15 @@ def _setup_logging(
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
 
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    # Daily rotation at midnight; keep log_retention_days days of history
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_path,
+        when="midnight",
+        interval=1,
+        backupCount=log_retention_days,
+        encoding="utf-8",
+    )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
 
@@ -215,8 +226,37 @@ def _setup_logging(
     _suppress_verbose_third_party_loggers(level)
 
     logger = logging.getLogger(__name__)
-    logger.info("日志初始化完成: %s", log_path)
+    logger.info("日志初始化完成: %s (daily rotation, retention=%dd)", log_path, log_retention_days)
+
+    # Run one-time cleanup of legacy log files (old naming with pid/timestamp)
+    _cleanup_old_logs(log_dir, log_retention_days, logger)
+
     return logger
+
+
+def _cleanup_old_logs(
+    log_dir: Path,
+    retention_days: int,
+    logger: logging.Logger,
+) -> int:
+    """Delete log files older than *retention_days* by mtime.
+
+    Covers both legacy files (copytrade_*_*_pid*.log) and rotated files
+    (copytrade_*.log.YYYY-MM-DD).  Returns number of files removed.
+    """
+    cutoff = time.time() - retention_days * 86400
+    removed = 0
+    for pattern in ("copytrade_*.log", "copytrade_*.log.*"):
+        for path_str in glob.glob(str(log_dir / pattern)):
+            try:
+                if os.path.getmtime(path_str) < cutoff:
+                    os.remove(path_str)
+                    removed += 1
+            except OSError:
+                pass
+    if removed:
+        logger.info("[LOG] cleaned up %d old log file(s) (retention=%dd)", removed, retention_days)
+    return removed
 
 
 def _suppress_verbose_third_party_loggers(app_level: int) -> None:
@@ -1294,6 +1334,15 @@ def main() -> None:
 
     missing_notice_tokens: set[str] = set()
 
+    # --- Daily log cleanup state ---
+    _log_dir_value = cfg.get("log_dir") or "logs"
+    _log_dir_path = Path(_log_dir_value)
+    if not _log_dir_path.is_absolute():
+        _log_dir_path = Path(args.config).parent / _log_dir_path
+    _log_retention_days = int(cfg.get("log_retention_days") or 7)
+    _log_cleanup_hour = int(cfg.get("log_cleanup_hour") or 12)
+    _last_log_cleanup_date: str = ""
+
     def _get_poll_interval() -> int:
         topic_state = state.get("topic_state", {})
         if isinstance(topic_state, dict):
@@ -1305,6 +1354,17 @@ def main() -> None:
     while True:
         now_ts = int(time.time())
         now_wall = time.time()
+
+        # --- Daily log cleanup: run once per day at the configured hour ---
+        _now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
+        _today_str = _now_dt.strftime("%Y-%m-%d")
+        if _today_str != _last_log_cleanup_date and _now_dt.hour >= _log_cleanup_hour:
+            _last_log_cleanup_date = _today_str
+            try:
+                _cleanup_old_logs(_log_dir_path, _log_retention_days, logger)
+            except Exception:
+                pass  # best-effort; don't disrupt trading
+
         actions_missing_ratio = 0.0
         unresolved_trade_candidates: list[Dict[str, Any]] = []
         resolver_fail_cooldown_sec = int(cfg.get("resolver_fail_cooldown_sec") or 300)
