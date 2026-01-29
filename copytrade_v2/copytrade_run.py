@@ -2629,6 +2629,12 @@ def main() -> None:
                             float(st.get("target_peak") or 0.0),
                             float(t_now),
                         )
+                    elif has_buy and buy_sum > 0:
+                        # FIX: When t_now is missing (positions API stale), accumulate
+                        # target_peak from buy actions so entry sizing has a usable base.
+                        st["target_peak"] = float(
+                            st.get("target_peak") or 0.0
+                        ) + float(buy_sum)
                     if not st.get("entry_sized"):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
                         if now_ts - first_buy_ts <= entry_settle_sec:
@@ -3830,6 +3836,15 @@ def main() -> None:
                             base = float(t_now) if t_now is not None else float(
                                 st.get("target_peak") or 0.0
                             )
+                            # FIX: When both t_now and target_peak are missing,
+                            # fall back to entry_buy_accum (action-based estimate).
+                            if base <= 0:
+                                base = float(st.get("entry_buy_accum") or 0.0)
+                            base_source = (
+                                "t_now" if t_now is not None else
+                                "target_peak" if float(st.get("target_peak") or 0.0) > 0 else
+                                "entry_buy_accum"
+                            )
                             ratio = ratio_buy
                             desired = 0.0
                             if base > 0 and ratio > 0:
@@ -3842,15 +3857,19 @@ def main() -> None:
                             st["entry_sized"] = True
                             topic_state[token_id] = st
                             logger.info(
-                                "[TOPIC] SIZE token_id=%s desired=%s base=%s",
+                                "[TOPIC] SIZE token_id=%s desired=%s base=%s base_source=%s",
                                 token_id,
                                 desired,
                                 base,
+                                base_source,
                             )
 
                     base = float(t_now) if t_now is not None else float(
                         st.get("target_peak") or 0.0
                     )
+                    # FIX: Same fallback for continuous tracking after entry_sized.
+                    if base <= 0:
+                        base = float(st.get("entry_buy_accum") or 0.0)
                     desired_locked = float(st.get("desired_shares") or 0.0)
                     desired_target = desired_locked
                     if base > 0 and ratio_buy > 0:
