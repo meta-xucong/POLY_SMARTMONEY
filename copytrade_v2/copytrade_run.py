@@ -3482,6 +3482,40 @@ def main() -> None:
                     missing_freeze = state.setdefault("missing_data_freeze", {})
                     if not missing_data and token_id:
                         state.get("missing_buy_attempts", {}).pop(token_id, None)
+                        ref_price_for_cap = None
+                        if (
+                            "ref_price" in locals()
+                            and isinstance(ref_price, (int, float))
+                            and ref_price > 0
+                        ):
+                            ref_price_for_cap = float(ref_price)
+                        else:
+                            last_mid = (
+                                state.get("last_mid_price_by_token_id", {})
+                                .get(token_id)
+                            )
+                            if last_mid:
+                                ref_price_for_cap = float(last_mid)
+                            else:
+                                for act in actions:
+                                    act_price = act.get("price")
+                                    if isinstance(act_price, (int, float)) and act_price > 0:
+                                        ref_price_for_cap = float(act_price)
+                                        break
+                        max_notional_per_token = float(
+                            (
+                                cfg_lowp.get("max_notional_per_token")
+                                if "cfg_lowp" in locals()
+                                else None
+                            )
+                            or cfg.get("max_notional_per_token")
+                            or 0.0
+                        )
+                        cap_shares_notional = (
+                            (max_notional_per_token / ref_price_for_cap)
+                            if max_notional_per_token > 0 and ref_price_for_cap
+                            else float("inf")
+                        )
                         cap_limit = min(cap_shares, cap_shares_notional)
                         existing_freeze = missing_freeze.get(token_id)
                         active_streak_freeze = (
