@@ -45,13 +45,14 @@ def accumulator_check(
         else:
             accumulator_usd = float(token_acc.get("usd", 0.0))
 
-    # CRITICAL: Use actual position value if provided, otherwise use accumulator
-    # This prevents blocking orders when accumulator is high due to historical cost
-    # but actual position value is low due to price drops
+    # CRITICAL: Use actual position value if provided, otherwise use accumulator.
+    # To prevent accumulator bypass when planned notional is temporarily missing,
+    # use the larger of (planned, accumulator) as the baseline.
+    # This still allows capacity to recover after sells/claims reduce holdings
+    # while avoiding repeated buys when positions fail to sync.
     if planned_token_notional is not None:
-        # Use planned notional as the "used" amount to reflect current exposure.
-        # This allows buy capacity to recover after sells/claims reduce holdings.
-        effective_current = planned_token_notional + local_delta
+        planned_current = float(planned_token_notional)
+        effective_current = max(planned_current, accumulator_usd) + local_delta
     else:
         # Fallback to accumulator only (legacy behavior)
         effective_current = accumulator_usd + local_delta
