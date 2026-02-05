@@ -1,0 +1,165 @@
+# copytrade_config.json 参数说明
+
+本文档解释 `copytrade_v3_muti/copytrade_config.json` 中每个参数的作用。
+
+## 多账户支持 (v3_muti 新增)
+
+copytrade_v3_muti 支持多账户同时跟单同一个目标地址。
+
+### accounts 数组配置
+
+- `accounts`: 账户列表数组，每个元素包含以下字段：
+  - `my_address`: 该跟单账户的地址
+  - `env_key_suffix`: 环境变量后缀，用于区分不同账户的私钥。例如设为 `"_2"` 时，程序会读取 `POLY_KEY_2` 和 `POLY_FUNDER_2` 环境变量
+  - `follow_ratio`: 该账户的跟单比例（可覆盖全局设置）
+  - `enabled`: 是否启用该账户（true/false）
+  - `max_notional_per_token`: 该账户的单token最大名义金额（可选）
+  - `max_notional_total`: 该账户的总最大名义金额（可选）
+
+### 环境变量配置
+
+对于多账户，需要为每个账户配置对应的环境变量：
+- 第一个账户（无后缀）: `POLY_KEY`, `POLY_FUNDER`
+- 第二个账户（后缀 `_2`）: `POLY_KEY_2`, `POLY_FUNDER_2`
+- 第三个账户（后缀 `_3`）: `POLY_KEY_3`, `POLY_FUNDER_3`
+- 以此类推...
+
+### 示例配置
+
+```json
+{
+  "target_address": "0x...",
+  "accounts": [
+    {
+      "my_address": "0xAAA...",
+      "env_key_suffix": "",
+      "follow_ratio": 0.05,
+      "enabled": true
+    },
+    {
+      "my_address": "0xBBB...",
+      "env_key_suffix": "_2",
+      "follow_ratio": 0.03,
+      "enabled": true
+    }
+  ]
+}
+```
+
+### 处理机制
+
+- 多账户采用轮询机制处理，每次迭代处理一个账户
+- 每个账户有独立的状态文件（state_{target}_{account}.json）
+- 每个账户的订单和仓位独立跟踪
+
+---
+
+## 账户与跟随比例（单账户模式）
+
+如果不配置 `accounts` 数组，程序会回退到单账户模式：
+
+- `target_address`: 被跟随的目标地址。
+- `my_address`: 跟随者自身地址（单账户模式时使用）。
+- `follow_ratio`: 全局跟随比例（按目标仓位/下单规模的比例进行跟随）。
+
+## 低价市场（Low P）保护
+
+- `lowp_guard_enabled`: 是否开启低价市场保护逻辑。
+- `lowp_price_threshold`: 低价阈值（价格低于该值视为低价市场）。
+- `lowp_follow_ratio_mult`: 低价市场时的跟随比例倍数（用于降低跟随规模）。
+
+- `lowp_min_order_usd`: 低价市场最小下单金额（USD）。
+- `lowp_max_order_usd`: 低价市场最大下单金额（USD）。
+- `lowp_probe_order_usd`: 低价市场探测单金额（USD）。
+- `lowp_max_notional_per_token`: 低价市场单个 token 最大名义金额（USD）。
+
+## 轮询与缓存
+
+- `poll_interval_sec`: 正常状态轮询间隔（秒）。
+- `poll_interval_sec_exiting`: 退出/减仓状态轮询间隔（秒）。
+- `config_reload_sec`: 配置文件热加载间隔（秒）。
+- `size_threshold`: 规模阈值，小于该值的变动可忽略。
+- `target_positions_refresh_sec`: 目标仓位刷新间隔（秒）。
+- `log_positions_cache_headers`: 是否记录目标仓位请求的缓存响应头。
+- `positions_cache_header_keys`: 需要记录的缓存响应头字段列表。
+- `target_cache_bust_mode`: 目标仓位请求的缓存绕过模式（如 `sec`）。
+- `my_positions_force_http`: 是否强制以 HTTP 获取自身仓位（默认使用 HTTPS）。
+
+## 仓位同步与死区
+
+- `deadband_shares`: 死区阈值（份额差异小于该值时不调整）。
+
+## 下单切片与规模控制
+
+- `slice_min`: 单次切片最小份额。
+- `slice_max`: 单次切片最大份额。
+- `order_size_mode`: 下单规模模式（如 `auto_usd`）。
+- `min_order_usd`: 最小下单金额（USD）。
+- `min_order_shares`: 最小下单份额。
+- `dust_exit_eps`: 视为尾仓/粉尘仓位的阈值。
+- `max_order_usd`: 单笔最大下单金额（USD）。
+- `max_position_usd_per_token`: 单个 token 最大持仓金额（USD）。
+- `boot_sync_mode`: 启动同步模式（如 `baseline_only`）。
+- `fresh_boot_on_start`: 启动时是否重新进行首次同步。
+- `ignore_boot_tokens`: 启动同步时是否忽略 token。
+- `ignore_boot_tokens_scope`: 忽略 token 的范围（如 `probe_only`）。
+- `probe_buy_on_first_seen`: 首次看到 token 是否下探测买单。
+- `probe_order_usd`: 探测单金额（USD）。
+- `follow_new_topics_only`: 是否只跟随新话题/新市场。
+- `adopt_existing_orders_on_boot`: 启动时是否接管已有挂单。
+
+## 价格与撮合
+
+- `tick_size`: 价格最小变动单位。
+- `min_price`: 价格下限（低于该值将自动抬至该值）。
+
+- `maker_only`: 是否仅挂 maker 单。
+- `reprice_ticks`: 改价偏移的 tick 数。
+- `reprice_cooldown_sec`: 改价冷却时间（秒）。
+- `enable_reprice`: 是否启用自动改价。
+- `exit_full_sell`: 退出时是否全量卖出。
+- `exit_ignore_cooldown`: 退出时是否忽略冷却时间。
+
+## 风控与容错
+
+- `cooldown_sec_per_token`: 每个 token 的冷却时间（秒）。
+- `buy_window_sec`: 快速买入统计窗口（秒），为 0 则关闭。
+- `buy_window_max_usd_per_token`: 窗口内单个 token 的买入上限（USD）。
+- `buy_window_max_usd_total`: 窗口内总体买入上限（USD）。
+- `orderbook_empty_close_streak`: 盘口为空连续次数达到该值时，将 token 视为已结束并跳过。
+- `missing_timeout_sec`: 目标仓位缺失超时时间（秒）。
+- `missing_to_zero_rounds`: 目标仓位缺失达到次数后是否视为零仓位。
+- `sell_confirm_max`: 在没有 SELL 动作时，卖出确认的最大次数。
+- `sell_confirm_window_sec`: 卖出确认计数窗口（秒）。
+- `sell_confirm_force_ratio`: 卖出确认达到上限后，若目标仓位降幅超过该比例，则强制触发卖出。
+- `sell_confirm_force_shares`: 卖出确认达到上限后，若目标仓位降幅超过该绝对份额，则强制触发卖出。
+- `debug_token_ids`: 调试用 token id 列表。
+- `log_dir`: 日志目录。
+- `log_level`: 日志级别（如 `INFO`）。
+- `skip_closed_markets`: 是否跳过已关闭市场。
+- `block_on_unknown_market_state`: 是否在未知市场状态时阻塞操作。
+
+## 额度上限
+
+- `max_notional_per_token`: 单个 token 最大名义金额（USD）。
+- `max_notional_total`: 总名义金额上限（USD）。
+
+## 下单失败重试与去重
+
+- `allow_partial`: 是否允许部分成交。
+- `taker_enabled`: 是否启用 taker（吃单）逻辑。
+- `taker_spread_threshold`: 触发 taker 的价差阈值。
+- `taker_order_type`: taker 下单类型（如 `FAK`）。
+- `dedupe_place`: 是否对重复下单请求进行去重。
+- `dedupe_place_price_eps`: 价格去重容差。
+- `dedupe_place_size_rel_eps`: 份额去重的相对容差。
+- `order_visibility_grace_sec`: 订单可见的宽限时间（秒），用于等待挂单出现在订单列表。
+- `retry_on_insufficient_balance`: 余额不足时是否重试。
+- `retry_shrink_factor`: 重试时缩小下单规模的系数。
+- `place_fail_backoff_base_sec`: 下单失败退避基准时间（秒）。
+- `place_fail_backoff_cap_sec`: 下单失败退避上限时间（秒）。
+- `place_fail_backoff_sec`: 下单失败固定退避时间（秒）。
+
+## 黑名单
+
+- `blacklist_token_keys`: 黑名单列表，支持精确匹配 `token_key`，也支持按标题关键词匹配（不区分大小写）。
