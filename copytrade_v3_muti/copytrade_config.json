@@ -86,8 +86,5 @@
   "place_fail_backoff_cap_sec": 60,
   "place_fail_backoff_sec": 300,
 
-  "blacklist_token_keys": ["Bitcoin"],
-
-  "parallel_processing": true,
-  "max_parallel_workers": 5
+  "blacklist_token_keys": ["Bitcoin"]
 }
