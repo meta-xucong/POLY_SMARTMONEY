@@ -1,0 +1,25 @@
+{
+  "_comment": "账户配置文件 - 存放交易账户的地址和私钥",
+  "_warning": "请妥善保管此文件，私钥泄露会导致资产损失！",
+
+  "accounts": [
+    {
+      "name": "Account_1",
+      "my_address": "0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f",
+      "private_key": "YOUR_PRIVATE_KEY_HERE",
+      "follow_ratio": 0.05,
+      "enabled": true,
+      "max_notional_per_token": 6,
+      "max_notional_total": 40
+    },
+    {
+      "name": "Account_2",
+      "my_address": "0x...",
+      "private_key": "YOUR_PRIVATE_KEY_2_HERE",
+      "follow_ratio": 0.03,
+      "enabled": false,
+      "max_notional_per_token": 5,
+      "max_notional_total": 30
+    }
+  ]
+}

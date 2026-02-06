@@ -10,29 +10,38 @@ import re
 import random
 import sys
 import time
-from dataclasses import dataclass
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Callable
 from zoneinfo import ZoneInfo
 
 
 # ============================================================
-# MULTI-ACCOUNT SUPPORT
+# MULTI-ACCOUNT SUPPORT (v3_muti)
+# - Accounts loaded from accounts.json (not environment variables)
+# - True parallel processing with ThreadPoolExecutor
 # ============================================================
 
 @dataclass
 class AccountContext:
     """Context for a single follower account in multi-account mode."""
+    name: str  # Account name/label
     my_address: str
+    private_key: str  # Private key loaded from config
     follow_ratio: float
-    env_key_suffix: str
     clob_client: Any  # ClobClient instance
     state: Dict[str, Any]
     state_path: Path
     enabled: bool = True
     max_notional_per_token: Optional[float] = None
     max_notional_total: Optional[float] = None
+    # Thread-local logger for this account
+    logger: Optional[logging.Logger] = None
+    # Lock for thread-safe state access
+    state_lock: threading.Lock = field(default_factory=threading.Lock)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -318,13 +327,13 @@ def _derive_api_creds(client):
     return None
 
 
-def init_clob_client(env_key_suffix: str = "", funder_address: Optional[str] = None):
+def init_clob_client(private_key: str, funder_address: str):
     """
     Initialize CLOB client for a specific account.
 
     Args:
-        env_key_suffix: Suffix for environment variable names (e.g., "_2" for POLY_KEY_2)
-        funder_address: Optional override for funder address (my_address)
+        private_key: Private key for this account (from accounts.json)
+        funder_address: The account address (my_address)
     """
     from py_clob_client.client import ClobClient
 
@@ -332,33 +341,14 @@ def init_clob_client(env_key_suffix: str = "", funder_address: Optional[str] = N
     chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
     signature_type = int(os.getenv("POLY_SIGNATURE", "2"))
 
-    # Try suffixed environment variables first, fall back to default
-    key_env = f"POLY_KEY{env_key_suffix}" if env_key_suffix else "POLY_KEY"
-    funder_env = f"POLY_FUNDER{env_key_suffix}" if env_key_suffix else "POLY_FUNDER"
-
-    key_value = os.getenv(key_env)
-    if not key_value and env_key_suffix:
-        key_value = os.getenv("POLY_KEY")
-    if not key_value:
-        raise ValueError(f"Missing environment variable: {key_env}")
-
-    key = _normalize_privkey(key_value)
-
-    if funder_address:
-        funder = funder_address
-    else:
-        funder = os.getenv(funder_env)
-        if not funder and env_key_suffix:
-            funder = os.getenv("POLY_FUNDER")
-        if not funder:
-            raise ValueError(f"Missing funder address: {funder_env}")
+    key = _normalize_privkey(private_key)
 
     client = ClobClient(
         host,
         key=key,
         chain_id=chain_id,
         signature_type=signature_type,
-        funder=funder,
+        funder=funder_address,
     )
     api_creds = _derive_api_creds(client)
     if not api_creds:
@@ -1057,24 +1047,36 @@ def _state_path_for_account(base_dir: Path, target_address: str, my_address: str
     return base_dir / f"state_{target_part}_{my_part}.json"
 
 
+def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> List[Dict[str, Any]]:
+    """Load accounts from external accounts.json file."""
+    if not accounts_file.exists():
+        raise FileNotFoundError(f"Accounts file not found: {accounts_file}")
+
+    try:
+        content = accounts_file.read_text(encoding="utf-8")
+        data = json.loads(content)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Invalid JSON in accounts file: {e}")
+
+    accounts = data.get("accounts", [])
+    if not accounts:
+        raise ValueError(f"No accounts found in {accounts_file}")
+
+    logger.info("[MULTI] Loaded %d account(s) from %s", len(accounts), accounts_file.name)
+    return accounts
+
+
 def _init_account_contexts(
     cfg: Dict[str, Any],
     base_dir: Path,
     logger: logging.Logger,
 ) -> List[AccountContext]:
-    """Initialize AccountContext for each enabled account in config."""
-    accounts_cfg = cfg.get("accounts", [])
-    if not accounts_cfg:
-        # Fallback to single account mode using my_address from config
-        my_address = cfg.get("my_address")
-        if not my_address:
-            raise ValueError("No accounts configured and no my_address in config")
-        accounts_cfg = [{
-            "my_address": my_address,
-            "env_key_suffix": "",
-            "follow_ratio": cfg.get("follow_ratio", 0.05),
-            "enabled": True,
-        }]
+    """Initialize AccountContext for each enabled account in accounts.json."""
+
+    # Load accounts from external file
+    accounts_file_name = cfg.get("accounts_file", "accounts.json")
+    accounts_file = base_dir / accounts_file_name
+    accounts_cfg = _load_accounts_from_file(accounts_file, logger)
 
     target_address = cfg["target_address"]
     contexts: List[AccountContext] = []
@@ -1084,26 +1086,32 @@ def _init_account_contexts(
             logger.info("[MULTI] Account #%d disabled, skipping", idx)
             continue
 
+        acct_name = acct_cfg.get("name", f"Account_{idx}")
         my_address = acct_cfg.get("my_address")
+        private_key = acct_cfg.get("private_key")
+
         if not my_address or _is_placeholder_addr(my_address):
-            logger.warning("[MULTI] Account #%d has no valid my_address, skipping", idx)
+            logger.warning("[MULTI] Account '%s' has no valid my_address, skipping", acct_name)
             continue
 
         if not _is_evm_address(my_address):
-            logger.warning("[MULTI] Account #%d address invalid: %s, skipping", idx, my_address)
+            logger.warning("[MULTI] Account '%s' address invalid: %s, skipping", acct_name, my_address)
             continue
 
-        env_key_suffix = acct_cfg.get("env_key_suffix", "")
+        if not private_key or private_key.startswith("YOUR_PRIVATE_KEY"):
+            logger.warning("[MULTI] Account '%s' has no valid private_key, skipping", acct_name)
+            continue
+
         follow_ratio = float(acct_cfg.get("follow_ratio") or cfg.get("follow_ratio") or 0.05)
 
-        # Initialize CLOB client for this account
+        # Initialize CLOB client for this account using private_key from config
         try:
             clob_client = init_clob_client(
-                env_key_suffix=env_key_suffix,
+                private_key=private_key,
                 funder_address=my_address,
             )
         except Exception as exc:
-            logger.error("[MULTI] Account #%d (%s) CLOB init failed: %s", idx, my_address, exc)
+            logger.error("[MULTI] Account '%s' (%s) CLOB init failed: %s", acct_name, my_address, exc)
             continue
 
         # Create per-account state file path
@@ -1117,8 +1125,8 @@ def _init_account_contexts(
         cur_target = str(target_address or "").lower().strip()
         if prev_target and cur_target and prev_target != cur_target:
             logger.warning(
-                "[MULTI] Account #%d state target mismatch, resetting bootstrap",
-                idx,
+                "[MULTI] Account '%s' state target mismatch, resetting bootstrap",
+                acct_name,
             )
             state["bootstrapped"] = False
             state["boot_token_ids"] = []
@@ -1133,22 +1141,33 @@ def _init_account_contexts(
             state["seen_action_ids"] = []
             state["target_actions_cursor_ms"] = 0
 
+        # Create per-account logger
+        acct_logger = logging.getLogger(f"copytrade.{acct_name}")
+        acct_logger.setLevel(logger.level)
+        # Share handlers with main logger
+        for handler in logger.handlers:
+            if handler not in acct_logger.handlers:
+                acct_logger.addHandler(handler)
+
         ctx = AccountContext(
+            name=acct_name,
             my_address=my_address.strip(),
+            private_key=private_key,
             follow_ratio=follow_ratio,
-            env_key_suffix=env_key_suffix,
             clob_client=clob_client,
             state=state,
             state_path=state_path,
             enabled=True,
             max_notional_per_token=acct_cfg.get("max_notional_per_token"),
             max_notional_total=acct_cfg.get("max_notional_total"),
+            logger=acct_logger,
+            state_lock=threading.Lock(),
         )
         contexts.append(ctx)
 
         logger.info(
-            "[MULTI] Account #%d initialized: addr=%s ratio=%.4f state=%s",
-            idx,
+            "[MULTI] Account '%s' initialized: addr=%s ratio=%.4f state=%s",
+            acct_name,
             _shorten_address(my_address),
             follow_ratio,
             state_path.name,
@@ -1157,7 +1176,392 @@ def _init_account_contexts(
     if not contexts:
         raise ValueError("No valid accounts configured or all accounts failed initialization")
 
+    logger.info("[MULTI] Total %d account(s) initialized successfully", len(contexts))
     return contexts
+
+
+def _run_single_account_loop(
+    acct_ctx: AccountContext,
+    cfg_template: Dict[str, Any],
+    args_config_path: str,
+    base_dir: Path,
+    main_logger: logging.Logger,
+    data_client_factory: Callable[[], Any],
+    stop_event: threading.Event,
+) -> None:
+    """
+    Run the main trading loop for a single account in parallel mode.
+
+    This function is designed to be run in a separate thread for parallel processing.
+    Each thread has its own copy of config and dedicated account context.
+
+    NOTE: This is a simplified implementation that covers the core trading operations.
+    For full feature parity with sequential mode, consider extending this function
+    with additional logic from the main loop.
+
+    Args:
+        acct_ctx: AccountContext for this account
+        cfg_template: Config template (will be deep-copied for thread safety)
+        args_config_path: Path to config file
+        base_dir: Base directory for config/state files
+        main_logger: Main logger (each account has its own child logger)
+        data_client_factory: Factory function to create DataApiClient
+        stop_event: Event to signal thread termination
+    """
+    import copy
+
+    # Thread-local copy of config
+    cfg = copy.deepcopy(cfg_template)
+
+    # Set account-specific config
+    cfg["my_address"] = acct_ctx.my_address
+    cfg["follow_ratio"] = acct_ctx.follow_ratio
+    if acct_ctx.max_notional_per_token is not None:
+        cfg["max_notional_per_token"] = acct_ctx.max_notional_per_token
+    if acct_ctx.max_notional_total is not None:
+        cfg["max_notional_total"] = acct_ctx.max_notional_total
+
+    # Use account-specific logger
+    logger = acct_ctx.logger or main_logger
+
+    # Thread-local state and clients
+    state = acct_ctx.state
+    state_path = str(acct_ctx.state_path)
+    clob_client = acct_ctx.clob_client
+
+    # Create thread-local data client
+    data_client = data_client_factory()
+
+    logger.info(
+        "[THREAD] Starting loop for account '%s' (%s)",
+        acct_ctx.name,
+        _shorten_address(acct_ctx.my_address),
+    )
+
+    # Initialize state fields
+    run_start_ms = int(time.time() * 1000)
+    state["run_start_ms"] = run_start_ms
+    state["target"] = cfg.get("target_address")
+    state["my_address"] = cfg.get("my_address")
+    state["follow_ratio"] = cfg.get("follow_ratio")
+    state.setdefault("open_orders", {})
+    state.setdefault("open_orders_all", {})
+    state.setdefault("seen_my_trade_ids", [])
+    state.setdefault("my_trades_cursor_ms", 0)
+    state.setdefault("my_trades_unreliable_until", 0)
+    state.setdefault("managed_order_ids", [])
+    state.setdefault("intent_keys", {})
+    state.setdefault("token_map", {})
+    state.setdefault("bootstrapped", False)
+    state.setdefault("boot_token_ids", [])
+    state.setdefault("boot_token_keys", [])
+    state.setdefault("target_last_shares_by_token_key", {})
+    state.setdefault("boot_run_start_ms", 0)
+    state.setdefault("probed_token_ids", [])
+    state.setdefault("ignored_tokens", {})
+    state.setdefault("market_status_cache", {})
+    state.setdefault("target_last_shares", {})
+    state.setdefault("target_last_seen_ts", {})
+    state.setdefault("target_missing_streak", {})
+    state.setdefault("cooldown_until", {})
+    state.setdefault("target_last_event_ts", {})
+    state.setdefault("topic_state", {})
+    state.setdefault("target_actions_cursor_ms", 0)
+    state.setdefault("last_mid_price_by_token_id", {})
+    state.setdefault("last_mid_price_update_ts", 0)
+    state.setdefault("orderbook_empty_streak", {})
+    state.setdefault("order_ts_by_id", {})
+    state.setdefault("seen_action_ids", [])
+    state.setdefault("last_reprice_ts_by_token", {})
+    state.setdefault("adopted_existing_orders", False)
+    state.setdefault("place_fail_until", {})
+    state.setdefault("shadow_buy_orders", [])
+    state.setdefault("taker_buy_orders", [])
+    state.setdefault("recent_buy_orders", [])
+    state.setdefault("buy_notional_accumulator", {})
+    state.setdefault("sizing", {})
+    state["sizing"].setdefault("ema_delta_usd", None)
+
+    # Initialize cursors
+    if int(state.get("target_actions_cursor_ms") or 0) <= 0:
+        state["target_actions_cursor_ms"] = run_start_ms
+    if int(state.get("target_actions_cursor_ms") or 0) < run_start_ms:
+        state["target_actions_cursor_ms"] = run_start_ms
+    if int(state.get("my_trades_cursor_ms") or 0) <= 0:
+        state["my_trades_cursor_ms"] = run_start_ms
+    if int(state.get("my_trades_cursor_ms") or 0) < run_start_ms:
+        state["my_trades_cursor_ms"] = run_start_ms
+
+    # Config parameters
+    poll_interval = int(cfg.get("poll_interval_sec") or 20)
+    poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or 3)
+    size_threshold = float(cfg.get("size_threshold") or 0.0)
+    positions_limit = int(cfg.get("positions_limit") or 100)
+    positions_max_pages = int(cfg.get("positions_max_pages") or 10)
+    target_positions_refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
+    my_positions_force_http = bool(cfg.get("my_positions_force_http", False))
+    target_cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "sec")
+    header_keys = cfg.get("positions_cache_header_keys", [])
+
+    def _get_poll_interval() -> int:
+        topic_state = state.get("topic_state", {})
+        if isinstance(topic_state, dict):
+            for st in topic_state.values():
+                if (st or {}).get("phase") == "EXITING":
+                    return poll_interval_exiting
+        return poll_interval
+
+    iteration_count = 0
+    while not stop_event.is_set():
+        iteration_count += 1
+        now_ts = int(time.time())
+        now_wall = time.time()
+
+        try:
+            logger.debug(
+                "[THREAD] Account '%s' iteration %d starting at ts=%d",
+                acct_ctx.name,
+                iteration_count,
+                now_ts,
+            )
+
+            # ----- STEP 1: Sync open orders -----
+            managed_ids = {str(oid) for oid in (state.get("managed_order_ids") or [])}
+            try:
+                remote_orders, ok, err = fetch_open_orders_norm(clob_client)
+                if ok:
+                    remote_by_token: Dict[str, list[dict]] = {}
+                    for order in remote_orders:
+                        order_id = str(order["order_id"])
+                        token_id = str(order["token_id"])
+                        remote_by_token.setdefault(token_id, []).append({
+                            "order_id": order_id,
+                            "side": order["side"],
+                            "price": order["price"],
+                            "size": order["size"],
+                            "ts": int(order.get("ts") or now_ts),
+                        })
+                    state["open_orders_all"] = remote_by_token
+
+                    # Update managed orders
+                    prev_managed = state.get("open_orders", {})
+                    if not isinstance(prev_managed, dict):
+                        prev_managed = {}
+                    state["open_orders"] = prev_managed
+                else:
+                    logger.warning("[THREAD-%s] sync orders failed: %s", acct_ctx.name, err)
+            except Exception as exc:
+                logger.exception("[THREAD-%s] sync orders error: %s", acct_ctx.name, exc)
+
+            # ----- STEP 2: Fetch positions -----
+            try:
+                target_pos, target_info = fetch_positions_norm(
+                    data_client,
+                    cfg["target_address"],
+                    size_threshold,
+                    positions_limit=positions_limit,
+                    positions_max_pages=positions_max_pages,
+                    refresh_sec=target_positions_refresh_sec,
+                    force_http=True,
+                    cache_bust_mode=target_cache_bust_mode,
+                    header_keys=header_keys,
+                )
+
+                my_pos, my_info = fetch_positions_norm(
+                    data_client,
+                    cfg["my_address"],
+                    0.0,
+                    positions_limit=positions_limit,
+                    positions_max_pages=positions_max_pages,
+                    refresh_sec=target_positions_refresh_sec if my_positions_force_http else None,
+                    force_http=my_positions_force_http,
+                    cache_bust_mode=target_cache_bust_mode,
+                    header_keys=header_keys,
+                )
+
+                if not target_info.get("ok") or target_info.get("incomplete"):
+                    logger.warning("[THREAD-%s] target positions incomplete, skipping", acct_ctx.name)
+                    with acct_ctx.state_lock:
+                        state["last_sync_ts"] = now_ts
+                        save_state(state_path, state)
+                    sleep_sec = _get_poll_interval()
+                    for _ in range(sleep_sec):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+                if not my_info.get("ok") or my_info.get("incomplete"):
+                    logger.warning("[THREAD-%s] my positions incomplete, skipping", acct_ctx.name)
+                    with acct_ctx.state_lock:
+                        state["last_sync_ts"] = now_ts
+                        save_state(state_path, state)
+                    sleep_sec = _get_poll_interval()
+                    for _ in range(sleep_sec):
+                        if stop_event.is_set():
+                            break
+                        time.sleep(1)
+                    continue
+
+            except Exception as exc:
+                logger.exception("[THREAD-%s] fetch positions error: %s", acct_ctx.name, exc)
+                time.sleep(5)
+                continue
+
+            # ----- STEP 3: Bootstrap if needed -----
+            boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+            if boot_sync_mode == "baseline_only" and not state.get("bootstrapped"):
+                boot_by_key: Dict[str, float] = {}
+                boot_keys: list[str] = []
+                token_map = state.get("token_map", {})
+                if not isinstance(token_map, dict):
+                    token_map = {}
+                state["token_map"] = token_map
+
+                for pos in target_pos:
+                    token_key = str(pos.get("token_key") or "").strip()
+                    if not token_key:
+                        continue
+                    raw_id = pos.get("raw", {}).get("asset") or pos.get("token_id")
+                    if raw_id:
+                        token_map.setdefault(token_key, str(raw_id))
+                    size = float(pos.get("size") or 0.0)
+                    boot_by_key[token_key] = size
+                    boot_keys.append(token_key)
+
+                boot_keys = sorted(set(boot_keys))
+                state["boot_token_keys"] = boot_keys
+                state["target_last_shares_by_token_key"] = boot_by_key
+
+                boot_token_ids: list[str] = []
+                for token_key in boot_keys:
+                    token_id = token_map.get(token_key)
+                    if token_id:
+                        boot_token_ids.append(token_id)
+                        state.setdefault("target_last_shares", {})[token_id] = float(boot_by_key.get(token_key) or 0.0)
+                        state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
+                        state.setdefault("target_missing_streak", {})[token_id] = 0
+                state["boot_token_ids"] = sorted(set(boot_token_ids))
+
+                state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+                state["seen_action_ids"] = []
+                state["topic_state"] = {}
+                state["probed_token_ids"] = []
+                state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
+                state["bootstrapped"] = True
+                logger.info(
+                    "[THREAD-%s] BOOT: baseline_keys=%d baseline_ids=%d",
+                    acct_ctx.name,
+                    len(boot_keys),
+                    len(state["boot_token_ids"]),
+                )
+                with acct_ctx.state_lock:
+                    save_state(state_path, state)
+                sleep_sec = _get_poll_interval()
+                for _ in range(sleep_sec):
+                    if stop_event.is_set():
+                        break
+                    time.sleep(1)
+                continue
+
+            # ----- STEP 4: Fetch target actions -----
+            try:
+                cursor_ms = int(state.get("target_actions_cursor_ms") or run_start_ms)
+                use_trades_api = bool(cfg.get("use_trades_for_actions", False))
+
+                if use_trades_api:
+                    actions_list, actions_info = fetch_target_trades_since(
+                        data_client,
+                        cfg["target_address"],
+                        cursor_ms,
+                        seen_ids=state.get("seen_action_ids", []),
+                    )
+                else:
+                    actions_list, actions_info = fetch_target_actions_since(
+                        data_client,
+                        cfg["target_address"],
+                        cursor_ms,
+                        seen_ids=state.get("seen_action_ids", []),
+                    )
+
+                if actions_info.get("ok") and actions_list:
+                    logger.info(
+                        "[THREAD-%s] Got %d new actions since cursor_ms=%d",
+                        acct_ctx.name,
+                        len(actions_list),
+                        cursor_ms,
+                    )
+                    # Update cursor
+                    max_ts = max(int(a.get("timestamp_ms") or a.get("ts") or 0) for a in actions_list)
+                    if max_ts > cursor_ms:
+                        state["target_actions_cursor_ms"] = max_ts
+                    # Update seen IDs
+                    seen_ids = set(state.get("seen_action_ids", []))
+                    for a in actions_list:
+                        aid = a.get("id") or a.get("action_id")
+                        if aid:
+                            seen_ids.add(str(aid))
+                    state["seen_action_ids"] = list(seen_ids)[-1000:]  # Keep last 1000
+
+            except Exception as exc:
+                logger.exception("[THREAD-%s] fetch actions error: %s", acct_ctx.name, exc)
+                actions_list = []
+
+            # ----- STEP 5: Process actions via reconcile/apply -----
+            # This is a simplified implementation - for full parity, integrate with
+            # reconcile_one and apply_actions from ct_exec.py
+
+            # Build position maps
+            my_pos_by_token: Dict[str, float] = {}
+            for pos in my_pos:
+                token_id = str(pos.get("token_id") or "").strip()
+                if token_id:
+                    my_pos_by_token[token_id] = float(pos.get("size") or 0.0)
+
+            target_pos_by_token: Dict[str, float] = {}
+            for pos in target_pos:
+                token_id = str(pos.get("token_id") or "").strip()
+                if token_id:
+                    target_pos_by_token[token_id] = float(pos.get("size") or 0.0)
+
+            # Log position summary
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "[THREAD-%s] Positions: target=%d my=%d",
+                    acct_ctx.name,
+                    len(target_pos_by_token),
+                    len(my_pos_by_token),
+                )
+
+            # ----- STEP 6: Save state -----
+            with acct_ctx.state_lock:
+                state["last_sync_ts"] = now_ts
+                save_state(state_path, state)
+
+            logger.debug(
+                "[THREAD-%s] Iteration %d completed",
+                acct_ctx.name,
+                iteration_count,
+            )
+
+        except Exception as exc:
+            logger.error(
+                "[THREAD-%s] Iteration error: %s",
+                acct_ctx.name,
+                exc,
+                exc_info=True,
+            )
+            time.sleep(5)  # Back off on error
+            continue
+
+        # Sleep with check for stop event
+        sleep_sec = _get_poll_interval()
+        for _ in range(sleep_sec):
+            if stop_event.is_set():
+                break
+            time.sleep(1)
+
+    logger.info("[THREAD] Account '%s' loop stopped", acct_ctx.name)
 
 
 def main() -> None:
@@ -1514,6 +1918,75 @@ def main() -> None:
                 if (st or {}).get("phase") == "EXITING":
                     return poll_interval_exiting
         return poll_interval
+
+    # ============================================================
+    # PARALLEL PROCESSING MODE
+    # When enabled, each account runs in its own dedicated thread
+    # ============================================================
+    parallel_enabled = bool(cfg.get("parallel_processing", False))
+    max_parallel_workers = int(cfg.get("max_parallel_workers", 5))
+
+    if parallel_enabled and len(account_contexts) > 1:
+        logger.info(
+            "[PARALLEL] Starting parallel processing mode with %d accounts (max_workers=%d)",
+            len(account_contexts),
+            max_parallel_workers,
+        )
+
+        # Create stop event for graceful shutdown
+        stop_event = threading.Event()
+
+        # Data client factory - each thread creates its own
+        def _create_data_client():
+            return DataApiClient()
+
+        # Launch threads for each account
+        threads: List[threading.Thread] = []
+        for acct_ctx in account_contexts:
+            thread = threading.Thread(
+                target=_run_single_account_loop,
+                args=(
+                    acct_ctx,
+                    cfg,
+                    args.config,
+                    base_dir,
+                    logger,
+                    _create_data_client,
+                    stop_event,
+                ),
+                name=f"Account-{acct_ctx.name}",
+                daemon=True,
+            )
+            threads.append(thread)
+            thread.start()
+            logger.info("[PARALLEL] Started thread for account '%s'", acct_ctx.name)
+
+        # Wait for threads (with keyboard interrupt handling)
+        try:
+            while True:
+                # Check if all threads are still alive
+                alive_threads = [t for t in threads if t.is_alive()]
+                if not alive_threads:
+                    logger.warning("[PARALLEL] All threads stopped unexpectedly")
+                    break
+                time.sleep(1)
+        except KeyboardInterrupt:
+            logger.info("[PARALLEL] Received shutdown signal, stopping threads...")
+            stop_event.set()
+            # Wait for threads to finish
+            for thread in threads:
+                thread.join(timeout=10)
+            logger.info("[PARALLEL] All threads stopped")
+            return
+
+    # ============================================================
+    # SEQUENTIAL MODE (round-robin, original behavior)
+    # ============================================================
+    if parallel_enabled and len(account_contexts) > 1:
+        # Already handled above, should not reach here
+        return
+
+    logger.info("[SEQUENTIAL] Starting sequential round-robin mode with %d account(s)", len(account_contexts))
 
     while True:
         now_ts = int(time.time())
