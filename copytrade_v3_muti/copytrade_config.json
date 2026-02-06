@@ -1,14 +1,7 @@
 {
   "target_address": "0xf5d4c1341267162afc3749908631087db95aa077",
 
-  "accounts": [
-    {
-      "my_address": "0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f",
-      "env_key_suffix": "",
-      "follow_ratio": 0.05,
-      "enabled": true
-    }
-  ],
+  "accounts_file": "accounts.json",
 
   "follow_ratio": 0.05,
   "lowp_guard_enabled": true,
@@ -93,5 +86,8 @@
   "place_fail_backoff_cap_sec": 60,
   "place_fail_backoff_sec": 300,
 
-  "blacklist_token_keys": ["Bitcoin"]
+  "blacklist_token_keys": ["Bitcoin"],
+
+  "parallel_processing": true,
+  "max_parallel_workers": 5
 }
