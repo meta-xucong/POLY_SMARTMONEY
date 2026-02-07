@@ -18,9 +18,11 @@ from zoneinfo import ZoneInfo
 
 
 # ============================================================
-# MULTI-ACCOUNT SUPPORT (v3_muti)
-# - Accounts loaded from accounts.json (not environment variables)
-# - Sequential round-robin processing for multiple accounts
+# MULTI-ACCOUNT & MULTI-TARGET SUPPORT (v3_muti)
+# - Follower accounts loaded from accounts.json
+# - Sequential round-robin processing for multiple follower accounts
+# - Support multiple target addresses (target_addresses array)
+# - When multiple targets hold same token, take MAXIMUM position change
 # ============================================================
 
 @dataclass
@@ -311,6 +313,219 @@ def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str
             f" 你可以在 copytrade_config.json 里填 {name}，或设置环境变量：{env_keys}"
         )
     return current.strip()
+
+
+def _resolve_target_addresses(cfg: Dict[str, Any], logger: logging.Logger) -> List[str]:
+    """
+    Resolve multiple target addresses from config.
+
+    Supports both:
+    - target_addresses: ["0x...", "0x..."] (new multi-target format)
+    - target_address: "0x..." (backward compatible single target)
+
+    Returns list of valid target addresses.
+    """
+    targets: List[str] = []
+
+    # Try target_addresses array first
+    target_list = cfg.get("target_addresses")
+    if isinstance(target_list, list) and target_list:
+        for addr in target_list:
+            addr_str = str(addr).strip()
+            if _is_evm_address(addr_str) and not _is_placeholder_addr(addr_str):
+                targets.append(addr_str)
+            else:
+                logger.warning("[MULTI-TARGET] Invalid target address skipped: %s", addr_str)
+
+    # Fall back to single target_address if no valid targets from array
+    if not targets:
+        single_target = cfg.get("target_address")
+        if single_target and _is_evm_address(single_target) and not _is_placeholder_addr(single_target):
+            targets.append(str(single_target).strip())
+
+    if not targets:
+        raise ValueError("No valid target addresses configured. Set target_addresses or target_address.")
+
+    return targets
+
+
+def _fetch_all_target_positions(
+    data_client: Any,
+    target_addresses: List[str],
+    size_threshold: float,
+    positions_limit: int,
+    positions_max_pages: int,
+    refresh_sec: int,
+    cache_bust_mode: str,
+    header_keys: List[str],
+    logger: logging.Logger,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, str]]:
+    """
+    Fetch positions from all target addresses and merge them.
+
+    Merge strategy: For each token, take the MAXIMUM position size across all targets.
+
+    Returns:
+        - merged_positions: List of merged position dicts
+        - merged_info: Combined info dict
+        - position_source: Dict mapping token_id to source target address
+    """
+    from ct_data import fetch_positions_norm
+
+    all_positions_by_token: Dict[str, Dict[str, Any]] = {}  # token_key -> best position
+    position_source: Dict[str, str] = {}  # token_id -> source target address
+    any_ok = False
+    any_incomplete = False
+
+    for target_addr in target_addresses:
+        try:
+            positions, info = fetch_positions_norm(
+                data_client,
+                target_addr,
+                size_threshold,
+                positions_limit=positions_limit,
+                positions_max_pages=positions_max_pages,
+                refresh_sec=refresh_sec,
+                force_http=True,
+                cache_bust_mode=cache_bust_mode,
+                header_keys=header_keys,
+            )
+
+            if info.get("ok"):
+                any_ok = True
+            if info.get("incomplete"):
+                any_incomplete = True
+
+            # Merge positions - take maximum for each token
+            for pos in positions:
+                token_key = str(pos.get("token_key") or "")
+                if not token_key:
+                    continue
+
+                size = float(pos.get("size") or 0.0)
+                token_id = pos.get("token_id") or pos.get("raw", {}).get("asset")
+
+                existing = all_positions_by_token.get(token_key)
+                if existing is None or size > float(existing.get("size") or 0.0):
+                    # This target has larger position, use it
+                    pos_copy = dict(pos)
+                    pos_copy["_source_target"] = target_addr  # Track source
+                    all_positions_by_token[token_key] = pos_copy
+                    if token_id:
+                        position_source[str(token_id)] = target_addr
+
+            logger.debug(
+                "[MULTI-TARGET] Fetched %d positions from target=%s",
+                len(positions),
+                _shorten_address(target_addr),
+            )
+
+        except Exception as exc:
+            logger.warning(
+                "[MULTI-TARGET] Failed to fetch positions from target=%s: %s",
+                _shorten_address(target_addr),
+                exc,
+            )
+
+    merged_positions = list(all_positions_by_token.values())
+    merged_info = {
+        "ok": any_ok,
+        "incomplete": any_incomplete,
+        "target_count": len(target_addresses),
+        "merged_token_count": len(merged_positions),
+    }
+
+    if len(target_addresses) > 1:
+        logger.info(
+            "[MULTI-TARGET] Merged positions from %d targets: %d unique tokens",
+            len(target_addresses),
+            len(merged_positions),
+        )
+
+    return merged_positions, merged_info, position_source
+
+
+def _fetch_all_target_actions(
+    data_client: Any,
+    target_addresses: List[str],
+    cursor_ms: int,
+    use_trades_api: bool,
+    page_size: int,
+    max_offset: int,
+    taker_only: bool,
+    logger: logging.Logger,
+) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    """
+    Fetch actions/trades from all target addresses and merge them.
+
+    Actions are aggregated - all buy/sell actions from all targets are combined.
+
+    Returns:
+        - merged_actions: Combined list of actions from all targets
+        - merged_info: Combined info dict
+    """
+    from ct_data import fetch_target_actions_since, fetch_target_trades_since
+
+    all_actions: List[Dict[str, Any]] = []
+    any_ok = False
+    any_incomplete = False
+
+    for target_addr in target_addresses:
+        try:
+            if use_trades_api:
+                actions, info = fetch_target_trades_since(
+                    data_client,
+                    target_addr,
+                    cursor_ms,
+                    page_size=page_size,
+                    max_offset=max_offset,
+                    taker_only=taker_only,
+                )
+            else:
+                actions, info = fetch_target_actions_since(
+                    data_client,
+                    target_addr,
+                    cursor_ms,
+                    page_size=page_size,
+                    max_offset=max_offset,
+                )
+
+            if info.get("ok"):
+                any_ok = True
+            if info.get("incomplete"):
+                any_incomplete = True
+
+            # Add source target to each action
+            for action in actions:
+                action_copy = dict(action)
+                action_copy["_source_target"] = target_addr
+                all_actions.append(action_copy)
+
+            if actions:
+                logger.debug(
+                    "[MULTI-TARGET] Fetched %d actions from target=%s",
+                    len(actions),
+                    _shorten_address(target_addr),
+                )
+
+        except Exception as exc:
+            logger.warning(
+                "[MULTI-TARGET] Failed to fetch actions from target=%s: %s",
+                _shorten_address(target_addr),
+                exc,
+            )
+
+    # Sort by timestamp
+    all_actions.sort(key=lambda a: int(a.get("timestamp_ms") or a.get("ts") or 0))
+
+    merged_info = {
+        "ok": any_ok,
+        "incomplete": any_incomplete,
+        "target_count": len(target_addresses),
+        "total_actions": len(all_actions),
+    }
+
+    return all_actions, merged_info
 
 
 def _derive_api_creds(client):
@@ -1197,15 +1412,25 @@ def main() -> None:
     logger = _setup_logging(cfg, cfg["target_address"], base_dir)
 
     # ============================================================
+    # MULTI-TARGET INITIALIZATION
+    # ============================================================
+    target_addresses = _resolve_target_addresses(cfg, logger)
+    logger.info(
+        "[MULTI-TARGET] Resolved %d target address(es): %s",
+        len(target_addresses),
+        ", ".join(_shorten_address(a) for a in target_addresses),
+    )
+
+    # ============================================================
     # MULTI-ACCOUNT INITIALIZATION
     # ============================================================
     account_contexts = _init_account_contexts(cfg, base_dir, logger)
     current_account_idx = 0  # Used for round-robin account selection
 
     logger.info(
-        "[MULTI] Initialized %d account(s) for target=%s",
+        "[MULTI] Initialized %d follower account(s) for %d target(s)",
         len(account_contexts),
-        _shorten_address(cfg["target_address"]),
+        len(target_addresses),
     )
 
     # For backward compatibility, use first account's settings as default
@@ -1242,12 +1467,13 @@ def main() -> None:
     state.setdefault("sizing", {})
     state["sizing"].setdefault("ema_delta_usd", None)
     logger.info(
-        "[CFG] target=%s my=%s ratio=%s",
-        cfg["target_address"],
+        "[CFG] targets=%s my=%s ratio=%s",
+        [_shorten_address(a) for a in target_addresses],
         cfg["my_address"],
         cfg.get("follow_ratio"),
     )
-    state["target"] = cfg.get("target_address")
+    state["target"] = cfg.get("target_address")  # Keep primary target for backward compatibility
+    state["target_addresses"] = target_addresses  # Store all targets
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
@@ -1766,25 +1992,20 @@ def main() -> None:
             actions_list = []
             actions_info: Dict[str, object] = {}
             retry_sleep_sec = 1.0
+            use_trades_api = actions_source in ("trade", "trades")
             for attempt in range(2):
                 try:
-                    if actions_source in ("trade", "trades"):
-                        actions_list, actions_info = fetch_target_trades_since(
-                            data_client,
-                            cfg["target_address"],
-                            actions_cursor_ms,
-                            page_size=actions_page_size,
-                            max_offset=actions_max_offset,
-                            taker_only=bool(cfg.get("actions_taker_only", False)),
-                        )
-                    else:
-                        actions_list, actions_info = fetch_target_actions_since(
-                            data_client,
-                            cfg["target_address"],
-                            actions_cursor_ms,
-                            page_size=actions_page_size,
-                            max_offset=actions_max_offset,
-                        )
+                    # MULTI-TARGET: Fetch actions from all target addresses
+                    actions_list, actions_info = _fetch_all_target_actions(
+                        data_client,
+                        target_addresses,
+                        actions_cursor_ms,
+                        use_trades_api=use_trades_api,
+                        page_size=actions_page_size,
+                        max_offset=actions_max_offset,
+                        taker_only=bool(cfg.get("actions_taker_only", False)),
+                        logger=logger,
+                    )
                 except Exception as exc:
                     if attempt == 0:
                         logger.warning(
@@ -1998,16 +2219,17 @@ def main() -> None:
         else:
             target_cache_mode = target_cache_bust_mode
 
-        target_pos, target_info = fetch_positions_norm(
+        # MULTI-TARGET: Fetch and merge positions from all target addresses
+        target_pos, target_info, position_source = _fetch_all_target_positions(
             data_client,
-            cfg["target_address"],
+            target_addresses,
             size_threshold,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
             refresh_sec=target_positions_refresh_sec,
-            force_http=True,
             cache_bust_mode=target_cache_mode,
             header_keys=header_keys,
+            logger=logger,
         )
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
