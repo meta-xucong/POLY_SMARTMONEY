@@ -1,4 +1,8 @@
 {
+  "_comment_targets": "支持多目标跟单：target_addresses数组中的多个目标，同一token取最大持仓变化量",
+  "target_addresses": [
+    "0xf5d4c1341267162afc3749908631087db95aa077"
+  ],
   "target_address": "0xf5d4c1341267162afc3749908631087db95aa077",
 
   "accounts_file": "accounts.json",
