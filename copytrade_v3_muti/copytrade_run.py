@@ -462,13 +462,14 @@ def _fetch_all_target_actions(
 
     Returns:
         - merged_actions: Combined list of actions from all targets
-        - merged_info: Combined info dict
+        - merged_info: Combined info dict (includes latest_ms for cursor updates)
     """
     from ct_data import fetch_target_actions_since, fetch_target_trades_since
 
     all_actions: List[Dict[str, Any]] = []
     any_ok = False
     any_incomplete = False
+    max_latest_ms = 0  # Track latest timestamp across all targets
 
     for target_addr in target_addresses:
         try:
@@ -495,6 +496,11 @@ def _fetch_all_target_actions(
             if info.get("incomplete"):
                 any_incomplete = True
 
+            # Track latest timestamp from this target
+            target_latest_ms = int(info.get("latest_ms") or 0)
+            if target_latest_ms > max_latest_ms:
+                max_latest_ms = target_latest_ms
+
             # Add source target to each action
             for action in actions:
                 action_copy = dict(action)
@@ -518,11 +524,19 @@ def _fetch_all_target_actions(
     # Sort by timestamp
     all_actions.sort(key=lambda a: int(a.get("timestamp_ms") or a.get("ts") or 0))
 
+    # Also check latest from merged actions (in case info.latest_ms wasn't set)
+    if all_actions:
+        last_action = all_actions[-1]
+        action_ts = int(last_action.get("timestamp_ms") or last_action.get("ts") or 0)
+        if action_ts > max_latest_ms:
+            max_latest_ms = action_ts
+
     merged_info = {
         "ok": any_ok,
         "incomplete": any_incomplete,
         "target_count": len(target_addresses),
         "total_actions": len(all_actions),
+        "latest_ms": max_latest_ms,  # CRITICAL: needed for cursor updates
     }
 
     return all_actions, merged_info
