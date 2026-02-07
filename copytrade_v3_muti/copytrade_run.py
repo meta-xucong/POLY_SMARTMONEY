@@ -2768,8 +2768,37 @@ def main() -> None:
                 token_id = action.get("token_id")
                 if token_id:
                     reduced_set.add(str(token_id))
-            reconcile_set = reduced_set
+
+            # ----------------------------------------------------------
+            # FIX: When actions_empty, preserve target tokens that we
+            # don't yet hold and have no open orders for.  Without this,
+            # new target positions are completely invisible to the
+            # reduced reconcile set and never get followed.
+            # Capped at 20 tokens to prevent extreme fan-out.
+            # ----------------------------------------------------------
             reason = "lag_high" if lag_high else "actions_empty"
+            if reason == "actions_empty":
+                _open_orders_set = set(state.get("open_orders", {}).keys())
+                _new_target_tokens: list[str] = []
+                for _tid, _tshares in target_shares_now_by_token_id.items():
+                    _tid_s = str(_tid)
+                    try:
+                        if float(_tshares) > 0 and _tid_s not in my_by_token_id and _tid_s not in _open_orders_set:
+                            _new_target_tokens.append(_tid_s)
+                    except (ValueError, TypeError):
+                        continue
+                _cap = 20
+                for _tid_s in _new_target_tokens[:_cap]:
+                    reduced_set.add(_tid_s)
+                if _new_target_tokens:
+                    logger.info(
+                        "[SAFE] actions_empty backfill new_target_tokens=%s (capped=%s) added=%s",
+                        len(_new_target_tokens),
+                        _cap,
+                        min(len(_new_target_tokens), _cap),
+                    )
+
+            reconcile_set = reduced_set
             logger.info(
                 "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s actions_unreliable=%s",
                 reason,
