@@ -1,6 +1,7 @@
 {
-  "_comment": "账户配置文件 - 存放交易账户的地址和私钥",
+  "_comment": "账户配置文件 - 每个账户独立配置",
   "_warning": "请妥善保管此文件，私钥泄露会导致资产损失！",
+  "_params": "每账户必填: my_address, private_key | 可选: follow_ratio(默认0.05), max_notional_per_token, max_notional_total, enabled",
 
   "accounts": [
     {
