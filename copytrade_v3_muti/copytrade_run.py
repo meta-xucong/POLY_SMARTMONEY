@@ -1336,7 +1336,8 @@ def _init_account_contexts(
             logger.warning("[MULTI] Account '%s' has no valid private_key, skipping", acct_name)
             continue
 
-        follow_ratio = float(acct_cfg.get("follow_ratio") or cfg.get("follow_ratio") or 0.05)
+        # follow_ratio is per-account, defined in accounts.json (default: 0.05)
+        follow_ratio = float(acct_cfg.get("follow_ratio") or 0.05)
 
         # Initialize CLOB client for this account using private_key from config
         try:

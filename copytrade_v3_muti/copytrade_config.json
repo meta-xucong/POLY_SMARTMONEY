@@ -9,13 +9,13 @@
   "poly_chain_id": 137,
   "poly_signature": 2,
 
+  "_comment_accounts": "账户配置在accounts.json中，包含follow_ratio, max_notional_per_token, max_notional_total",
   "accounts_file": "accounts.json",
 
-  "follow_ratio": 0.05,
+  "_comment_lowp": "低价格token的特殊处理参数",
   "lowp_guard_enabled": true,
   "lowp_price_threshold": 0.15,
   "lowp_follow_ratio_mult": 0.02,
-
   "lowp_min_order_usd": 1,
   "lowp_max_order_usd": 2,
   "lowp_probe_order_usd": 1,
@@ -75,8 +75,6 @@
   "skip_closed_markets": true,
   "block_on_unknown_market_state": false,
 
-  "max_notional_per_token": 6,
-  "max_notional_total": 40,
   "shadow_buy_ttl_sec": 900,
 
   "allow_partial": true,
