@@ -1421,26 +1421,48 @@ def main() -> None:
             cfg[key] = arg_val
             arg_overrides[key] = arg_val
 
-    # Resolve target address (same for all accounts)
-    cfg["target_address"] = _resolve_addr(
-        "target_address",
-        cfg.get("target_address"),
-        env_keys=[
-            "COPYTRADE_TARGET",
-            "CT_TARGET",
-            "POLY_TARGET_ADDRESS",
-            "TARGET_ADDRESS",
-        ],
-    )
-
-    # Setup logging using target address
+    # ============================================================
+    # RESOLVE TARGET ADDRESSES (before logging setup)
+    # Priority: target_addresses array > target_address > env vars
+    # ============================================================
     base_dir = Path(args.config).parent
+
+    # First try to get targets from target_addresses array
+    target_addresses: List[str] = []
+    target_list = cfg.get("target_addresses")
+    if isinstance(target_list, list) and target_list:
+        for addr in target_list:
+            addr_str = str(addr).strip()
+            if _is_evm_address(addr_str) and not _is_placeholder_addr(addr_str):
+                target_addresses.append(addr_str)
+
+    # Fall back to target_address or env vars if no valid targets from array
+    if not target_addresses:
+        single_target = cfg.get("target_address")
+        if not single_target or _is_placeholder_addr(single_target):
+            # Try environment variables
+            single_target = _get_env_first([
+                "COPYTRADE_TARGET",
+                "CT_TARGET",
+                "POLY_TARGET_ADDRESS",
+                "TARGET_ADDRESS",
+            ])
+        if single_target and _is_evm_address(single_target) and not _is_placeholder_addr(single_target):
+            target_addresses.append(str(single_target).strip())
+
+    if not target_addresses:
+        raise ValueError(
+            "No valid target addresses configured. "
+            "Set target_addresses array in config, or target_address, or env vars."
+        )
+
+    # Set cfg["target_address"] to first target for backward compatibility
+    cfg["target_address"] = target_addresses[0]
+
+    # Setup logging using first target address
     logger = _setup_logging(cfg, cfg["target_address"], base_dir)
 
-    # ============================================================
-    # MULTI-TARGET INITIALIZATION
-    # ============================================================
-    target_addresses = _resolve_target_addresses(cfg, logger)
+    # Log resolved targets
     logger.info(
         "[MULTI-TARGET] Resolved %d target address(es): %s",
         len(target_addresses),

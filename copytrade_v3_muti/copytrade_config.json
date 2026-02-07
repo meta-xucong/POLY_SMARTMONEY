@@ -1,9 +1,8 @@
 {
-  "_comment_targets": "支持多目标跟单：target_addresses数组中的多个目标，同一token取最大持仓变化量",
+  "_comment_targets": "多目标跟单：同一token取最大持仓变化量。支持多个目标地址",
   "target_addresses": [
     "0xf5d4c1341267162afc3749908631087db95aa077"
   ],
-  "target_address": "0xf5d4c1341267162afc3749908631087db95aa077",
 
   "_comment_poly": "Polymarket CLOB连接配置，无需再设置环境变量",
   "poly_host": "https://clob.polymarket.com",
