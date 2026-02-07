@@ -4,22 +4,94 @@
 
   "accounts": [
     {
-      "name": "Account_1",
-      "my_address": "0x2C23aba6C7BC73a032F9bd2A413188f33ff4599f",
-      "private_key": "YOUR_PRIVATE_KEY_HERE",
-      "follow_ratio": 0.05,
+      "name": "P11",
+      "my_address": "0x139C3f9ead0f54f9793377d295F96D3c3da1B47D",
+      "private_key": "0x5ee0040815714954dfe4927acfef617dac81ccec69763461203afffb2113f52a",
+      "follow_ratio": 1.00,
       "enabled": true,
-      "max_notional_per_token": 6,
-      "max_notional_total": 40
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
     },
     {
-      "name": "Account_2",
-      "my_address": "0x...",
-      "private_key": "YOUR_PRIVATE_KEY_2_HERE",
-      "follow_ratio": 0.03,
-      "enabled": false,
-      "max_notional_per_token": 5,
-      "max_notional_total": 30
+      "name": "P12",
+      "my_address": "0x2c93dD954be95c759F63bddd12B308ffA2142851",
+      "private_key": "0xa269911f5a9125c9a0747db633ad4bc1c5c0b17a5200e8945482af32dcfc6fe5",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P13",
+      "my_address": "0x49d5B3c64d2D63B9817975332A579fF4194bc5b6",
+      "private_key": "0xd06a73f3300bce85cc52984b4ba704cc52a7198c032e2a5f042d3a1fcbe492ce",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P14",
+      "my_address": "0x9434213D00Ade5F8Fa5E7e76Cbd7a2bDEB35ef42",
+      "private_key": "0x3f8c647f92b7ef0c7aece0ea17c7ec8d62382cefe09963e80dfd17d326a5b20c",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P15",
+      "my_address": "0xf184e28d28d50583ab9a2805955570Ce5775067b",
+      "private_key": "0x5ce57ab9d74c4bc95c88bf21a0c7f45994f00c314128de32ed78617fc4eb9d1d",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P16",
+      "my_address": "0x8e10254f9652E0672945eC724C0F483C43E77247",
+      "private_key": "0x9904777e0e8e82de3a9fd8f57a72d3101eb96b985fbb8e87a369086df589d7da",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P17",
+      "my_address": "0xaF8F7Bf63C9bb417A653b6DB246281264B57950B",
+      "private_key": "0xc2592e4428e70a18877e31077617dac6ab9b0b894561ba82f2defcc20d4336b4",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P18",
+      "my_address": "0x9714b38f997eeA6aE67FE14bC4ecFbD10eFFd4Aa",
+      "private_key": "0xfd1f50771bd43e3968c9b386287971bab3fa29447377c5289a3d3b911853cbea",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P19",
+      "my_address": "0x41B3334F3F335EE86DbE81610C27b5072c0BDf8b",
+      "private_key": "0xd985118a5da577db077453048d9ddf245874d9a6293252e886ae93015be119b9",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
+    }
+        {
+      "name": "P20",
+      "my_address": "0x300502d42Cf148a06252DB6c08F47b694402cD7e",
+      "private_key": "0x61bc7f04172ef52c4a0a5af33cdd1bf4594fd3073650d09aa9edc556f38ee688",
+      "follow_ratio": 1.00,
+      "enabled": true,
+      "max_notional_per_token": 100,
+      "max_notional_total": 10000
     }
   ]
 }
