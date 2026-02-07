@@ -550,19 +550,30 @@ def _derive_api_creds(client):
     return None
 
 
-def init_clob_client(private_key: str, funder_address: str):
+def init_clob_client(
+    private_key: str,
+    funder_address: str,
+    cfg: Optional[Dict[str, Any]] = None,
+):
     """
     Initialize CLOB client for a specific account.
 
     Args:
         private_key: Private key for this account (from accounts.json)
         funder_address: The account address (my_address)
+        cfg: Optional config dict containing poly_host, poly_chain_id, poly_signature
     """
     from py_clob_client.client import ClobClient
 
-    host = os.getenv("POLY_HOST", "https://clob.polymarket.com")
-    chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
-    signature_type = int(os.getenv("POLY_SIGNATURE", "2"))
+    # Priority: config > environment variable > default
+    if cfg:
+        host = cfg.get("poly_host") or os.getenv("POLY_HOST", "https://clob.polymarket.com")
+        chain_id = int(cfg.get("poly_chain_id") or os.getenv("POLY_CHAIN_ID", "137"))
+        signature_type = int(cfg.get("poly_signature") or os.getenv("POLY_SIGNATURE", "2"))
+    else:
+        host = os.getenv("POLY_HOST", "https://clob.polymarket.com")
+        chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
+        signature_type = int(os.getenv("POLY_SIGNATURE", "2"))
 
     key = _normalize_privkey(private_key)
 
@@ -1332,6 +1343,7 @@ def _init_account_contexts(
             clob_client = init_clob_client(
                 private_key=private_key,
                 funder_address=my_address,
+                cfg=cfg,
             )
         except Exception as exc:
             logger.error("[MULTI] Account '%s' (%s) CLOB init failed: %s", acct_name, my_address, exc)
