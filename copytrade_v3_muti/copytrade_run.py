@@ -1376,6 +1376,7 @@ def _init_account_contexts(
             state["open_orders_all"] = []
             state["seen_action_ids"] = []
             state["target_actions_cursor_ms"] = 0
+            state["target_trades_cursor_ms"] = 0
 
         # Initialize all required state fields for this account
         state.setdefault("open_orders", {})
@@ -1539,6 +1540,7 @@ def main() -> None:
         state["open_orders_all"] = []
         state["seen_action_ids"] = []
         state["target_actions_cursor_ms"] = 0
+        state["target_trades_cursor_ms"] = 0
     state.pop("cumulative_buy_usd_total", None)
     state.pop("cumulative_buy_usd_by_token", None)
     run_start_ms = int(time.time() * 1000)
@@ -1803,6 +1805,11 @@ def main() -> None:
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("target_actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
         state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+    # Also enforce floor on target_trades_cursor_ms (used when actions_source="trades")
+    if int(state.get("target_trades_cursor_ms") or 0) <= 0:
+        state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
+    if int(state.get("target_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
+        state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
     if int(state.get("my_trades_cursor_ms") or 0) <= 0:
         state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
@@ -2045,7 +2052,14 @@ def main() -> None:
         actions_cursor_ms = int(state.get(actions_cursor_key) or 0)
         actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
         actions_replay_window_sec = int(cfg.get("actions_replay_window_sec") or 600)
-        actions_lag_threshold_sec = int(cfg.get("actions_lag_threshold_sec") or 180)
+        _cfg_lag_threshold = int(cfg.get("actions_lag_threshold_sec") or 180)
+        # Scale lag threshold by account count: with N accounts in round-robin,
+        # each account polls every ~N*poll_interval, so the effective lag floor
+        # is much higher than in single-account V2.  Ensure the threshold is
+        # at least N * poll_interval to avoid perpetual false-positive lag_high.
+        _n_accounts = len(account_contexts)
+        _poll_sec = int(cfg.get("poll_interval_sec") or 20)
+        actions_lag_threshold_sec = max(_cfg_lag_threshold, _n_accounts * _poll_sec + _poll_sec)
         actions_unreliable_hold_sec = int(cfg.get("actions_unreliable_hold_sec") or 120)
         sell_confirm_max = int(cfg.get("sell_confirm_max") or 5)
         sell_confirm_window_sec = int(cfg.get("sell_confirm_window_sec") or 300)
@@ -2187,6 +2201,11 @@ def main() -> None:
                 if latest_action_ms > actions_cursor_ms:
                     state[actions_cursor_key] = latest_action_ms
                 if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
+                    state.pop("actions_replay_from_ms", None)
+                # When target is idle (no actions returned, latest=0),
+                # clear stale replay_from_ms to stop the perpetual
+                # replay loop that wastes API calls every cycle.
+                if replay_from_ms > 0 and latest_action_ms == 0 and not actions_list:
                     state.pop("actions_replay_from_ms", None)
                 lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
                 if lag_ms > actions_lag_threshold_sec * 1000:
@@ -2474,6 +2493,7 @@ def main() -> None:
             state["boot_token_ids"] = sorted(set(boot_token_ids))
 
             state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+            state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
             state["seen_action_ids"] = []
             state["topic_state"] = {}
             state["probed_token_ids"] = []
@@ -2770,33 +2790,36 @@ def main() -> None:
                     reduced_set.add(str(token_id))
 
             # ----------------------------------------------------------
-            # FIX: When actions_empty, preserve target tokens that we
-            # don't yet hold and have no open orders for.  Without this,
-            # new target positions are completely invisible to the
-            # reduced reconcile set and never get followed.
+            # FIX: When reduce_reconcile triggers (actions_empty OR
+            # lag_high), preserve target tokens that we don't yet hold
+            # and have no open orders for.  Without this, new target
+            # positions are invisible to the reduced reconcile set.
+            # Applies to both reasons because lag_high can co-occur
+            # with an inactive target (stale cursor), producing the
+            # same symptom as actions_empty.
             # Capped at 20 tokens to prevent extreme fan-out.
             # ----------------------------------------------------------
             reason = "lag_high" if lag_high else "actions_empty"
-            if reason == "actions_empty":
-                _open_orders_set = set(state.get("open_orders", {}).keys())
-                _new_target_tokens: list[str] = []
-                for _tid, _tshares in target_shares_now_by_token_id.items():
-                    _tid_s = str(_tid)
-                    try:
-                        if float(_tshares) > 0 and _tid_s not in my_by_token_id and _tid_s not in _open_orders_set:
-                            _new_target_tokens.append(_tid_s)
-                    except (ValueError, TypeError):
-                        continue
-                _cap = 20
-                for _tid_s in _new_target_tokens[:_cap]:
-                    reduced_set.add(_tid_s)
-                if _new_target_tokens:
-                    logger.info(
-                        "[SAFE] actions_empty backfill new_target_tokens=%s (capped=%s) added=%s",
-                        len(_new_target_tokens),
-                        _cap,
-                        min(len(_new_target_tokens), _cap),
-                    )
+            _open_orders_set = set(state.get("open_orders", {}).keys())
+            _new_target_tokens: list[str] = []
+            for _tid, _tshares in target_shares_now_by_token_id.items():
+                _tid_s = str(_tid)
+                try:
+                    if float(_tshares) > 0 and _tid_s not in my_by_token_id and _tid_s not in _open_orders_set:
+                        _new_target_tokens.append(_tid_s)
+                except (ValueError, TypeError):
+                    continue
+            _cap = 20
+            for _tid_s in _new_target_tokens[:_cap]:
+                reduced_set.add(_tid_s)
+            if _new_target_tokens:
+                logger.info(
+                    "[SAFE] %s backfill new_target_tokens=%s (capped=%s) added=%s",
+                    reason,
+                    len(_new_target_tokens),
+                    _cap,
+                    min(len(_new_target_tokens), _cap),
+                )
 
             reconcile_set = reduced_set
             logger.info(
