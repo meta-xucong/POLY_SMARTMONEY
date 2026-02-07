@@ -1377,6 +1377,37 @@ def _init_account_contexts(
             state["seen_action_ids"] = []
             state["target_actions_cursor_ms"] = 0
 
+        # Initialize all required state fields for this account
+        state.setdefault("open_orders", {})
+        state.setdefault("open_orders_all", {})
+        state.setdefault("seen_my_trade_ids", [])
+        state.setdefault("my_trades_cursor_ms", 0)
+        state.setdefault("managed_order_ids", [])
+        state.setdefault("intent_keys", {})
+        state.setdefault("token_map", {})
+        state.setdefault("bootstrapped", False)
+        state.setdefault("boot_token_ids", [])
+        state.setdefault("boot_token_keys", [])
+        state.setdefault("target_last_shares_by_token_key", {})
+        state.setdefault("target_last_shares", {})
+        state.setdefault("target_last_seen_ts", {})
+        state.setdefault("target_missing_streak", {})
+        state.setdefault("cooldown_until", {})
+        state.setdefault("topic_state", {})
+        state.setdefault("target_actions_cursor_ms", 0)
+        state.setdefault("ignored_tokens", {})
+        state.setdefault("probed_token_ids", [])
+        state.setdefault("market_status_cache", {})
+        state.setdefault("last_mid_price_by_token_id", {})
+        state.setdefault("orderbook_empty_streak", {})
+        state.setdefault("order_ts_by_id", {})
+        state.setdefault("seen_action_ids", [])
+        state.setdefault("last_reprice_ts_by_token", {})
+        state.setdefault("place_fail_until", {})
+        state.setdefault("missing_data_freeze", {})
+        state.setdefault("resolver_fail_cache", {})
+        state.setdefault("closed_token_keys", {})
+
         ctx = AccountContext(
             name=acct_name,
             my_address=my_address.strip(),
