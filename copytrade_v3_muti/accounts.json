@@ -21,8 +21,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P13",
       "my_address": "",
       "private_key": "",
@@ -30,8 +30,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P14",
       "my_address": "",
       "private_key": "",
@@ -39,8 +39,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P15",
       "my_address": "",
       "private_key": "",
@@ -48,8 +48,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P16",
       "my_address": "",
       "private_key": "",
@@ -57,8 +57,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P17",
       "my_address": "",
       "private_key": "",
@@ -66,8 +66,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P18",
       "my_address": "",
       "private_key": "",
@@ -75,8 +75,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P19",
       "my_address": "",
       "private_key": "",
@@ -84,8 +84,8 @@
       "enabled": true,
       "max_notional_per_token": 100,
       "max_notional_total": 10000
-    }
-        {
+    },
+    {
       "name": "P20",
       "my_address": "",
       "private_key": "",

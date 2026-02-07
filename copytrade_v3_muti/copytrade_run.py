@@ -1841,7 +1841,8 @@ def main() -> None:
         acct_ctx = account_contexts[current_account_idx]
         state = acct_ctx.state
         clob_client = acct_ctx.clob_client
-        cfg["my_address"] = acct_ctx.my_address
+        current_my_address = acct_ctx.my_address
+        cfg["my_address"] = current_my_address
         cfg["follow_ratio"] = acct_ctx.follow_ratio
         args.state = str(acct_ctx.state_path)
 
@@ -2208,7 +2209,7 @@ def main() -> None:
             my_trades_cursor_ms = int(state.get("my_trades_cursor_ms") or 0)
             my_trades, my_trades_info = fetch_target_trades_since(
                 data_client,
-                cfg["my_address"],
+                current_my_address,
                 my_trades_cursor_ms,
                 page_size=actions_page_size,
                 max_offset=actions_max_offset,
@@ -2325,7 +2326,7 @@ def main() -> None:
 
         my_pos, my_info = fetch_positions_norm(
             data_client,
-            cfg["my_address"],
+            current_my_address,
             0.0,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
