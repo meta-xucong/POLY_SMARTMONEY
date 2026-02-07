@@ -1762,14 +1762,18 @@ def main() -> None:
         _apply_overrides(new_cfg)
         new_target = new_cfg.get("target_address")
         new_my = new_cfg.get("my_address")
-        if new_target and str(new_target).strip() != str(resolved_target_address).strip():
+        if not str(new_target or "").strip():
+            new_cfg["target_address"] = resolved_target_address
+        elif str(new_target).strip() != str(resolved_target_address).strip():
             logger.warning(
                 "[CFG] target_address 变更将被忽略，需要重启: %s -> %s",
                 resolved_target_address,
                 new_target,
             )
             new_cfg["target_address"] = resolved_target_address
-        if new_my and str(new_my).strip() != str(resolved_my_address).strip():
+        if not str(new_my or "").strip():
+            new_cfg["my_address"] = resolved_my_address
+        elif str(new_my).strip() != str(resolved_my_address).strip():
             logger.warning(
                 "[CFG] my_address 变更将被忽略，需要重启: %s -> %s",
                 resolved_my_address,
@@ -1837,7 +1841,8 @@ def main() -> None:
         acct_ctx = account_contexts[current_account_idx]
         state = acct_ctx.state
         clob_client = acct_ctx.clob_client
-        cfg["my_address"] = acct_ctx.my_address
+        current_my_address = acct_ctx.my_address
+        cfg["my_address"] = current_my_address
         cfg["follow_ratio"] = acct_ctx.follow_ratio
         args.state = str(acct_ctx.state_path)
 
@@ -1892,6 +1897,9 @@ def main() -> None:
             except Exception:
                 reason = "interval"
             _reload_config(reason)
+            # MULTI-ACCOUNT: ensure per-account identity survives config reload.
+            cfg["my_address"] = acct_ctx.my_address
+            cfg["follow_ratio"] = acct_ctx.follow_ratio
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         try:
             remote_orders, ok, err = fetch_open_orders_norm(clob_client)
@@ -2201,7 +2209,7 @@ def main() -> None:
             my_trades_cursor_ms = int(state.get("my_trades_cursor_ms") or 0)
             my_trades, my_trades_info = fetch_target_trades_since(
                 data_client,
-                cfg["my_address"],
+                current_my_address,
                 my_trades_cursor_ms,
                 page_size=actions_page_size,
                 max_offset=actions_max_offset,
@@ -2318,7 +2326,7 @@ def main() -> None:
 
         my_pos, my_info = fetch_positions_norm(
             data_client,
-            cfg["my_address"],
+            current_my_address,
             0.0,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
