@@ -2209,15 +2209,31 @@ def main() -> None:
                     state.pop("actions_replay_from_ms", None)
                 lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
                 if lag_ms > actions_lag_threshold_sec * 1000:
-                    state["actions_replay_from_ms"] = max(
-                        0, now_ms - actions_replay_window_sec * 1000
+                    lag_replay_window_sec = int(
+                        cfg.get("lag_replay_window_sec") or min(actions_replay_window_sec, 120)
                     )
-                    logger.warning(
-                        "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s",
-                        lag_ms,
-                        state["actions_replay_from_ms"],
-                        latest_action_ms,
-                    )
+                    lag_replay_cooldown_sec = int(cfg.get("lag_replay_cooldown_sec") or 120)
+                    last_lag_replay_ts = int(state.get("last_lag_replay_ts") or 0)
+                    if now_ts - last_lag_replay_ts >= max(0, lag_replay_cooldown_sec):
+                        state["actions_replay_from_ms"] = max(
+                            0, now_ms - max(1, lag_replay_window_sec) * 1000
+                        )
+                        state["last_lag_replay_ts"] = now_ts
+                        logger.warning(
+                            "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s win_sec=%s cooldown_sec=%s",
+                            lag_ms,
+                            state["actions_replay_from_ms"],
+                            latest_action_ms,
+                            lag_replay_window_sec,
+                            lag_replay_cooldown_sec,
+                        )
+                    else:
+                        logger.info(
+                            "[ACTIONS] lag_ms=%s replay_suppressed latest_ms=%s cooldown_remain=%s",
+                            lag_ms,
+                            latest_action_ms,
+                            max(0, lag_replay_cooldown_sec - (now_ts - last_lag_replay_ts)),
+                        )
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
@@ -2384,19 +2400,20 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
-        # CRITICAL FIX: Save unfiltered my_pos for risk calculation
-        # This prevents skip_closed_markets from weakening risk baseline
-        # and causing position limit breaches after balance top-ups
-        my_pos_for_risk = list(my_pos)  # Deep copy for risk baseline
+        # Risk source for "my positions": configurable to avoid inflated baseline
+        # when closed/expired markets remain in positions API.
+        risk_use_unfiltered_positions = bool(cfg.get("risk_use_unfiltered_positions", False))
+        my_pos_for_risk_snapshot = list(my_pos)
 
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
             my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
             if removed_target or removed_my:
                 logger.info(
-                    "[SKIP] closed_positions filtered target=%s my=%s (trading only, risk still uses unfiltered)",
+                    "[SKIP] closed_positions filtered target=%s my=%s (risk_use_unfiltered_positions=%s)",
                     removed_target,
                     removed_my,
+                    risk_use_unfiltered_positions,
                 )
 
         should_log_heartbeat = has_new_actions or (
@@ -2623,8 +2640,8 @@ def main() -> None:
                 state["last_mid_price_update_ts"] = now_ts
             my_by_token_id[tid] = size
 
-        # CRITICAL FIX: Build unfiltered position dict for risk calculation
-        # This ensures risk baseline includes positions from closed markets that may still be tradeable
+        # Build risk baseline from selected source (filtered by default).
+        my_pos_for_risk = my_pos_for_risk_snapshot if risk_use_unfiltered_positions else my_pos
         my_by_token_id_for_risk: Dict[str, float] = {}
         for pos in my_pos_for_risk:
             token_key = str(pos.get("token_key") or "")
@@ -3256,9 +3273,11 @@ def main() -> None:
                     t_now = float(alt)
             missing_data = t_now is None
             boot_key_set = set(state.get("boot_token_keys", []))
-            is_boot_token = token_key in boot_key_set
+            boot_id_set = {str(tid) for tid in state.get("boot_token_ids", [])}
+            is_boot_token = (token_key in boot_key_set) or (str(token_id) in boot_id_set)
 
             ignore_boot_tokens = bool(cfg.get("ignore_boot_tokens", True))
+            follow_new_topics_only = bool(cfg.get("follow_new_topics_only", False))
             boot_scope = str(cfg.get("ignore_boot_tokens_scope") or "probe_only").lower()
             # scope 说明：
             # - "probe_only"（默认）：仅阻止 boot token 的 probe（防开机误买），允许后续增量 BUY 跟单
@@ -3271,6 +3290,10 @@ def main() -> None:
             buy_blocked_by_boot = (
                 ignore_boot_tokens and is_boot_token and boot_scope in ("all", "full")
             )
+            # Strong mode: ignore all pre-boot tokens for BUY/probe (SELL still allowed).
+            if follow_new_topics_only and is_boot_token:
+                probe_blocked_by_boot = True
+                buy_blocked_by_boot = True
             t_last = state.get("target_last_shares", {}).get(token_id)
             if t_last is None:
                 boot_by_key = state.get("target_last_shares_by_token_key", {})
@@ -4523,6 +4546,8 @@ def main() -> None:
             my_target = my_shares + d_my
             if my_target < 0:
                 my_target = 0.0
+            if d_target > 0 and buy_blocked_by_boot:
+                my_target = min(my_target, my_shares)
             if d_target > 0:
                 my_target = min(my_target, cap_shares, cap_shares_notional)
             else:
@@ -4538,7 +4563,19 @@ def main() -> None:
                 probe_shares = probe_usd / ref_price
 
                 if phase == "LONG":
-                    if not st.get("did_probe") and my_shares <= eps:
+                    if buy_blocked_by_boot:
+                        my_target = min(my_target, my_shares)
+                        _block_key = f"BOOT_BLOCK_BUY:{token_id}"
+                        _should_log, _supp = _log_dedup.should_log(_block_key)
+                        if _should_log:
+                            logger.info(
+                                "[SKIP] boot_block_buy token_id=%s follow_new_topics_only=%s scope=%s",
+                                token_id,
+                                follow_new_topics_only,
+                                boot_scope,
+                            )
+
+                    if (not buy_blocked_by_boot) and (not st.get("did_probe")) and my_shares <= eps:
                         my_target = min(cap_shares, cap_shares_notional, my_shares + probe_shares)
                         probe_attempted = True
                         dedup_key = f"TOPIC_PROBE:{token_id}"
@@ -4552,7 +4589,7 @@ def main() -> None:
                             else:
                                 logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
-                    if not st.get("entry_sized"):
+                    if (not buy_blocked_by_boot) and (not st.get("entry_sized")):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
                         if now_ts - first_buy_ts >= entry_settle_sec:
                             base = float(t_now) if t_now is not None else float(
@@ -4592,14 +4629,15 @@ def main() -> None:
                     # FIX: Same fallback for continuous tracking after entry_sized.
                     if base <= 0:
                         base = float(st.get("entry_buy_accum") or 0.0)
-                    desired_locked = float(st.get("desired_shares") or 0.0)
-                    desired_target = desired_locked
-                    if base > 0 and ratio_buy > 0:
-                        desired_target = min(cap_shares, cap_shares_notional, ratio_buy * base)
-                    if desired_target > 0:
-                        st["desired_shares"] = float(desired_target)
-                        topic_state[token_id] = st
-                        my_target = max(my_shares, min(cap_shares, cap_shares_notional, desired_target))
+                    if not buy_blocked_by_boot:
+                        desired_locked = float(st.get("desired_shares") or 0.0)
+                        desired_target = desired_locked
+                        if base > 0 and ratio_buy > 0:
+                            desired_target = min(cap_shares, cap_shares_notional, ratio_buy * base)
+                        if desired_target > 0:
+                            st["desired_shares"] = float(desired_target)
+                            topic_state[token_id] = st
+                            my_target = max(my_shares, min(cap_shares, cap_shares_notional, desired_target))
 
                 elif phase == "EXITING":
                     my_target = 0.0
