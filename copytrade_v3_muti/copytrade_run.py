@@ -2400,19 +2400,20 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
-        # CRITICAL FIX: Save unfiltered my_pos for risk calculation
-        # This prevents skip_closed_markets from weakening risk baseline
-        # and causing position limit breaches after balance top-ups
-        my_pos_for_risk = list(my_pos)  # Deep copy for risk baseline
+        # Risk source for "my positions": configurable to avoid inflated baseline
+        # when closed/expired markets remain in positions API.
+        risk_use_unfiltered_positions = bool(cfg.get("risk_use_unfiltered_positions", False))
+        my_pos_for_risk_snapshot = list(my_pos)
 
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
             my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
             if removed_target or removed_my:
                 logger.info(
-                    "[SKIP] closed_positions filtered target=%s my=%s (trading only, risk still uses unfiltered)",
+                    "[SKIP] closed_positions filtered target=%s my=%s (risk_use_unfiltered_positions=%s)",
                     removed_target,
                     removed_my,
+                    risk_use_unfiltered_positions,
                 )
 
         should_log_heartbeat = has_new_actions or (
@@ -2639,8 +2640,8 @@ def main() -> None:
                 state["last_mid_price_update_ts"] = now_ts
             my_by_token_id[tid] = size
 
-        # CRITICAL FIX: Build unfiltered position dict for risk calculation
-        # This ensures risk baseline includes positions from closed markets that may still be tradeable
+        # Build risk baseline from selected source (filtered by default).
+        my_pos_for_risk = my_pos_for_risk_snapshot if risk_use_unfiltered_positions else my_pos
         my_by_token_id_for_risk: Dict[str, float] = {}
         for pos in my_pos_for_risk:
             token_key = str(pos.get("token_key") or "")
