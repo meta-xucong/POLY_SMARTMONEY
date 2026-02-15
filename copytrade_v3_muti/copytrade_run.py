@@ -2209,15 +2209,31 @@ def main() -> None:
                     state.pop("actions_replay_from_ms", None)
                 lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
                 if lag_ms > actions_lag_threshold_sec * 1000:
-                    state["actions_replay_from_ms"] = max(
-                        0, now_ms - actions_replay_window_sec * 1000
+                    lag_replay_window_sec = int(
+                        cfg.get("lag_replay_window_sec") or min(actions_replay_window_sec, 120)
                     )
-                    logger.warning(
-                        "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s",
-                        lag_ms,
-                        state["actions_replay_from_ms"],
-                        latest_action_ms,
-                    )
+                    lag_replay_cooldown_sec = int(cfg.get("lag_replay_cooldown_sec") or 120)
+                    last_lag_replay_ts = int(state.get("last_lag_replay_ts") or 0)
+                    if now_ts - last_lag_replay_ts >= max(0, lag_replay_cooldown_sec):
+                        state["actions_replay_from_ms"] = max(
+                            0, now_ms - max(1, lag_replay_window_sec) * 1000
+                        )
+                        state["last_lag_replay_ts"] = now_ts
+                        logger.warning(
+                            "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s win_sec=%s cooldown_sec=%s",
+                            lag_ms,
+                            state["actions_replay_from_ms"],
+                            latest_action_ms,
+                            lag_replay_window_sec,
+                            lag_replay_cooldown_sec,
+                        )
+                    else:
+                        logger.info(
+                            "[ACTIONS] lag_ms=%s replay_suppressed latest_ms=%s cooldown_remain=%s",
+                            lag_ms,
+                            latest_action_ms,
+                            max(0, lag_replay_cooldown_sec - (now_ts - last_lag_replay_ts)),
+                        )
         except Exception as exc:
             logger.exception("[ERR] fetch target actions failed: %s", exc)
 
@@ -3256,7 +3272,8 @@ def main() -> None:
                     t_now = float(alt)
             missing_data = t_now is None
             boot_key_set = set(state.get("boot_token_keys", []))
-            is_boot_token = token_key in boot_key_set
+            boot_id_set = {str(tid) for tid in state.get("boot_token_ids", [])}
+            is_boot_token = (token_key in boot_key_set) or (str(token_id) in boot_id_set)
 
             ignore_boot_tokens = bool(cfg.get("ignore_boot_tokens", True))
             follow_new_topics_only = bool(cfg.get("follow_new_topics_only", False))
