@@ -11,6 +11,14 @@ RUN_USER="$2"
 PYTHON_BIN="$3"
 ENV_FILE="$4"
 
+ACCOUNTS_FILE="${REPO_ROOT}/copytrade_v3_muti/accounts.json"
+
+if [ ! -f "$ACCOUNTS_FILE" ]; then
+  echo "ERROR: accounts.json not found: ${ACCOUNTS_FILE}" >&2
+  echo "Please create it before installing the V3 service." >&2
+  exit 1
+fi
+
 SERVICE_NAME="polysmart-copytrade-v3.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
