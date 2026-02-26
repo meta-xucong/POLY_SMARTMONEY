@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
-  echo "Usage: $0 <repo_root> <run_user> <python_bin> <env_file>" >&2
+  echo "Usage: $0 <repo_root> <run_user> <python_bin> <env_file|- for none>" >&2
   exit 1
 fi
 
@@ -22,6 +22,11 @@ fi
 SERVICE_NAME="polysmart-copytrade-v3.service"
 SERVICE_PATH="/etc/systemd/system/${SERVICE_NAME}"
 
+ENV_LINE=""
+if [ "$ENV_FILE" != "-" ]; then
+  ENV_LINE="EnvironmentFile=${ENV_FILE}"
+fi
+
 sudo tee "$SERVICE_PATH" >/dev/null <<EOF
 [Unit]
 Description=POLY_SMARTMONEY Copytrade V3 Multi
@@ -32,7 +37,6 @@ Wants=network-online.target
 Type=simple
 User=${RUN_USER}
 WorkingDirectory=${REPO_ROOT}
-EnvironmentFile=${ENV_FILE}
 Environment=PYTHONUNBUFFERED=1
 ExecStart=${PYTHON_BIN} ${REPO_ROOT}/copytrade_v3_muti/copytrade_run.py
 Restart=always
@@ -44,6 +48,10 @@ StandardError=append:${REPO_ROOT}/copytrade_v3_muti/logs/systemd.err.log
 [Install]
 WantedBy=multi-user.target
 EOF
+
+if [ -n "$ENV_LINE" ]; then
+  sudo sed -i "s|^Environment=PYTHONUNBUFFERED=1$|$ENV_LINE\\nEnvironment=PYTHONUNBUFFERED=1|" "$SERVICE_PATH"
+fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now "$SERVICE_NAME"
