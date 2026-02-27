@@ -120,6 +120,13 @@ class LogDeduplicator:
 # Global log deduplicator instance
 _log_dedup = LogDeduplicator()
 
+_REPLAY_BOOT_MODES = {
+    "baseline_replay",
+    "replay_24h",
+    "replay_actions",
+    "replay",
+}
+
 
 def _state_path_for_target(state_path: Path, target_address: str) -> Path:
     """Derive per-target state file path when user didn't explicitly provide one."""
@@ -196,6 +203,31 @@ def _shorten_address(address: str) -> str:
     return f"{text[:6]}..{text[-4:]}"
 
 
+def _is_replay_mode(cfg: Dict[str, Any]) -> bool:
+    mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+    return mode in _REPLAY_BOOT_MODES
+
+
+def _get_actions_replay_window_sec(cfg: Dict[str, Any], is_replay_mode: Optional[bool] = None) -> int:
+    if is_replay_mode is None:
+        is_replay_mode = _is_replay_mode(cfg)
+    raw = cfg.get("actions_replay_window_sec")
+    if raw is None or raw == "":
+        return 86400 if is_replay_mode else 600
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 86400 if is_replay_mode else 600
+
+
+def _get_replay_floor_ms(cfg: Dict[str, Any], state: Dict[str, Any]) -> int:
+    run_start_ms = int(state.get("run_start_ms") or 0)
+    if not _is_replay_mode(cfg):
+        return run_start_ms
+    window_sec = _get_actions_replay_window_sec(cfg, True)
+    return max(0, run_start_ms - window_sec * 1000)
+
+
 def _setup_logging(
     cfg: Dict[str, Any],
     target_address: str,
@@ -250,7 +282,7 @@ def _setup_logging(
     _suppress_verbose_third_party_loggers(level)
 
     logger = logging.getLogger(__name__)
-    logger.info("日志初始化完成: %s (daily rotation, retention=%dd)", log_path, log_retention_days)
+    logger.debug("日志初始化完成: %s (daily rotation, retention=%dd)", log_path, log_retention_days)
 
     # Run one-time cleanup of legacy log files (old naming with pid/timestamp)
     _cleanup_old_logs(log_dir, log_retention_days, logger)
@@ -1374,7 +1406,8 @@ def _init_account_contexts(
             state["topic_state"] = {}
             state["open_orders"] = {}
             state["open_orders_all"] = []
-            state["seen_action_ids"] = []
+            if boot_sync_mode == "baseline_only" or fresh_boot:
+                state["seen_action_ids"] = []
             state["target_actions_cursor_ms"] = 0
             state["target_trades_cursor_ms"] = 0
 
@@ -1409,22 +1442,6 @@ def _init_account_contexts(
         state.setdefault("resolver_fail_cache", {})
         state.setdefault("closed_token_keys", {})
 
-        # Force replay window on boot to avoid missing recent target actions
-        replay_hours = float(cfg.get("replay_on_boot_hours") or 24)
-        if replay_hours > 0:
-            now_ms = int(time.time() * 1000)
-            replay_from_ms = max(0, now_ms - int(replay_hours * 3600 * 1000))
-            state["actions_replay_from_ms"] = replay_from_ms
-            state["run_start_ms"] = min(int(state.get("run_start_ms") or now_ms), replay_from_ms)
-            state["target_actions_cursor_ms"] = min(
-                int(state.get("target_actions_cursor_ms") or replay_from_ms),
-                replay_from_ms,
-            )
-            state["target_trades_cursor_ms"] = min(
-                int(state.get("target_trades_cursor_ms") or replay_from_ms),
-                replay_from_ms,
-            )
-
         ctx = AccountContext(
             name=acct_name,
             my_address=my_address.strip(),
@@ -1457,21 +1474,6 @@ def _init_account_contexts(
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
-    replay_override: Dict[str, Any] = {}
-    replay_hours = float(cfg.get("replay_on_boot_hours") or 0)
-    if replay_hours > 0:
-        replay_window_sec = int(replay_hours * 3600)
-        current_window_sec = int(cfg.get("actions_replay_window_sec") or 0)
-        if current_window_sec < replay_window_sec:
-            cfg["actions_replay_window_sec"] = replay_window_sec
-            replay_override["actions_replay_window_sec"] = (
-                current_window_sec,
-                replay_window_sec,
-            )
-        boot_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-        if boot_mode == "baseline_only":
-            cfg["boot_sync_mode"] = "replay"
-            replay_override["boot_sync_mode"] = boot_mode
     arg_overrides: Dict[str, Any] = {}
     for key in (
         "target_address",
@@ -1525,12 +1527,6 @@ def main() -> None:
 
     # Setup logging using first target address
     logger = _setup_logging(cfg, cfg["target_address"], base_dir)
-    if replay_override:
-        logger.info(
-            "[CFG] replay_on_boot_hours=%s overrides=%s",
-            replay_hours,
-            replay_override,
-        )
 
     # Log resolved targets
     logger.info(
@@ -1728,6 +1724,7 @@ def main() -> None:
     last_config_mtime: Optional[float] = None
     resolved_target_address = cfg["target_address"]
     resolved_my_address = cfg["my_address"]
+    risk_summary_interval_sec = 60
 
     def _apply_overrides(payload: Dict[str, Any]) -> None:
         for key, value in arg_overrides.items():
@@ -1751,6 +1748,7 @@ def main() -> None:
         nonlocal heartbeat_interval_sec
         nonlocal config_reload_sec
         nonlocal max_resolve_target_positions_per_loop
+        nonlocal risk_summary_interval_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -1776,8 +1774,9 @@ def main() -> None:
         max_resolve_target_positions_per_loop = int(
             cfg.get("max_resolve_target_positions_per_loop") or 20
         )
+        risk_summary_interval_sec = int(cfg.get("risk_summary_interval_sec") or 120)
         # Log deduplication: suppress repetitive logs within this window (0 = disabled)
-        log_dedup_window = float(cfg.get("log_dedup_window_sec") or 60.0)
+        log_dedup_window = float(cfg.get("log_dedup_window_sec") or 300.0)
         _log_dedup.set_window(log_dedup_window)
 
     def _refresh_log_level() -> None:
@@ -1837,23 +1836,22 @@ def main() -> None:
     except Exception:
         last_config_mtime = None
     last_heartbeat_ts = 0
+    last_risk_summary_ts = 0
 
-    replay_floor_ms = int(state.get("actions_replay_from_ms") or 0)
-    run_floor_ms = int(state.get("run_start_ms") or time.time() * 1000)
-    floor_ms = min(run_floor_ms, replay_floor_ms) if replay_floor_ms > 0 else run_floor_ms
+    replay_floor_ms = _get_replay_floor_ms(cfg, state)
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
-        state["target_actions_cursor_ms"] = floor_ms
-    if int(state.get("target_actions_cursor_ms") or 0) < floor_ms:
-        state["target_actions_cursor_ms"] = floor_ms
+        state["target_actions_cursor_ms"] = replay_floor_ms
+    if int(state.get("target_actions_cursor_ms") or 0) < replay_floor_ms:
+        state["target_actions_cursor_ms"] = replay_floor_ms
     # Also enforce floor on target_trades_cursor_ms (used when actions_source="trades")
     if int(state.get("target_trades_cursor_ms") or 0) <= 0:
-        state["target_trades_cursor_ms"] = floor_ms
-    if int(state.get("target_trades_cursor_ms") or 0) < floor_ms:
-        state["target_trades_cursor_ms"] = floor_ms
+        state["target_trades_cursor_ms"] = replay_floor_ms
+    if int(state.get("target_trades_cursor_ms") or 0) < replay_floor_ms:
+        state["target_trades_cursor_ms"] = replay_floor_ms
     if int(state.get("my_trades_cursor_ms") or 0) <= 0:
-        state["my_trades_cursor_ms"] = floor_ms
-    if int(state.get("my_trades_cursor_ms") or 0) < floor_ms:
-        state["my_trades_cursor_ms"] = floor_ms
+        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
+    if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
+        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
     if int(state.get("my_trades_unreliable_until") or 0) < 0:
         state["my_trades_unreliable_until"] = 0
 
@@ -1867,6 +1865,7 @@ def main() -> None:
     _log_retention_days = int(cfg.get("log_retention_days") or 7)
     _log_cleanup_hour = int(cfg.get("log_cleanup_hour") or 12)
     _last_log_cleanup_date: str = ""
+    last_http_timeout: Optional[float] = None
 
     def _get_poll_interval() -> int:
         topic_state = state.get("topic_state", {})
@@ -1875,6 +1874,29 @@ def main() -> None:
                 if (st or {}).get("phase") == "EXITING":
                     return poll_interval_exiting
         return poll_interval
+
+    def _get_api_timeout_sec() -> Optional[float]:
+        try:
+            timeout = float(cfg.get("api_timeout_sec") or 15.0)
+        except Exception:
+            timeout = 15.0
+        if timeout <= 0:
+            return None
+        return timeout
+
+    def _configure_clob_http_timeout(timeout_sec: Optional[float]) -> None:
+        nonlocal last_http_timeout
+        if timeout_sec == last_http_timeout:
+            return
+        try:
+            import httpx
+            from py_clob_client.http_helpers import helpers as clob_http_helpers
+
+            clob_http_helpers._http_client = httpx.Client(http2=True, timeout=timeout_sec)
+            last_http_timeout = timeout_sec
+            logger.info("[HTTP_TIMEOUT] clob_client httpx timeout=%s", timeout_sec)
+        except Exception as exc:
+            logger.warning("[HTTP_TIMEOUT] failed to set timeout=%s: %s", timeout_sec, exc)
 
     logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
 
@@ -1947,9 +1969,11 @@ def main() -> None:
             # MULTI-ACCOUNT: ensure per-account identity survives config reload.
             cfg["my_address"] = acct_ctx.my_address
             cfg["follow_ratio"] = acct_ctx.follow_ratio
+        api_timeout_sec = _get_api_timeout_sec()
+        _configure_clob_http_timeout(api_timeout_sec)
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         try:
-            remote_orders, ok, err = fetch_open_orders_norm(clob_client)
+            remote_orders, ok, err = fetch_open_orders_norm(clob_client, api_timeout_sec)
             if ok:
                 remote_by_token: Dict[str, list[dict]] = {}
                 order_ts_by_id = state.setdefault("order_ts_by_id", {})
@@ -2090,8 +2114,10 @@ def main() -> None:
             "target_trades_cursor_ms" if actions_source in ("trade", "trades") else "target_actions_cursor_ms"
         )
         actions_cursor_ms = int(state.get(actions_cursor_key) or 0)
-        actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
-        actions_replay_window_sec = int(cfg.get("actions_replay_window_sec") or 600)
+        replay_floor_ms = _get_replay_floor_ms(cfg, state)
+        actions_cursor_ms = max(actions_cursor_ms, replay_floor_ms)
+        is_replay_mode = _is_replay_mode(cfg)
+        actions_replay_window_sec = _get_actions_replay_window_sec(cfg, is_replay_mode)
         _cfg_lag_threshold = int(cfg.get("actions_lag_threshold_sec") or 180)
         # Scale lag threshold by account count: with N accounts in round-robin,
         # each account polls every ~N*poll_interval, so the effective lag floor
@@ -2250,7 +2276,8 @@ def main() -> None:
                 lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
                 if lag_ms > actions_lag_threshold_sec * 1000:
                     lag_replay_window_sec = int(
-                        cfg.get("lag_replay_window_sec") or min(actions_replay_window_sec, 120)
+                        cfg.get("lag_replay_window_sec")
+                        or (actions_replay_window_sec if is_replay_mode else min(actions_replay_window_sec, 120))
                     )
                     lag_replay_cooldown_sec = int(cfg.get("lag_replay_cooldown_sec") or 120)
                     last_lag_replay_ts = int(state.get("last_lag_replay_ts") or 0)
@@ -2508,12 +2535,23 @@ def main() -> None:
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
         fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
-        boot_needed = boot_sync_mode == "baseline_only" and (
+        boot_run_start_ms = int(state.get("boot_run_start_ms") or 0)
+        run_start_ms = int(state.get("run_start_ms") or 0)
+        boot_needed = boot_sync_mode in (
+            "baseline_only",
+            "baseline_replay",
+            "replay_24h",
+            "replay_actions",
+            "replay",
+        ) and (
             (not state.get("bootstrapped"))
             or (
                 fresh_boot
-                and int(state.get("boot_run_start_ms") or 0)
-                != int(state.get("run_start_ms") or 0)
+                and boot_run_start_ms != run_start_ms
+            )
+            or (
+                boot_sync_mode in _REPLAY_BOOT_MODES
+                and boot_run_start_ms != run_start_ms
             )
         )
         if boot_needed:
@@ -2549,18 +2587,28 @@ def main() -> None:
                     state.setdefault("target_missing_streak", {})[token_id] = 0
             state["boot_token_ids"] = sorted(set(boot_token_ids))
 
-            state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
-            state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
+            run_start_ms = int(state.get("run_start_ms") or 0)
+            if boot_sync_mode == "baseline_only":
+                state["target_actions_cursor_ms"] = run_start_ms
+                state["target_trades_cursor_ms"] = run_start_ms
+            else:
+                replay_window_sec = _get_actions_replay_window_sec(cfg, True)
+                replay_from_ms = max(0, run_start_ms - replay_window_sec * 1000)
+                state["actions_replay_from_ms"] = replay_from_ms
+                state["target_actions_cursor_ms"] = replay_from_ms
+                state["target_trades_cursor_ms"] = replay_from_ms
             state["seen_action_ids"] = []
             state["topic_state"] = {}
             state["probed_token_ids"] = []
             state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
             state["bootstrapped"] = True
             logger.info(
-                "[BOOT] baseline_only: baseline_keys=%s baseline_ids=%s cursor_ms=%s",
+                "[BOOT] %s: baseline_keys=%s baseline_ids=%s cursor_ms=%s replay_from_ms=%s",
+                boot_sync_mode,
                 len(boot_keys),
                 len(state["boot_token_ids"]),
                 state["target_actions_cursor_ms"],
+                state.get("actions_replay_from_ms", 0),
             )
             save_state(args.state, state)
             current_account_idx = (current_account_idx + 1) % len(account_contexts)
@@ -3002,59 +3050,6 @@ def main() -> None:
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
 
-        def _ensure_tradeable(token_id: str) -> bool:
-            if not skip_closed:
-                return True
-            cached = status_cache.get(token_id) or {}
-            if cached.get("tradeable") is False:
-                _ensure_long_ignore(token_id, cached.get("meta"))
-                return False
-            cached_ts = int(cached.get("ts") or 0)
-            if cached_ts and (now_ts - cached_ts) < refresh_sec and cached.get("tradeable") is True:
-                return True
-            meta_map = gamma_fetch_markets_by_clob_token_ids([token_id])
-            meta = meta_map.get(token_id)
-            tradeable = market_tradeable_state(meta)
-            status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
-            if tradeable is False:
-                _ensure_long_ignore(token_id, meta)
-                return False
-            return True
-
-        def _is_valid_book(ob: Dict[str, Optional[float]]) -> bool:
-            bid = ob.get("best_bid")
-            ask = ob.get("best_ask")
-            if bid is None or ask is None:
-                return False
-            if bid <= 0 or ask <= 0:
-                return False
-            if bid >= 1.0 or ask >= 1.0:
-                return False
-            if bid > ask:
-                return False
-            return True
-
-        def _get_orderbook_checked(token_id: str) -> Optional[Dict[str, Optional[float]]]:
-            if not _ensure_tradeable(token_id):
-                logger.info("[SKIP] not_tradeable token_id=%s", token_id)
-                return None
-            last_ob: Optional[Dict[str, Optional[float]]] = None
-            for attempt in range(3):
-                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
-                last_ob = ob
-                if _is_valid_book(ob):
-                    return ob
-                if attempt < 2:
-                    time.sleep(0.2)
-            if last_ob is not None:
-                logger.warning(
-                    "[SKIP_BAD_BOOK] token_id=%s best_bid=%s best_ask=%s",
-                    token_id,
-                    last_ob.get("best_bid"),
-                    last_ob.get("best_ask"),
-                )
-            return None
-
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
         mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
@@ -3144,16 +3139,18 @@ def main() -> None:
         top_tokens_fmt = [
             f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
         ]
-        logger.info(
-            "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
-            "recent_buy_usd=%s top_tokens=%s",
-            planned_total_notional,
-            planned_total_notional_shadow,
-            open_buy_orders_usd,
-            shadow_buy_usd,
-            recent_buy_total,
-            top_tokens_fmt,
-        )
+        if risk_summary_interval_sec <= 0 or now_ts - last_risk_summary_ts >= risk_summary_interval_sec:
+            logger.info(
+                "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
+                "recent_buy_usd=%s top_tokens=%s",
+                planned_total_notional,
+                planned_total_notional_shadow,
+                open_buy_orders_usd,
+                shadow_buy_usd,
+                recent_buy_total,
+                top_tokens_fmt,
+            )
+            last_risk_summary_ts = now_ts
 
         # Self-heal stale accumulator entries:
         # If a token has no observable position/open BUY orders for a long time,
@@ -3539,7 +3536,7 @@ def main() -> None:
                     legacy_desired = float(cfg.get("follow_ratio") or 0.0) * (
                         t_now or 0.0
                     )
-                    logger.info(
+                    logger.debug(
                         "[DBG] token_id=%s missing=%s missing_streak=%s t_now=%s t_last=%s "
                         "my_shares=%s open_orders_count=%s",
                         token_id,
@@ -3550,7 +3547,7 @@ def main() -> None:
                         my_shares,
                         open_orders_count,
                     )
-                    logger.info("[DBG] token_id=%s legacy_desired=%s", token_id, legacy_desired)
+                    logger.debug("[DBG] token_id=%s legacy_desired=%s", token_id, legacy_desired)
                     if should_log_missing:
                         missing_notice_tokens.add(token_id)
                 if open_orders_count > 0 and missing and (
@@ -3669,25 +3666,29 @@ def main() -> None:
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
                     else:
-                        ob = _get_orderbook_checked(token_id)
-                        if ob is None:
-                            closed_now = _record_orderbook_empty(
-                                state,
-                                token_id,
-                                logger,
-                                cfg,
-                                now_ts,
-                            )
-                            if closed_now:
-                                logger.info(
-                                    "[SKIP] closed_by_orderbook_empty token_id=%s",
-                                    token_id,
-                                )
-                            continue
+                        ob = get_orderbook(clob_client, token_id, api_timeout_sec)
                         orderbooks[token_id] = ob
 
                     best_bid = ob.get("best_bid")
                     best_ask = ob.get("best_ask")
+                    if best_bid is not None and best_ask is not None and best_bid > best_ask:
+                        logger.warning(
+                            "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
+                            token_id,
+                            best_bid,
+                            best_ask,
+                        )
+                        orderbooks.pop(token_id, None)
+                        ob = get_orderbook(clob_client, token_id, api_timeout_sec)
+                        orderbooks[token_id] = ob
+                        best_bid = ob.get("best_bid")
+                        best_ask = ob.get("best_ask")
+                        if (
+                            best_bid is not None
+                            and best_ask is not None
+                            and best_bid > best_ask
+                        ):
+                            continue
                     ref_price = _mid_price(ob)
                     if ref_price is None or ref_price <= 0:
                         logger.warning(
@@ -4531,36 +4532,25 @@ def main() -> None:
             if token_id in orderbooks:
                 ob = orderbooks[token_id]
             else:
-                ob = _get_orderbook_checked(token_id)
-                if ob is None:
-                    closed_now = _record_orderbook_empty(
-                        state,
-                        token_id,
-                        logger,
-                        cfg,
-                        now_ts,
-                    )
-                    if closed_now:
-                        logger.info(
-                            "[SKIP] closed_by_orderbook_empty token_id=%s",
-                            token_id,
-                        )
-                    dedup_key = f"NOOP:{token_id}:orderbook_empty"
-                    should_log, suppressed = _log_dedup.should_log(dedup_key)
-                    if should_log:
-                        if suppressed > 0:
-                            logger.info(
-                                "[NOOP] token_id=%s reason=orderbook_empty (suppressed %d)",
-                                token_id,
-                                suppressed,
-                            )
-                        else:
-                            logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
-                    continue
+                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
                 orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
+            if best_bid is not None and best_ask is not None and best_bid > best_ask:
+                logger.warning(
+                    "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
+                    token_id,
+                    best_bid,
+                    best_ask,
+                )
+                orderbooks.pop(token_id, None)
+                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
+                orderbooks[token_id] = ob
+                best_bid = ob.get("best_bid")
+                best_ask = ob.get("best_ask")
+                if best_bid is not None and best_ask is not None and best_bid > best_ask:
+                    continue
             ref_price = _mid_price(ob)
             if ref_price is None or ref_price <= 0:
                 logger.warning(
