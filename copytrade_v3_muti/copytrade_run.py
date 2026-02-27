@@ -126,6 +126,7 @@ _REPLAY_BOOT_MODES = {
     "replay_actions",
     "replay",
 }
+_DEFAULT_BOOT_REPLAY_WINDOW_SEC = 86400
 
 
 def _state_path_for_target(state_path: Path, target_address: str) -> Path:
@@ -205,7 +206,7 @@ def _shorten_address(address: str) -> str:
 
 def _is_replay_mode(cfg: Dict[str, Any]) -> bool:
     mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-    return mode in _REPLAY_BOOT_MODES
+    return mode in _REPLAY_BOOT_MODES or mode == "baseline_only"
 
 
 def _get_actions_replay_window_sec(cfg: Dict[str, Any], is_replay_mode: Optional[bool] = None) -> int:
@@ -213,11 +214,11 @@ def _get_actions_replay_window_sec(cfg: Dict[str, Any], is_replay_mode: Optional
         is_replay_mode = _is_replay_mode(cfg)
     raw = cfg.get("actions_replay_window_sec")
     if raw is None or raw == "":
-        return 86400 if is_replay_mode else 600
+        return _DEFAULT_BOOT_REPLAY_WINDOW_SEC if is_replay_mode else 600
     try:
         return max(0, int(raw))
     except (TypeError, ValueError):
-        return 86400 if is_replay_mode else 600
+        return _DEFAULT_BOOT_REPLAY_WINDOW_SEC if is_replay_mode else 600
 
 
 def _get_replay_floor_ms(cfg: Dict[str, Any], state: Dict[str, Any]) -> int:
@@ -1769,6 +1770,8 @@ def main() -> None:
         my_positions_force_http = bool(cfg.get("my_positions_force_http", False))
         actions_page_size = int(cfg.get("actions_page_size") or 300)
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
+        if actions_max_offset > 3000:
+            actions_max_offset = 3000
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
         config_reload_sec = int(cfg.get("config_reload_sec") or 600)
         max_resolve_target_positions_per_loop = int(
@@ -1914,6 +1917,19 @@ def main() -> None:
         cfg["my_address"] = current_my_address
         cfg["follow_ratio"] = acct_ctx.follow_ratio
         args.state = str(acct_ctx.state_path)
+
+        # Ensure per-account state has run_start_ms and cursors initialized.
+        if int(state.get("run_start_ms") or 0) <= 0:
+            state["run_start_ms"] = run_start_ms
+        replay_floor_ms = _get_replay_floor_ms(cfg, state)
+        if int(state.get("target_actions_cursor_ms") or 0) <= 0:
+            state["target_actions_cursor_ms"] = replay_floor_ms
+        if int(state.get("target_actions_cursor_ms") or 0) < replay_floor_ms:
+            state["target_actions_cursor_ms"] = replay_floor_ms
+        if int(state.get("target_trades_cursor_ms") or 0) <= 0:
+            state["target_trades_cursor_ms"] = replay_floor_ms
+        if int(state.get("target_trades_cursor_ms") or 0) < replay_floor_ms:
+            state["target_trades_cursor_ms"] = replay_floor_ms
 
         # Apply per-account config overrides
         if acct_ctx.max_notional_per_token is not None:
@@ -2534,6 +2550,8 @@ def main() -> None:
             continue
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+        if boot_sync_mode == "baseline_only":
+            boot_sync_mode = "baseline_replay"
         fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
         boot_run_start_ms = int(state.get("boot_run_start_ms") or 0)
         run_start_ms = int(state.get("run_start_ms") or 0)
