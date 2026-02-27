@@ -486,13 +486,64 @@ def reconcile_one(
         and not small_taker_override
     ):
         if abs_delta + 1e-12 < effective_min_shares:
-            logger.debug(
-                "[MIN_BUMP_SKIP] token_id=%s abs_delta=%s < min=%s",
-                token_id,
-                abs_delta,
-                effective_min_shares,
-            )
-            return actions
+            # Completion tolerance: allow final top-up if overshoot <= 0.3 USD.
+            completion_tol_usd = 0.3
+            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+            effective_min_usd = max(1.0, min_order_usd, effective_min_shares * price)
+            if min_order_shares > 0:
+                effective_min_usd = max(effective_min_usd, min_order_shares * price)
+            gap_usd = abs_delta * price
+            overshoot = effective_min_usd - gap_usd
+            if gap_usd <= completion_tol_usd + 1e-9:
+                logger.info(
+                    "[COMPLETE_NEAR] token_id=%s gap_usd=%s tol=%s",
+                    token_id,
+                    gap_usd,
+                    completion_tol_usd,
+                )
+                return actions
+            if overshoot <= completion_tol_usd + 1e-9:
+                bumped_size = effective_min_usd / price
+                if cap_shares_remaining is not None:
+                    if cap_shares_remaining <= 0:
+                        logger.debug(
+                            "[MIN_BUMP_SKIP] token_id=%s no_remaining cap_shares_remaining=%s "
+                            "planned_notional=%s my_shares=%s price=%s",
+                            token_id,
+                            cap_shares_remaining,
+                            planned_token_notional,
+                            my_shares,
+                            price,
+                        )
+                        return actions
+                    bumped_size = min(bumped_size, cap_shares_remaining)
+                if bumped_size + 1e-12 < effective_min_shares:
+                    logger.debug(
+                        "[MIN_BUMP_SKIP] token_id=%s bumped_below_min bumped=%s min=%s",
+                        token_id,
+                        bumped_size,
+                        effective_min_shares,
+                    )
+                    return actions
+                logger.info(
+                    "[MIN_BUMP_FINAL] token_id=%s gap_usd=%s min_usd=%s overshoot=%s",
+                    token_id,
+                    gap_usd,
+                    effective_min_usd,
+                    overshoot,
+                )
+                size = bumped_size
+            else:
+                logger.debug(
+                    "[MIN_BUMP_SKIP] token_id=%s abs_delta=%s < min=%s gap_usd=%s overshoot=%s",
+                    token_id,
+                    abs_delta,
+                    effective_min_shares,
+                    gap_usd,
+                    overshoot,
+                )
+                return actions
         bumped_size = effective_min_shares
         if abs_delta > 0:
             bumped_size = min(bumped_size, abs_delta)
