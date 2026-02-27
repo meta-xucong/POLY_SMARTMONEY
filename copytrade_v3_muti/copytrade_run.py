@@ -2214,6 +2214,19 @@ def main() -> None:
                         continue
                 break
             seen_action_ids = state.setdefault(seen_actions_key, [])
+            # Replay mode: allow historical actions to be re-processed once per replay window.
+            if replay_from_ms > 0:
+                replay_reset_key = f"{seen_actions_key}_replay_reset_ms"
+                if int(state.get(replay_reset_key) or 0) != replay_from_ms:
+                    if seen_action_ids:
+                        logger.info(
+                            "[ACTIONS] replay reset seen ids key=%s count=%s replay_from_ms=%s",
+                            seen_actions_key,
+                            len(seen_action_ids),
+                            replay_from_ms,
+                        )
+                    seen_action_ids.clear()
+                    state[replay_reset_key] = replay_from_ms
             seen_action_set = {str(item) for item in seen_action_ids}
             filtered_actions: list[Dict[str, object]] = []
             for action in actions_list:
