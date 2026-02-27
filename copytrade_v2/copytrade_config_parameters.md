@@ -24,6 +24,7 @@
 - `poll_interval_sec`: 正常状态轮询间隔（秒）。
 - `poll_interval_sec_exiting`: 退出/减仓状态轮询间隔（秒）。
 - `config_reload_sec`: 配置文件热加载间隔（秒）。
+- `replay_on_boot_hours`: 重启时回放窗口（小时），用于回补目标账户近期动作，默认 24。
 - `size_threshold`: 规模阈值，小于该值的变动可忽略。
 - `target_positions_refresh_sec`: 目标仓位刷新间隔（秒）。
 - `log_positions_cache_headers`: 是否记录目标仓位请求的缓存响应头。

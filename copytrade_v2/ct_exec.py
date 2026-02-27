@@ -1061,6 +1061,23 @@ def apply_actions(
 
                 if side_u == "BUY":
                     amount = abs(size) * price
+                    if cfg is not None and price > 0:
+                        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+                        min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+                        min_amount = min_order_usd
+                        if min_order_shares > 0:
+                            min_amount = max(min_amount, min_order_shares * price)
+                        if min_amount > 0 and amount + 1e-12 < min_amount:
+                            old_amount = amount
+                            amount = min_amount
+                            size_for_record = amount / price
+                            logger.info(
+                                "[ADJUST_MIN_USD] token_id=%s old=%s new=%s price=%s",
+                                str(action.get("token_id")),
+                                old_amount,
+                                amount,
+                                price,
+                            )
                 else:
                     amount = abs(size)
                 taker_order_type = "FAK"
