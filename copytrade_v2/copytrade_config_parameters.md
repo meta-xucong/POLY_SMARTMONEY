@@ -24,7 +24,7 @@
 - `poll_interval_sec`: 正常状态轮询间隔（秒）。
 - `poll_interval_sec_exiting`: 退出/减仓状态轮询间隔（秒）。
 - `config_reload_sec`: 配置文件热加载间隔（秒）。
-- `replay_on_boot_hours`: 重启时回放窗口（小时），用于回补目标账户近期动作，默认 24。
+- `replay_on_boot_hours`: 重启时回放窗口（小时），用于回补目标账户近期动作，默认 24。启用时会自动扩大 `actions_replay_window_sec`，并在 `boot_sync_mode=baseline_only` 时改为回放模式。
 - `size_threshold`: 规模阈值，小于该值的变动可忽略。
 - `target_positions_refresh_sec`: 目标仓位刷新间隔（秒）。
 - `log_positions_cache_headers`: 是否记录目标仓位请求的缓存响应头。
@@ -46,7 +46,7 @@
 - `dust_exit_eps`: 视为尾仓/粉尘仓位的阈值。
 - `max_order_usd`: 单笔最大下单金额（USD）。
 - `max_position_usd_per_token`: 单个 token 最大持仓金额（USD）。
-- `boot_sync_mode`: 启动同步模式（如 `baseline_only`）。
+- `boot_sync_mode`: 启动同步模式（如 `baseline_only`）。当 `replay_on_boot_hours>0` 时会被自动覆盖为回放模式。
 - `fresh_boot_on_start`: 启动时是否重新进行首次同步。
 - `ignore_boot_tokens`: 启动同步时是否忽略 token。
 - `ignore_boot_tokens_scope`: 忽略 token 的范围（如 `probe_only`）。

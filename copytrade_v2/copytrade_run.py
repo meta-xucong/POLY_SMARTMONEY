@@ -998,6 +998,21 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
+    replay_override: Dict[str, Any] = {}
+    replay_hours = float(cfg.get("replay_on_boot_hours") or 0)
+    if replay_hours > 0:
+        replay_window_sec = int(replay_hours * 3600)
+        current_window_sec = int(cfg.get("actions_replay_window_sec") or 0)
+        if current_window_sec < replay_window_sec:
+            cfg["actions_replay_window_sec"] = replay_window_sec
+            replay_override["actions_replay_window_sec"] = (
+                current_window_sec,
+                replay_window_sec,
+            )
+        boot_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+        if boot_mode == "baseline_only":
+            cfg["boot_sync_mode"] = "replay"
+            replay_override["boot_sync_mode"] = boot_mode
     arg_overrides: Dict[str, Any] = {}
     for key in (
         "target_address",
@@ -1042,6 +1057,12 @@ def main() -> None:
         args.state = orig_state_path
 
     logger = _setup_logging(cfg, cfg["target_address"], Path(args.config).parent)
+    if replay_override:
+        logger.info(
+            "[CFG] replay_on_boot_hours=%s overrides=%s",
+            replay_hours,
+            replay_override,
+        )
     if args.state != orig_state_path:
         logger.info("[STATE] per-target state: %s -> %s", orig_state_path, args.state)
 
