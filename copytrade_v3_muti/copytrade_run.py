@@ -2466,6 +2466,25 @@ def main() -> None:
             cache_bust_mode=target_cache_bust_mode,
             header_keys=header_keys,
         )
+        # Verify positions belong to the expected profile/proxy wallet.
+        proxy_wallets = set()
+        for pos in my_pos:
+            raw = pos.get("raw") or {}
+            if isinstance(raw, dict):
+                proxy_wallet = raw.get("proxyWallet") or raw.get("proxy_wallet")
+                if proxy_wallet:
+                    proxy_wallets.add(str(proxy_wallet).lower())
+        if proxy_wallets:
+            my_addr_l = str(current_my_address or "").lower()
+            if my_addr_l and my_addr_l not in proxy_wallets:
+                my_info["proxy_mismatch"] = True
+                my_info["proxy_wallets"] = sorted(proxy_wallets)
+                logger.warning(
+                    "[WARN] my_positions proxy_wallet mismatch my=%s proxy_wallets=%s -> ignore positions",
+                    current_my_address,
+                    my_info["proxy_wallets"],
+                )
+                my_pos = []
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
             logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
@@ -2496,10 +2515,7 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
-        # Risk source for "my positions": configurable to avoid inflated baseline
-        # when closed/expired markets remain in positions API.
         risk_use_unfiltered_positions = bool(cfg.get("risk_use_unfiltered_positions", False))
-        my_pos_for_risk_snapshot = list(my_pos)
 
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
@@ -2511,6 +2527,41 @@ def main() -> None:
                     removed_my,
                     risk_use_unfiltered_positions,
                 )
+
+        # Filter my positions by market tradeable status to avoid stale/closed residue.
+        if skip_closed and my_pos:
+            status_cache = state.setdefault("market_status_cache", {})
+            my_token_ids = []
+            for pos in my_pos:
+                token_id = pos.get("token_id") or _extract_token_id_from_raw(pos.get("raw") or {})
+                if token_id:
+                    my_token_ids.append(str(token_id))
+            if my_token_ids:
+                need_query = []
+                for token_id in my_token_ids:
+                    cached = status_cache.get(token_id)
+                    if not cached or now_ts - int(cached.get("ts") or 0) >= refresh_sec:
+                        need_query.append(token_id)
+                if need_query:
+                    meta_map = gamma_fetch_markets_by_clob_token_ids(need_query)
+                    for token_id in need_query:
+                        meta = meta_map.get(token_id)
+                        tradeable = market_tradeable_state(meta)
+                        status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
+                before = len(my_pos)
+                def _tradeable_for_pos(pos):
+                    token_id = pos.get("token_id") or _extract_token_id_from_raw(pos.get("raw") or {})
+                    if not token_id:
+                        return True
+                    cached = status_cache.get(str(token_id)) or {}
+                    return cached.get("tradeable") is not False
+                my_pos = [pos for pos in my_pos if _tradeable_for_pos(pos)]
+                filtered = before - len(my_pos)
+                if filtered > 0:
+                    logger.info("[SKIP] my_positions nontradeable filtered=%s", filtered)
+
+        # Risk source snapshot for "my positions" after filtering.
+        my_pos_for_risk_snapshot = list(my_pos)
 
         should_log_heartbeat = has_new_actions or (
             now_ts - last_heartbeat_ts >= heartbeat_interval_sec
@@ -2759,49 +2810,6 @@ def main() -> None:
                 state["last_mid_price_update_ts"] = now_ts
             my_by_token_id[tid] = size
 
-        # Build risk baseline from selected source (filtered by default).
-        my_pos_for_risk = my_pos_for_risk_snapshot if risk_use_unfiltered_positions else my_pos
-        my_by_token_id_for_risk: Dict[str, float] = {}
-        for pos in my_pos_for_risk:
-            token_key = str(pos.get("token_key") or "")
-            size = float(pos.get("size") or 0.0)
-            token_id = pos.get("token_id") or None
-            if token_key:
-                token_id = token_id or token_map.get(token_key)
-            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
-
-            # CRITICAL FIX: Add resolver fallback for risk baseline (same as my_by_token_id)
-            # This prevents position limit breaches when API returns positions without token_id
-            if not token_id and token_key:
-                fail_ts = resolver_fail_cache.get(token_key)
-                if (
-                    fail_ts
-                    and resolver_fail_cooldown_sec > 0
-                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
-                ):
-                    logger.warning(
-                        "[RISK] skip position due to recent resolver fail: %s (cooldown)",
-                        token_key,
-                    )
-                    continue
-                try:
-                    token_id = resolve_token_id(token_key, pos, token_map)
-                    logger.debug("[RISK] resolved token_id via resolver: %s -> %s", token_key, token_id)
-                except Exception as exc:
-                    logger.warning("[RISK] resolver fail for position: %s -> %s", token_key, exc)
-                    resolver_fail_cache[token_key] = now_ts
-                    continue
-
-            if not token_id:
-                logger.warning(
-                    "[RISK] skip position: missing token_id token_key=%s size=%.2f",
-                    token_key,
-                    size,
-                )
-                continue
-            tid = str(token_id)
-            my_by_token_id_for_risk[tid] = size
-
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
         if actions_list and actions_missing_ratio >= missing_ratio_threshold:
@@ -2994,6 +3002,53 @@ def main() -> None:
                 cached = status_cache.get(token_id) or {}
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
+
+        # Build risk baseline from selected source (filtered by default).
+        # Exclude tokens that are known inactive/closed to avoid inflated risk baseline.
+        my_pos_for_risk = my_pos_for_risk_snapshot if risk_use_unfiltered_positions else my_pos
+        inactive_for_risk = set(active_ignored) if skip_closed else set()
+        my_by_token_id_for_risk: Dict[str, float] = {}
+        for pos in my_pos_for_risk:
+            token_key = str(pos.get("token_key") or "")
+            size = float(pos.get("size") or 0.0)
+            token_id = pos.get("token_id") or None
+            if token_key:
+                token_id = token_id or token_map.get(token_key)
+            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+
+            # CRITICAL FIX: Add resolver fallback for risk baseline (same as my_by_token_id)
+            # This prevents position limit breaches when API returns positions without token_id
+            if not token_id and token_key:
+                fail_ts = resolver_fail_cache.get(token_key)
+                if (
+                    fail_ts
+                    and resolver_fail_cooldown_sec > 0
+                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                ):
+                    logger.warning(
+                        "[RISK] skip position due to recent resolver fail: %s (cooldown)",
+                        token_key,
+                    )
+                    continue
+                try:
+                    token_id = resolve_token_id(token_key, pos, token_map)
+                    logger.debug("[RISK] resolved token_id via resolver: %s -> %s", token_key, token_id)
+                except Exception as exc:
+                    logger.warning("[RISK] resolver fail for position: %s -> %s", token_key, exc)
+                    resolver_fail_cache[token_key] = now_ts
+                    continue
+
+            if not token_id:
+                logger.warning(
+                    "[RISK] skip position: missing token_id token_key=%s size=%.2f",
+                    token_key,
+                    size,
+                )
+                continue
+            tid = str(token_id)
+            if tid in inactive_for_risk:
+                continue
+            my_by_token_id_for_risk[tid] = size
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
@@ -3929,7 +3984,7 @@ def main() -> None:
                                         act["size"] = size
                                         order_notional = acc_available
                                         logger.warning(
-                                            "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                            "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
                                             token_id,
                                             old_usd,
                                             acc_available,
@@ -3943,7 +3998,7 @@ def main() -> None:
                                     else:
                                         # Available amount is below minimum order size
                                         logger.warning(
-                                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
+                                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_total=%s is_lowp=%s reason=%s",
                                             token_id,
                                             order_notional,
                                             acc_current,
@@ -3960,13 +4015,13 @@ def main() -> None:
                                 else:
                                     # No room available
                                     logger.warning(
-                                        "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                        "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
                                         token_id,
                                         order_notional,
                                         acc_current,
                                         local_accumulator_delta,
-                                        max_per_token,
-                                        planned_token_notional_for_acc,
+                                        max_total,
+                                        planned_total_notional,
                                         is_lowp,
                                         acc_reason,
                                     )
@@ -4961,7 +5016,7 @@ def main() -> None:
                                 act["size"] = size
                                 order_notional = acc_available
                                 logger.warning(
-                                    "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                    "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
                                     token_id,
                                     old_usd,
                                     acc_available,
@@ -4975,7 +5030,7 @@ def main() -> None:
                             else:
                                 # Available amount is below minimum order size
                                 logger.warning(
-                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
+                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_total=%s is_lowp=%s reason=%s",
                                     token_id,
                                     order_notional,
                                     acc_current,
@@ -4992,13 +5047,13 @@ def main() -> None:
                         else:
                             # No room available
                             logger.warning(
-                                "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
+                                "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
                                 token_id,
                                 order_notional,
                                 acc_current,
                                 local_accumulator_delta,
-                                max_per_token,
-                                planned_token_notional_for_acc,
+                                max_total,
+                                planned_total_notional,
                                 is_lowp,
                                 acc_reason,
                             )
@@ -5272,4 +5327,43 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # Best-effort fatal error log to a dedicated file for systemd restarts.
+        import json
+        import os
+        import sys
+        import traceback
+        from datetime import datetime
+
+        def _find_config_path(argv: list[str]) -> str | None:
+            for idx, item in enumerate(argv):
+                if item in ("--config",):
+                    if idx + 1 < len(argv):
+                        return argv[idx + 1]
+            return None
+
+        def _resolve_log_dir(config_path: str | None) -> str:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            cfg_path = config_path or os.path.join(base_dir, "copytrade_config.json")
+            try:
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = json.load(f)
+                log_dir = str(cfg.get("log_dir") or "logs")
+            except Exception:
+                log_dir = "logs"
+            if not os.path.isabs(log_dir):
+                log_dir = os.path.join(base_dir, log_dir)
+            return log_dir
+
+        cfg_path = _find_config_path(sys.argv)
+        log_dir = _resolve_log_dir(cfg_path)
+        os.makedirs(log_dir, exist_ok=True)
+        fatal_path = os.path.join(log_dir, "fatal_error.log")
+        with open(fatal_path, "a", encoding="utf-8") as f:
+            f.write("\n=== FATAL ERROR ===\n")
+            f.write(f"time_utc={datetime.utcnow().isoformat()}Z\n")
+            f.write("argv=" + " ".join(sys.argv) + "\n")
+            f.write(traceback.format_exc())
+        raise

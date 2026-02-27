@@ -1147,6 +1147,35 @@ def apply_actions(
         side_u = str(action.get("side") or "").upper()
         price = float(action.get("price") or 0.0)
         size = float(action.get("size") or 0.0)
+        # Ensure minimum buy notional (avoid exchange rejection like "min size: $1").
+        if side_u == "BUY" and cfg is not None and price > 0 and size > 0:
+            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+            max_order_usd = float(cfg.get("max_order_usd") or 0.0)
+            effective_min_usd = max(1.0, min_order_usd)
+            if min_order_shares > 0:
+                effective_min_usd = max(effective_min_usd, min_order_shares * price)
+            order_usd = abs(size) * price
+            if order_usd + 1e-9 < effective_min_usd:
+                if max_order_usd > 0 and effective_min_usd > max_order_usd + 1e-9:
+                    logger.warning(
+                        "[MIN_BUY_SKIP] token_id=%s order_usd=%s min_usd=%s max_usd=%s",
+                        action.get("token_id"),
+                        order_usd,
+                        effective_min_usd,
+                        max_order_usd,
+                    )
+                    continue
+                new_size = effective_min_usd / price
+                size = new_size
+                size_for_record = new_size
+                action["size"] = new_size
+                logger.info(
+                    "[MIN_BUY_BUMP] token_id=%s old_usd=%s new_usd=%s",
+                    action.get("token_id"),
+                    order_usd,
+                    effective_min_usd,
+                )
         try:
             if is_taker:
                 if side_u == "BUY" and cfg is not None and planned_by_token_usd is not None:
@@ -1170,6 +1199,17 @@ def apply_actions(
 
                 if side_u == "BUY":
                     amount = abs(size) * price
+                    # Enforce min notional right before sending to avoid rounding drift.
+                    if cfg is not None and price > 0:
+                        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+                        min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+                        effective_min_usd = max(1.0, min_order_usd)
+                        if min_order_shares > 0:
+                            effective_min_usd = max(effective_min_usd, min_order_shares * price)
+                        if amount + 1e-9 < effective_min_usd:
+                            amount = effective_min_usd
+                            size_for_record = amount / price
+                            action["size"] = size_for_record
                 else:
                     amount = abs(size)
                 taker_order_type = "FAK"
@@ -1188,6 +1228,15 @@ def apply_actions(
                     timeout=api_timeout_sec,
                 )
             else:
+                if side_u == "BUY" and cfg is not None and price > 0:
+                    min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+                    min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+                    effective_min_usd = max(1.0, min_order_usd)
+                    if min_order_shares > 0:
+                        effective_min_usd = max(effective_min_usd, min_order_shares * price)
+                    if abs(size) * price + 1e-9 < effective_min_usd:
+                        size_for_record = effective_min_usd / price
+                        action["size"] = size_for_record
                 response = place_order(
                     client,
                     token_id=str(action.get("token_id")),
