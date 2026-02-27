@@ -1409,6 +1409,22 @@ def _init_account_contexts(
         state.setdefault("resolver_fail_cache", {})
         state.setdefault("closed_token_keys", {})
 
+        # Force replay window on boot to avoid missing recent target actions
+        replay_hours = float(cfg.get("replay_on_boot_hours") or 24)
+        if replay_hours > 0:
+            now_ms = int(time.time() * 1000)
+            replay_from_ms = max(0, now_ms - int(replay_hours * 3600 * 1000))
+            state["actions_replay_from_ms"] = replay_from_ms
+            state["run_start_ms"] = min(int(state.get("run_start_ms") or now_ms), replay_from_ms)
+            state["target_actions_cursor_ms"] = min(
+                int(state.get("target_actions_cursor_ms") or replay_from_ms),
+                replay_from_ms,
+            )
+            state["target_trades_cursor_ms"] = min(
+                int(state.get("target_trades_cursor_ms") or replay_from_ms),
+                replay_from_ms,
+            )
+
         ctx = AccountContext(
             name=acct_name,
             my_address=my_address.strip(),
@@ -1801,19 +1817,22 @@ def main() -> None:
         last_config_mtime = None
     last_heartbeat_ts = 0
 
+    replay_floor_ms = int(state.get("actions_replay_from_ms") or 0)
+    run_floor_ms = int(state.get("run_start_ms") or time.time() * 1000)
+    floor_ms = min(run_floor_ms, replay_floor_ms) if replay_floor_ms > 0 else run_floor_ms
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
-        state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
-    if int(state.get("target_actions_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
-        state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
+        state["target_actions_cursor_ms"] = floor_ms
+    if int(state.get("target_actions_cursor_ms") or 0) < floor_ms:
+        state["target_actions_cursor_ms"] = floor_ms
     # Also enforce floor on target_trades_cursor_ms (used when actions_source="trades")
     if int(state.get("target_trades_cursor_ms") or 0) <= 0:
-        state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
-    if int(state.get("target_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
-        state["target_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
+        state["target_trades_cursor_ms"] = floor_ms
+    if int(state.get("target_trades_cursor_ms") or 0) < floor_ms:
+        state["target_trades_cursor_ms"] = floor_ms
     if int(state.get("my_trades_cursor_ms") or 0) <= 0:
-        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
-    if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
-        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
+        state["my_trades_cursor_ms"] = floor_ms
+    if int(state.get("my_trades_cursor_ms") or 0) < floor_ms:
+        state["my_trades_cursor_ms"] = floor_ms
     if int(state.get("my_trades_unreliable_until") or 0) < 0:
         state["my_trades_unreliable_until"] = 0
 
@@ -2962,6 +2981,59 @@ def main() -> None:
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
 
+        def _ensure_tradeable(token_id: str) -> bool:
+            if not skip_closed:
+                return True
+            cached = status_cache.get(token_id) or {}
+            if cached.get("tradeable") is False:
+                _ensure_long_ignore(token_id, cached.get("meta"))
+                return False
+            cached_ts = int(cached.get("ts") or 0)
+            if cached_ts and (now_ts - cached_ts) < refresh_sec and cached.get("tradeable") is True:
+                return True
+            meta_map = gamma_fetch_markets_by_clob_token_ids([token_id])
+            meta = meta_map.get(token_id)
+            tradeable = market_tradeable_state(meta)
+            status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
+            if tradeable is False:
+                _ensure_long_ignore(token_id, meta)
+                return False
+            return True
+
+        def _is_valid_book(ob: Dict[str, Optional[float]]) -> bool:
+            bid = ob.get("best_bid")
+            ask = ob.get("best_ask")
+            if bid is None or ask is None:
+                return False
+            if bid <= 0 or ask <= 0:
+                return False
+            if bid >= 1.0 or ask >= 1.0:
+                return False
+            if bid > ask:
+                return False
+            return True
+
+        def _get_orderbook_checked(token_id: str) -> Optional[Dict[str, Optional[float]]]:
+            if not _ensure_tradeable(token_id):
+                logger.info("[SKIP] not_tradeable token_id=%s", token_id)
+                return None
+            last_ob: Optional[Dict[str, Optional[float]]] = None
+            for attempt in range(3):
+                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
+                last_ob = ob
+                if _is_valid_book(ob):
+                    return ob
+                if attempt < 2:
+                    time.sleep(0.2)
+            if last_ob is not None:
+                logger.warning(
+                    "[SKIP_BAD_BOOK] token_id=%s best_bid=%s best_ask=%s",
+                    token_id,
+                    last_ob.get("best_bid"),
+                    last_ob.get("best_ask"),
+                )
+            return None
+
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
         mode = str(cfg.get("order_size_mode") or "fixed_shares").lower()
@@ -3576,29 +3648,25 @@ def main() -> None:
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
                     else:
-                        ob = get_orderbook(clob_client, token_id)
+                        ob = _get_orderbook_checked(token_id)
+                        if ob is None:
+                            closed_now = _record_orderbook_empty(
+                                state,
+                                token_id,
+                                logger,
+                                cfg,
+                                now_ts,
+                            )
+                            if closed_now:
+                                logger.info(
+                                    "[SKIP] closed_by_orderbook_empty token_id=%s",
+                                    token_id,
+                                )
+                            continue
                         orderbooks[token_id] = ob
 
                     best_bid = ob.get("best_bid")
                     best_ask = ob.get("best_ask")
-                    if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                        logger.warning(
-                            "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
-                            token_id,
-                            best_bid,
-                            best_ask,
-                        )
-                        orderbooks.pop(token_id, None)
-                        ob = get_orderbook(clob_client, token_id)
-                        orderbooks[token_id] = ob
-                        best_bid = ob.get("best_bid")
-                        best_ask = ob.get("best_ask")
-                        if (
-                            best_bid is not None
-                            and best_ask is not None
-                            and best_bid > best_ask
-                        ):
-                            continue
                     ref_price = _mid_price(ob)
                     if ref_price is None or ref_price <= 0:
                         logger.warning(
@@ -4442,25 +4510,36 @@ def main() -> None:
             if token_id in orderbooks:
                 ob = orderbooks[token_id]
             else:
-                ob = get_orderbook(clob_client, token_id)
+                ob = _get_orderbook_checked(token_id)
+                if ob is None:
+                    closed_now = _record_orderbook_empty(
+                        state,
+                        token_id,
+                        logger,
+                        cfg,
+                        now_ts,
+                    )
+                    if closed_now:
+                        logger.info(
+                            "[SKIP] closed_by_orderbook_empty token_id=%s",
+                            token_id,
+                        )
+                    dedup_key = f"NOOP:{token_id}:orderbook_empty"
+                    should_log, suppressed = _log_dedup.should_log(dedup_key)
+                    if should_log:
+                        if suppressed > 0:
+                            logger.info(
+                                "[NOOP] token_id=%s reason=orderbook_empty (suppressed %d)",
+                                token_id,
+                                suppressed,
+                            )
+                        else:
+                            logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
+                    continue
                 orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
-            if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                logger.warning(
-                    "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
-                    token_id,
-                    best_bid,
-                    best_ask,
-                )
-                orderbooks.pop(token_id, None)
-                ob = get_orderbook(clob_client, token_id)
-                orderbooks[token_id] = ob
-                best_bid = ob.get("best_bid")
-                best_ask = ob.get("best_ask")
-                if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                    continue
             ref_price = _mid_price(ob)
             if ref_price is None or ref_price <= 0:
                 logger.warning(
