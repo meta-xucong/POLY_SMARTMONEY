@@ -2895,99 +2895,13 @@ def main() -> None:
         actions_unreliable = actions_unreliable_until > now_ts
         reduce_reconcile = ((not actions_list) and (not actions_unreliable)) or lag_high
         if reduce_reconcile:
-            recent_event_sec = int(cfg.get("reconcile_recent_event_sec") or 600)
-            cutoff_ts = now_ts - max(recent_event_sec, 0)
-            reduced_set: Set[str] = set(state.get("open_orders", {}).keys())
-            # IMPORTANT: In actions_empty mode, another strategy on the same wallet
-            # can inject unrelated positions (different markets/token domains) into
-            # my_by_token_id. If we blindly include all of them, reduce_reconcile
-            # spends budget on foreign tokens and repeatedly triggers missing_streak
-            # freezes, starving actual copytrade tokens.
-            #
-            # Keep behavior unchanged for lag_high path; only filter on true
-            # actions_empty mode and only when token has no target linkage.
             reason = "lag_high" if lag_high else "actions_empty"
-            if reason == "actions_empty":
-                target_linked_tokens: Set[str] = set(str(tid) for tid in target_shares_now_by_token_id.keys())
-                target_linked_tokens.update(str(tid) for tid in state.get("target_last_shares", {}).keys())
-                target_linked_tokens.update(str(tid) for tid in state.get("topic_state", {}).keys())
-                for _tid, _ts in state.get("target_last_event_ts", {}).items():
-                    try:
-                        if int(_ts or 0) >= cutoff_ts:
-                            target_linked_tokens.add(str(_tid))
-                    except Exception:
-                        continue
-                _my_added = 0
-                _my_filtered = 0
-                for _tid in my_by_token_id.keys():
-                    _tid_s = str(_tid)
-                    if _tid_s in target_linked_tokens:
-                        reduced_set.add(_tid_s)
-                        _my_added += 1
-                    else:
-                        _my_filtered += 1
-                if _my_filtered > 0:
-                    logger.info(
-                        "[SAFE] %s filtered_external_my_tokens kept=%s filtered=%s",
-                        reason,
-                        _my_added,
-                        _my_filtered,
-                    )
-            else:
-                reduced_set.update(my_by_token_id)
-            reduced_set.update(has_buy_by_token.keys())
-            reduced_set.update(has_sell_by_token.keys())
-            for token_id, ts in state.get("target_last_event_ts", {}).items():
-                try:
-                    if int(ts or 0) >= cutoff_ts:
-                        reduced_set.add(str(token_id))
-                except Exception:
-                    continue
-            for action in actions_list:
-                token_id = action.get("token_id")
-                if token_id:
-                    reduced_set.add(str(token_id))
-
-            # ----------------------------------------------------------
-            # FIX: When reduce_reconcile triggers (actions_empty OR
-            # lag_high), preserve target tokens that we don't yet hold
-            # and have no open orders for.  Without this, new target
-            # positions are invisible to the reduced reconcile set.
-            # Applies to both reasons because lag_high can co-occur
-            # with an inactive target (stale cursor), producing the
-            # same symptom as actions_empty.
-            # Capped at 20 tokens to prevent extreme fan-out.
-            # ----------------------------------------------------------
-            _open_orders_set = set(state.get("open_orders", {}).keys())
-            _new_target_tokens: list[str] = []
-            for _tid, _tshares in target_shares_now_by_token_id.items():
-                _tid_s = str(_tid)
-                try:
-                    if float(_tshares) > 0 and _tid_s not in my_by_token_id and _tid_s not in _open_orders_set:
-                        _new_target_tokens.append(_tid_s)
-                except (ValueError, TypeError):
-                    continue
-            _cap = 20
-            for _tid_s in _new_target_tokens[:_cap]:
-                reduced_set.add(_tid_s)
-            if _new_target_tokens:
-                logger.info(
-                    "[SAFE] %s backfill new_target_tokens=%s (capped=%s) added=%s",
-                    reason,
-                    len(_new_target_tokens),
-                    _cap,
-                    min(len(_new_target_tokens), _cap),
-                )
-
-            reconcile_set = reduced_set
             logger.info(
-                "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s actions_unreliable=%s",
+                "[SAFE] %s reduce_reconcile disabled: keep full token set (actions=%s actions_unreliable=%s lag_ms=%s)",
                 reason,
-                len(reconcile_set),
-                recent_event_sec,
-                lag_ms,
                 len(actions_list),
                 actions_unreliable,
+                lag_ms,
             )
 
         ignored = state["ignored_tokens"]
