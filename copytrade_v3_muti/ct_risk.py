@@ -11,6 +11,7 @@ def accumulator_check(
     side: Optional[str] = None,
     local_delta: float = 0.0,
     planned_token_notional: Optional[float] = None,
+    planned_total_notional: Optional[float] = None,
 ) -> Tuple[bool, str, float]:
     """
     First line of defense: check local buy notional accumulator.
@@ -32,46 +33,34 @@ def accumulator_check(
     if side_u != "BUY":
         return True, "ok", float("inf")
 
-    max_per_token = float(cfg.get("max_notional_per_token") or 0)
-    max_position_per_token = float(cfg.get("max_position_usd_per_token") or 0)
+    max_total = float(cfg.get("accumulator_max_total_usd") or 0)
 
     accumulator = state.get("buy_notional_accumulator")
-    if not isinstance(accumulator, dict):
-        accumulator_usd = 0.0
-    else:
-        token_acc = accumulator.get(token_id)
-        if not isinstance(token_acc, dict):
-            accumulator_usd = 0.0
-        else:
-            accumulator_usd = float(token_acc.get("usd", 0.0))
+    accumulator_total_usd = 0.0
+    if isinstance(accumulator, dict):
+        for acc_data in accumulator.values():
+            if isinstance(acc_data, dict):
+                accumulator_total_usd += float(acc_data.get("usd", 0.0))
 
     # CRITICAL: Use actual position value if provided, otherwise use accumulator.
     # To prevent accumulator bypass when planned notional is temporarily missing,
     # use the larger of (planned, accumulator) as the baseline.
     # This still allows capacity to recover after sells/claims reduce holdings
     # while avoiding repeated buys when positions fail to sync.
-    if planned_token_notional is not None:
-        planned_current = float(planned_token_notional)
-        effective_current = max(planned_current, accumulator_usd) + local_delta
+    if planned_total_notional is not None:
+        effective_current = float(planned_total_notional) + local_delta
     else:
         # Fallback to accumulator only (legacy behavior)
-        effective_current = accumulator_usd + local_delta
+        effective_current = accumulator_total_usd + local_delta
 
-    # Check limits and calculate available notional
-    if max_per_token > 0:
-        available = max_per_token - effective_current
+    # Check limits and calculate available notional (global total)
+    if max_total > 0:
+        available = max_total - effective_current
         if available <= 0:
-            return False, "accumulator_max_notional_per_token", 0.0
+            return False, "accumulator_max_total_usd", 0.0
         if order_notional > available:
             # Order exceeds limit, but some room is available
-            return False, "accumulator_max_notional_per_token", available
-
-    if max_position_per_token > 0:
-        available = max_position_per_token - effective_current
-        if available <= 0:
-            return False, "accumulator_max_position_usd_per_token", 0.0
-        if order_notional > available:
-            return False, "accumulator_max_position_usd_per_token", available
+            return False, "accumulator_max_total_usd", available
 
     # Order is within limits
     return True, "ok", float("inf")

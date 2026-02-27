@@ -3903,16 +3903,17 @@ def main() -> None:
                                 side=side,
                                 local_delta=local_accumulator_delta,
                                 planned_token_notional=planned_token_notional_for_acc,
+                                planned_total_notional=planned_total_notional,
                             )
                             if not acc_ok:
                                 # Get accumulator actual values for detailed logging
                                 accumulator = state.get("buy_notional_accumulator")
                                 acc_current = 0.0
                                 if isinstance(accumulator, dict):
-                                    token_acc = accumulator.get(token_id)
-                                    if isinstance(token_acc, dict):
-                                        acc_current = float(token_acc.get("usd", 0.0))
-                                max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
+                                    for acc_data in accumulator.values():
+                                        if isinstance(acc_data, dict):
+                                            acc_current += float(acc_data.get("usd", 0.0))
+                                max_total = float(cfg_for_acc.get("accumulator_max_total_usd") or 0)
 
                                 # Try to shrink order to fit within accumulator limit
                                 if acc_available > 0:
@@ -3933,8 +3934,8 @@ def main() -> None:
                                             old_usd,
                                             acc_available,
                                             acc_current,
-                                            max_per_token,
-                                            planned_token_notional_for_acc,
+                                            max_total,
+                                            planned_total_notional,
                                             is_lowp,
                                             acc_reason,
                                         )
@@ -3947,10 +3948,10 @@ def main() -> None:
                                             order_notional,
                                             acc_current,
                                             local_accumulator_delta,
-                                            max_per_token,
+                                            max_total,
                                             acc_available,
                                             effective_min_usd,
-                                            planned_token_notional_for_acc,
+                                            planned_total_notional,
                                             is_lowp,
                                             acc_reason,
                                         )
@@ -4934,16 +4935,17 @@ def main() -> None:
                         side=side,
                         local_delta=local_accumulator_delta,
                         planned_token_notional=planned_token_notional_for_acc,
+                        planned_total_notional=planned_total_notional,
                     )
                     if not acc_ok:
                         # Get accumulator actual values for detailed logging
                         accumulator = state.get("buy_notional_accumulator")
                         acc_current = 0.0
                         if isinstance(accumulator, dict):
-                            token_acc = accumulator.get(token_id)
-                            if isinstance(token_acc, dict):
-                                acc_current = float(token_acc.get("usd", 0.0))
-                        max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
+                            for acc_data in accumulator.values():
+                                if isinstance(acc_data, dict):
+                                    acc_current += float(acc_data.get("usd", 0.0))
+                        max_total = float(cfg_for_acc.get("accumulator_max_total_usd") or 0)
 
                         # Try to shrink order to fit within accumulator limit
                         if acc_available > 0:
@@ -4964,8 +4966,8 @@ def main() -> None:
                                     old_usd,
                                     acc_available,
                                     acc_current,
-                                    max_per_token,
-                                    planned_token_notional_for_acc,
+                                    max_total,
+                                    planned_total_notional,
                                     is_lowp,
                                     acc_reason,
                                 )
@@ -4978,10 +4980,10 @@ def main() -> None:
                                     order_notional,
                                     acc_current,
                                     local_accumulator_delta,
-                                    max_per_token,
+                                    max_total,
                                     acc_available,
                                     effective_min_usd,
-                                    planned_token_notional_for_acc,
+                                    planned_total_notional,
                                     is_lowp,
                                     acc_reason,
                                 )
