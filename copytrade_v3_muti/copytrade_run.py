@@ -2214,18 +2214,17 @@ def main() -> None:
                         continue
                 break
             seen_action_ids = state.setdefault(seen_actions_key, [])
-            # Replay mode: allow historical actions to be re-processed once per replay window.
+            # Replay mode: keep seen ids stable across moving replay windows.
+            # Clearing seen ids here will re-consume historical actions and can amplify positions.
             if replay_from_ms > 0:
                 replay_reset_key = f"{seen_actions_key}_replay_reset_ms"
                 if int(state.get(replay_reset_key) or 0) != replay_from_ms:
-                    if seen_action_ids:
-                        logger.info(
-                            "[ACTIONS] replay reset seen ids key=%s count=%s replay_from_ms=%s",
-                            seen_actions_key,
-                            len(seen_action_ids),
-                            replay_from_ms,
-                        )
-                    seen_action_ids.clear()
+                    logger.info(
+                        "[ACTIONS] replay window moved key=%s keep_seen_ids=%s replay_from_ms=%s",
+                        seen_actions_key,
+                        len(seen_action_ids),
+                        replay_from_ms,
+                    )
                     state[replay_reset_key] = replay_from_ms
             seen_action_set = {str(item) for item in seen_action_ids}
             filtered_actions: list[Dict[str, object]] = []
@@ -2237,6 +2236,9 @@ def main() -> None:
                 seen_action_ids.append(action_id)
                 seen_action_set.add(action_id)
             max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
+            if replay_from_ms > 0:
+                # Replay mode needs a larger dedupe window to avoid evicting still-replayable ids.
+                max_seen = max(max_seen, int(cfg.get("seen_action_ids_cap_replay") or 50000))
             if len(seen_action_ids) > max_seen:
                 del seen_action_ids[:-max_seen]
             actions_list = filtered_actions
@@ -2515,53 +2517,18 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
-        risk_use_unfiltered_positions = bool(cfg.get("risk_use_unfiltered_positions", False))
+        # Always keep an unfiltered snapshot of my positions for position/risk recognition.
+        # Trading-side filtering must not rewrite the account's actual holdings.
+        my_pos_for_risk_snapshot = list(my_pos)
 
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
-            my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
-            if removed_target or removed_my:
+            if removed_target:
                 logger.info(
-                    "[SKIP] closed_positions filtered target=%s my=%s (risk_use_unfiltered_positions=%s)",
+                    "[SKIP] closed_positions filtered target=%s my=%s (my positions kept unfiltered for risk/holdings)",
                     removed_target,
-                    removed_my,
-                    risk_use_unfiltered_positions,
+                    0,
                 )
-
-        # Filter my positions by market tradeable status to avoid stale/closed residue.
-        if skip_closed and my_pos:
-            status_cache = state.setdefault("market_status_cache", {})
-            my_token_ids = []
-            for pos in my_pos:
-                token_id = pos.get("token_id") or _extract_token_id_from_raw(pos.get("raw") or {})
-                if token_id:
-                    my_token_ids.append(str(token_id))
-            if my_token_ids:
-                need_query = []
-                for token_id in my_token_ids:
-                    cached = status_cache.get(token_id)
-                    if not cached or now_ts - int(cached.get("ts") or 0) >= refresh_sec:
-                        need_query.append(token_id)
-                if need_query:
-                    meta_map = gamma_fetch_markets_by_clob_token_ids(need_query)
-                    for token_id in need_query:
-                        meta = meta_map.get(token_id)
-                        tradeable = market_tradeable_state(meta)
-                        status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
-                before = len(my_pos)
-                def _tradeable_for_pos(pos):
-                    token_id = pos.get("token_id") or _extract_token_id_from_raw(pos.get("raw") or {})
-                    if not token_id:
-                        return True
-                    cached = status_cache.get(str(token_id)) or {}
-                    return cached.get("tradeable") is not False
-                my_pos = [pos for pos in my_pos if _tradeable_for_pos(pos)]
-                filtered = before - len(my_pos)
-                if filtered > 0:
-                    logger.info("[SKIP] my_positions nontradeable filtered=%s", filtered)
-
-        # Risk source snapshot for "my positions" after filtering.
-        my_pos_for_risk_snapshot = list(my_pos)
 
         should_log_heartbeat = has_new_actions or (
             now_ts - last_heartbeat_ts >= heartbeat_interval_sec
@@ -2773,9 +2740,9 @@ def main() -> None:
                 len(target_pos),
             )
 
-        # My positions are usually small; still prefer fast-path and fall back to resolver if needed.
+        # Build holdings map from unfiltered snapshot so my_shares reflects real positions.
         my_by_token_id: Dict[str, float] = {}
-        for pos in my_pos:
+        for pos in my_pos_for_risk_snapshot:
             token_key = str(pos.get("token_key") or "")
             size = float(pos.get("size") or 0.0)
 
@@ -3003,9 +2970,9 @@ def main() -> None:
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
 
-        # Build risk baseline from selected source (filtered by default).
+        # Build risk baseline from unfiltered holdings snapshot.
         # Exclude tokens that are known inactive/closed to avoid inflated risk baseline.
-        my_pos_for_risk = my_pos_for_risk_snapshot if risk_use_unfiltered_positions else my_pos
+        my_pos_for_risk = my_pos_for_risk_snapshot
         inactive_for_risk = set(active_ignored) if skip_closed else set()
         my_by_token_id_for_risk: Dict[str, float] = {}
         for pos in my_pos_for_risk:
@@ -5068,6 +5035,67 @@ def main() -> None:
                     planned_total_notional, planned_total_notional_shadow
                 )
                 cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
+
+                # Hard guard (no extra API): when target snapshot is available on BUY signal,
+                # do not let this order push holdings above target-follow cap + one minimum order bump.
+                # Prefer shrinking to allowed size (same style as risk resize) instead of hard block.
+                if side == "BUY" and d_target > 0 and t_now is not None:
+                    target_now_shares = max(0.0, float(t_now))
+                    follow_cap_shares = max(0.0, ratio_buy) * target_now_shares
+                    min_order_usd_guard = float(cfg_for_action.get("min_order_usd") or 0.0)
+                    min_order_shares_guard = float(cfg_for_action.get("min_order_shares") or 0.0)
+                    one_bump_shares = max(
+                        min_order_shares_guard,
+                        (min_order_usd_guard / price) if price > 0 else 0.0,
+                    )
+                    projected_shares = my_shares + abs(size)
+                    hard_cap_shares = follow_cap_shares + one_bump_shares
+                    if projected_shares > hard_cap_shares + eps:
+                        allowed_shares = max(0.0, hard_cap_shares - my_shares)
+                        effective_min_usd_guard = max(
+                            min_order_usd_guard,
+                            (min_order_shares_guard * price) if min_order_shares_guard > 0 else 0.0,
+                        )
+                        allowed_usd_guard = allowed_shares * price
+                        if (
+                            allowed_shares <= eps
+                            or allowed_usd_guard + 1e-9 < effective_min_usd_guard
+                        ):
+                            logger.warning(
+                                "[HARD_CAP_BLOCK] token_id=%s projected=%.6f cap=%.6f "
+                                "(follow=%.6f bump=%.6f my=%.6f size=%.6f t_now=%.6f ratio=%.6f)",
+                                token_id,
+                                projected_shares,
+                                hard_cap_shares,
+                                follow_cap_shares,
+                                one_bump_shares,
+                                my_shares,
+                                abs(size),
+                                target_now_shares,
+                                ratio_buy,
+                            )
+                            blocked_reasons.add("hard_follow_cap")
+                            continue
+
+                        old_size = abs(size)
+                        old_usd = old_size * price
+                        if allowed_shares < old_size * (1 - 1e-9):
+                            size = allowed_shares
+                            act["size"] = size
+                            logger.warning(
+                                "[HARD_CAP_SHRINK] token_id=%s old_usd=%s new_usd=%s "
+                                "old_shares=%s new_shares=%s cap=%.6f my=%.6f t_now=%.6f ratio=%.6f",
+                                token_id,
+                                old_usd,
+                                allowed_usd_guard,
+                                old_size,
+                                size,
+                                hard_cap_shares,
+                                my_shares,
+                                target_now_shares,
+                                ratio_buy,
+                            )
+
                 ok, reason = risk_check(
                     token_key,
                     size,
