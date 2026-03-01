@@ -2902,13 +2902,17 @@ def main() -> None:
         ]
         for token_id in expired_ignored:
             ignored.pop(token_id, None)
-        active_ignored = {
-            token_id
-            for token_id, meta in ignored.items()
-            if isinstance(meta, dict)
-            and meta.get("expires_at")
-            and now_ts < int(meta.get("expires_at") or 0)
-        }
+
+        def _collect_active_ignored() -> Set[str]:
+            return {
+                token_id
+                for token_id, meta in ignored.items()
+                if isinstance(meta, dict)
+                and meta.get("expires_at")
+                and now_ts < int(meta.get("expires_at") or 0)
+            }
+
+        active_ignored = _collect_active_ignored()
         if active_ignored:
             for token_id in sorted(active_ignored):
                 meta = ignored.get(token_id)
@@ -2929,8 +2933,17 @@ def main() -> None:
                 end_date = None
                 if isinstance(meta, dict):
                     end_date = meta.get("end_date") or meta.get("endDate")
-                expires_at = _parse_market_end_ts(meta) or now_ts + 24 * 3600
+                end_ts = _parse_market_end_ts(meta)
+                min_ttl_sec = int(cfg.get("closed_ignore_min_ttl_sec") or 24 * 3600)
+                if min_ttl_sec < 300:
+                    min_ttl_sec = 300
+                expires_at = now_ts + min_ttl_sec
+                if end_ts is not None:
+                    expires_at = max(expires_at, int(end_ts))
                 existing = ignored.get(token_id) if isinstance(ignored.get(token_id), dict) else {}
+                existing_expires = int(existing.get("expires_at") or 0)
+                if existing_expires > expires_at:
+                    expires_at = existing_expires
                 should_log = not existing or not existing.get("logged")
                 ignored[token_id] = {
                     "ts": now_ts,
@@ -2969,6 +2982,12 @@ def main() -> None:
                 cached = status_cache.get(token_id) or {}
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
+
+            # Recompute active ignored after new long_ignore entries were added in this loop.
+            # This prevents closed tokens from leaking into the current risk baseline.
+            active_ignored = _collect_active_ignored()
+            if active_ignored:
+                reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
 
         # Build risk baseline from unfiltered holdings snapshot.
         # Exclude tokens that are known inactive/closed to avoid inflated risk baseline.
