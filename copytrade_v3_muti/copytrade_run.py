@@ -206,7 +206,7 @@ def _shorten_address(address: str) -> str:
 
 def _is_replay_mode(cfg: Dict[str, Any]) -> bool:
     mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-    return mode in _REPLAY_BOOT_MODES or mode == "baseline_only"
+    return mode in _REPLAY_BOOT_MODES
 
 
 def _get_actions_replay_window_sec(cfg: Dict[str, Any], is_replay_mode: Optional[bool] = None) -> int:
@@ -2581,8 +2581,6 @@ def main() -> None:
             continue
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-        if boot_sync_mode == "baseline_only":
-            boot_sync_mode = "baseline_replay"
         fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
         boot_run_start_ms = int(state.get("boot_run_start_ms") or 0)
         run_start_ms = int(state.get("run_start_ms") or 0)
