@@ -591,6 +591,52 @@ def _cfg_bool(value: Any, default: bool = False) -> bool:
     return bool(value)
 
 
+def _book_min_order_shares(
+    client: Any,
+    token_id: str,
+    timeout_sec: Optional[float] = None,
+) -> float:
+    """
+    Read token-level minimum order size from CLOB orderbook payload.
+    This is the authoritative per-market minimum tradable shares threshold.
+    """
+    book_fetcher = getattr(client, "get_order_book", None)
+    if not callable(book_fetcher):
+        return 0.0
+    payload: Any = None
+    try:
+        try:
+            payload = book_fetcher(str(token_id), timeout=timeout_sec)
+        except TypeError:
+            payload = book_fetcher(str(token_id))
+    except Exception:
+        return 0.0
+    if hasattr(payload, "dict"):
+        try:
+            payload = payload.dict()
+        except Exception:
+            pass
+    elif hasattr(payload, "__dict__") and not isinstance(payload, dict):
+        try:
+            payload = dict(payload.__dict__)
+        except Exception:
+            pass
+    if not isinstance(payload, dict):
+        return 0.0
+    try:
+        return max(
+            0.0,
+            float(
+                payload.get("min_order_size")
+                or payload.get("minimum_order_size")
+                or payload.get("minOrderSize")
+                or 0.0
+            ),
+        )
+    except Exception:
+        return 0.0
+
+
 def _collect_target_sell_token_ids(
     cfg: Dict[str, Any],
     data_client: Any,
@@ -693,11 +739,7 @@ def _run_hemostasis_recovery_for_account(
     poll_sec = max(0.2, float(cfg.get("hemostasis_recovery_poll_sec") or 2.0))
     min_shares = max(0.0, float(cfg.get("hemostasis_recovery_min_shares") or 0.0))
     sell_buffer = max(0.0, float(cfg.get("hemostasis_recovery_sell_buffer_shares") or 0.0))
-    min_order_usd_cfg = max(0.0, float(cfg.get("min_order_usd") or 0.0))
-    min_order_usd_effective = max(
-        1.0,
-        max(min_order_usd_cfg, float(cfg.get("hemostasis_recovery_min_trade_usd") or 0.0)),
-    )
+    min_trade_usd_gate = max(0.0, float(cfg.get("hemostasis_recovery_min_trade_usd") or 0.0))
     # If an attempted token still has almost unchanged shares on the next round,
     # treat it as "no progress" and stop retrying during this startup recovery.
     no_progress_eps_shares = max(0.01, float(cfg.get("hemostasis_no_progress_eps_shares") or 0.01))
@@ -729,6 +771,7 @@ def _run_hemostasis_recovery_for_account(
     )
     blocked_tokens: Dict[str, str] = {}
     attempted_shares: Dict[str, float] = {}
+    book_min_shares_cache: Dict[str, float] = {}
 
     for round_idx in range(1, max_rounds + 1):
         my_positions, my_info = fetch_positions_norm(
@@ -825,8 +868,18 @@ def _run_hemostasis_recovery_for_account(
                 if isinstance(skipped, list) and token_id not in skipped:
                     skipped.append(token_id)
                 continue
+            if token_id not in book_min_shares_cache:
+                book_min_shares_cache[token_id] = _book_min_order_shares(
+                    acct_ctx.clob_client,
+                    token_id,
+                    api_timeout_sec,
+                )
+            min_shares_token = float(book_min_shares_cache.get(token_id) or 0.0)
+            if min_shares_token > 0 and sell_shares + 1e-12 < min_shares_token:
+                blocked_tokens[token_id] = "below_book_min_order_shares"
+                continue
             order_usd = abs(sell_shares) * float(best_bid)
-            if order_usd + 1e-9 < min_order_usd_effective:
+            if min_trade_usd_gate > 0 and order_usd + 1e-9 < min_trade_usd_gate:
                 blocked_tokens[token_id] = "below_min_trade_usd"
                 continue
             actions.append(
