@@ -693,9 +693,11 @@ def _run_hemostasis_recovery_for_account(
     poll_sec = max(0.2, float(cfg.get("hemostasis_recovery_poll_sec") or 2.0))
     min_shares = max(0.0, float(cfg.get("hemostasis_recovery_min_shares") or 0.0))
     sell_buffer = max(0.0, float(cfg.get("hemostasis_recovery_sell_buffer_shares") or 0.0))
-    min_order_shares = max(0.0, float(cfg.get("min_order_shares") or 0.0))
     min_order_usd_cfg = max(0.0, float(cfg.get("min_order_usd") or 0.0))
-    min_order_usd_effective = max(1.0, min_order_usd_cfg)
+    min_order_usd_effective = max(
+        1.0,
+        max(min_order_usd_cfg, float(cfg.get("hemostasis_recovery_min_trade_usd") or 0.0)),
+    )
     # If an attempted token still has almost unchanged shares on the next round,
     # treat it as "no progress" and stop retrying during this startup recovery.
     no_progress_eps_shares = max(0.01, float(cfg.get("hemostasis_no_progress_eps_shares") or 0.01))
@@ -823,12 +825,9 @@ def _run_hemostasis_recovery_for_account(
                 if isinstance(skipped, list) and token_id not in skipped:
                     skipped.append(token_id)
                 continue
-            if min_order_shares > 0 and sell_shares + 1e-12 < min_order_shares:
-                blocked_tokens[token_id] = "below_min_order_shares"
-                continue
             order_usd = abs(sell_shares) * float(best_bid)
             if order_usd + 1e-9 < min_order_usd_effective:
-                blocked_tokens[token_id] = "below_min_order_usd"
+                blocked_tokens[token_id] = "below_min_trade_usd"
                 continue
             actions.append(
                 {
