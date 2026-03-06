@@ -18,6 +18,8 @@ MIN_REQUEST_INTERVAL = 1.0 / MAX_REQUESTS_PER_SECOND if MAX_REQUESTS_PER_SECOND 
 BASE_PAGE_SLEEP = float(os.environ.get("SMART_QUERY_BASE_SLEEP", "0.3"))
 HFT_MAX_ACTIVITY_RECORDS = int(os.environ.get("SMART_HFT_MAX_ACTIVITY_RECORDS", "50000"))
 HFT_MAX_UNIQUE_TX = int(os.environ.get("SMART_HFT_MAX_UNIQUE_TX", "20000"))
+# Official Data API /activity historical offset upper bound.
+ACTIVITY_MAX_OFFSET = int(os.environ.get("SMART_ACTIVITY_MAX_OFFSET", "3000"))
 
 
 class RateLimiter:
@@ -393,13 +395,13 @@ class DataApiClient:
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
         page_size: int = 300,
-        max_offset: int = 10000,
+        max_offset: int = ACTIVITY_MAX_OFFSET,
         progress_every: Optional[int] = None,
         return_info: bool = False,
     ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
         url = f"{self.host}/activity"
         page_size = max(1, min(int(page_size), 500))
-        max_offset = max(0, min(int(max_offset), 10000))
+        max_offset = max(0, min(int(max_offset), ACTIVITY_MAX_OFFSET))
         start_ts_sec = _to_timestamp_int(start_time)
         end_ts_sec = _to_timestamp_int(end_time)
         actions: Dict[str, dt.datetime] = {}
@@ -588,12 +590,12 @@ class DataApiClient:
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
         page_size: int = 300,
-        max_offset: int = 10000,
+        max_offset: int = ACTIVITY_MAX_OFFSET,
         return_info: bool = False,
     ) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], Dict[str, object]]:
         url = f"{self.host}/activity"
         page_size = max(1, min(int(page_size), 500))
-        max_offset = max(0, min(int(max_offset), 10000))
+        max_offset = max(0, min(int(max_offset), ACTIVITY_MAX_OFFSET))
         start_ts_sec = _to_timestamp_int(start_time)
         end_ts_sec = _to_timestamp_int(end_time)
         ok = True
