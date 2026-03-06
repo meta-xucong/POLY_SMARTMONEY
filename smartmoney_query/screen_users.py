@@ -7,8 +7,32 @@ import argparse
 import csv
 import datetime as dt
 import json
+import requests
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
+
+
+DEFAULT_POLITICAL_KEYWORDS: List[str] = [
+    "politic",
+    "election",
+    "president",
+    "senate",
+    "congress",
+    "government",
+    "gov",
+    "parliament",
+    "prime minister",
+    "campaign",
+    "vote",
+    "referendum",
+    "policy",
+    "trump",
+    "biden",
+    "harris",
+    "putin",
+    "xi",
+    "zelensky",
+]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -55,6 +79,129 @@ def _parse_datetime(value: str) -> Optional[dt.datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _row_condition_id(row: Dict[str, str]) -> str:
+    return str(row.get("condition_id") or "").strip().lower()
+
+
+def _row_outcome_side(row: Dict[str, str]) -> Optional[str]:
+    outcome_text = _normalize_text(row.get("outcome"))
+    if "yes" in outcome_text:
+        return "yes"
+    if "no" in outcome_text:
+        return "no"
+
+    outcome_index = _parse_float(row.get("outcome_index", ""))
+    if outcome_index is None:
+        return None
+    if int(outcome_index) in (0, 1):
+        return f"idx_{int(outcome_index)}"
+    return None
+
+
+def _compute_political_and_hedge_metrics(
+    closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+    config: Dict[str, Any],
+    official_market_meta_by_condition: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, float]:
+    keyword_values = config.get("political_keywords") or DEFAULT_POLITICAL_KEYWORDS
+    keywords = [
+        _normalize_text(item)
+        for item in keyword_values
+        if isinstance(item, (str, int, float)) and _normalize_text(item)
+    ]
+    if not keywords:
+        keywords = DEFAULT_POLITICAL_KEYWORDS
+
+    official_categories_values = config.get("official_political_categories") or ["politics"]
+    official_categories = [
+        _normalize_text(item)
+        for item in official_categories_values
+        if isinstance(item, (str, int, float)) and _normalize_text(item)
+    ]
+    if not official_categories:
+        official_categories = ["politics"]
+
+    all_rows = list(closed_rows) + list(open_rows)
+    if not all_rows:
+        return {
+            "political_condition_count": 0.0,
+            "total_condition_count": 0.0,
+            "political_condition_ratio": 0.0,
+            "hedge_condition_count": 0.0,
+            "hedge_condition_ratio": 0.0,
+        }
+
+    condition_text: Dict[str, str] = {}
+    condition_sides: Dict[str, set[str]] = {}
+    for row in all_rows:
+        condition_id = _row_condition_id(row)
+        if not condition_id:
+            continue
+        title_text = _normalize_text(row.get("title"))
+        slug_text = _normalize_text(row.get("slug"))
+        merged_text = f"{title_text} {slug_text}".strip()
+        if merged_text:
+            old_text = condition_text.get(condition_id, "")
+            condition_text[condition_id] = f"{old_text} {merged_text}".strip()
+
+        side = _row_outcome_side(row)
+        if side:
+            condition_sides.setdefault(condition_id, set()).add(side)
+
+    condition_ids = sorted(set(condition_text.keys()) | set(condition_sides.keys()))
+    total_conditions = len(condition_ids)
+    if total_conditions <= 0:
+        return {
+            "political_condition_count": 0.0,
+            "total_condition_count": 0.0,
+            "political_condition_ratio": 0.0,
+            "hedge_condition_count": 0.0,
+            "hedge_condition_ratio": 0.0,
+        }
+
+    political_count = 0
+    hedge_count = 0
+    for condition_id in condition_ids:
+        text_blob = condition_text.get(condition_id, "")
+        official_text_blob = ""
+        if isinstance(official_market_meta_by_condition, dict):
+            meta = official_market_meta_by_condition.get(condition_id) or {}
+            if isinstance(meta, dict):
+                official_text_blob = " ".join(
+                    [
+                        _normalize_text(meta.get("category")),
+                        _normalize_text(meta.get("subcategory")),
+                        _normalize_text(meta.get("tag_text")),
+                    ]
+                ).strip()
+
+        if official_text_blob:
+            # Official category/subcategory has higher priority than heuristic text matching.
+            if any(item in official_text_blob for item in official_categories):
+                political_count += 1
+        elif any(keyword in text_blob for keyword in keywords):
+            political_count += 1
+
+        sides = condition_sides.get(condition_id, set())
+        if len(sides) >= 2:
+            hedge_count += 1
+
+    return {
+        "political_condition_count": float(political_count),
+        "total_condition_count": float(total_conditions),
+        "political_condition_ratio": float(political_count) / float(total_conditions),
+        "hedge_condition_count": float(hedge_count),
+        "hedge_condition_ratio": float(hedge_count) / float(total_conditions),
+    }
 
 
 def _read_csv(path: Path) -> List[Dict[str, str]]:
@@ -344,6 +491,8 @@ def _apply_filters(
     _check_min("min_mid_ratio", "mid_ratio")
     _check_min("min_interval_median_minutes", "interval_median_minutes")
     _check_min("min_account_age_days", "account_age_days")
+    _check_min("min_political_condition_ratio", "political_condition_ratio")
+    _check_min("min_stability_score", "stability_score")
     _check_max("max_trades_per_day", "trades_per_day")
     _check_max("max_daily_trades", "max_trades_per_day")
     _check_max("max_p90_cost", "p90_cost")
@@ -351,6 +500,9 @@ def _apply_filters(
     _check_max("max_open_exposure", "open_exposure")
     _check_max("max_tail_high_ratio", "tail_high_ratio")
     _check_max("max_tail_low_ratio", "tail_low_ratio")
+    _check_max("max_hedge_condition_ratio", "hedge_condition_ratio")
+    _check_max("max_max_drawdown_ratio", "max_drawdown_ratio")
+    _check_max("max_pnl_top1_day_share", "pnl_top1_day_share")
 
     max_minute_burst_ratio = filters.get("max_minute_burst_ratio")
     if max_minute_burst_ratio is not None:
@@ -394,6 +546,7 @@ def _build_features(
     summary_row: Optional[Dict[str, str]],
     trade_action_rows: List[Dict[str, str]],
     config: Dict[str, Any],
+    official_market_meta_by_condition: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     flat_eps = float(config.get("flat_pnl_epsilon", 1e-9))
     min_cost_for_roi = float(config.get("min_cost_for_roi", 1.0))
@@ -505,6 +658,13 @@ def _build_features(
             summary_row.get("trade_actions_actions", "")
         )
         leaderboard_month_pnl = _parse_float(summary_row.get("leaderboard_month_pnl", ""))
+
+    market_profile_metrics = _compute_political_and_hedge_metrics(
+        closed_rows=closed_rows,
+        open_rows=open_rows,
+        config=config,
+        official_market_meta_by_condition=official_market_meta_by_condition,
+    )
 
     trades_per_day = None
     if window_days > 0:
@@ -696,6 +856,7 @@ def _build_features(
         "pnl_top1_day_share": pnl_top1_day_share,
         "ulcer_index": ulcer_index,
     }
+    metrics.update(market_profile_metrics)
 
     return metrics
 
@@ -712,6 +873,99 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _row_condition_ids_for_official_lookup(
+    closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+) -> List[str]:
+    condition_ids: set[str] = set()
+    for row in list(closed_rows) + list(open_rows):
+        condition_id = _row_condition_id(row)
+        if condition_id:
+            condition_ids.add(condition_id)
+    return sorted(condition_ids)
+
+
+def _fetch_markets_by_condition_ids(
+    condition_ids: List[str],
+    config: Dict[str, Any],
+) -> Dict[str, Dict[str, str]]:
+    if not condition_ids:
+        return {}
+
+    gamma_api_root = str(config.get("gamma_api_root") or "https://gamma-api.polymarket.com").rstrip("/")
+    timeout_sec = float(config.get("gamma_timeout_sec") or 10.0)
+    request_retries = max(1, int(config.get("gamma_request_retries") or 2))
+    chunk_size = max(1, min(int(config.get("gamma_condition_ids_chunk_size") or 50), 200))
+
+    out: Dict[str, Dict[str, str]] = {}
+    for start in range(0, len(condition_ids), chunk_size):
+        chunk = condition_ids[start : start + chunk_size]
+        params = {"condition_ids": chunk, "limit": len(chunk)}
+        last_error = None
+        payload = None
+        for _ in range(request_retries):
+            try:
+                response = requests.get(
+                    f"{gamma_api_root}/markets",
+                    params=params,
+                    timeout=timeout_sec,
+                )
+                response.raise_for_status()
+                payload = response.json()
+                last_error = None
+                break
+            except requests.RequestException as exc:
+                last_error = exc
+                continue
+        if payload is None:
+            if last_error is not None:
+                print(f"[WARN] gamma markets request failed: {last_error}", flush=True)
+            continue
+
+        markets = payload if isinstance(payload, list) else payload.get("data") or []
+        if not isinstance(markets, list):
+            continue
+
+        for market in markets:
+            if not isinstance(market, dict):
+                continue
+            condition_id = _normalize_text(market.get("conditionId"))
+            if not condition_id:
+                continue
+            category = _normalize_text(market.get("category"))
+            subcategory = _normalize_text(market.get("subcategory"))
+            tag_text = ""
+            tags = market.get("tags")
+            if isinstance(tags, list):
+                tag_names: List[str] = []
+                for item in tags:
+                    if isinstance(item, dict):
+                        name = _normalize_text(item.get("label") or item.get("name") or item.get("slug"))
+                        if name:
+                            tag_names.append(name)
+                    else:
+                        name = _normalize_text(item)
+                        if name:
+                            tag_names.append(name)
+                tag_text = " ".join(tag_names)
+
+            if (not category or not subcategory) and isinstance(market.get("events"), list):
+                events = market.get("events") or []
+                if events and isinstance(events[0], dict):
+                    event_data = events[0]
+                    if not category:
+                        category = _normalize_text(event_data.get("category"))
+                    if not subcategory:
+                        subcategory = _normalize_text(event_data.get("subcategory"))
+
+            out[condition_id] = {
+                "category": category,
+                "subcategory": subcategory,
+                "tag_text": tag_text,
+            }
+    return out
 
 
 def _build_price_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> str:
@@ -828,6 +1082,8 @@ def main() -> None:
 
     features_rows: List[Dict[str, Any]] = []
     candidate_rows: List[Dict[str, Any]] = []
+    official_market_meta_cache: Dict[str, Dict[str, str]] = {}
+    use_official_market_category = bool(config.get("use_official_market_category", True))
 
     for user_dir in sorted(users_dir.iterdir() if users_dir.exists() else []):
         if not user_dir.is_dir():
@@ -844,6 +1100,17 @@ def main() -> None:
         elif user in summary_map:
             summary_row = summary_map[user]
 
+        if use_official_market_category:
+            condition_ids = _row_condition_ids_for_official_lookup(closed_rows, open_rows)
+            missing_ids = [item for item in condition_ids if item not in official_market_meta_cache]
+            if missing_ids:
+                official_market_meta_cache.update(
+                    _fetch_markets_by_condition_ids(
+                        condition_ids=missing_ids,
+                        config=config,
+                    )
+                )
+
         metrics = _build_features(
             user,
             closed_rows,
@@ -851,6 +1118,7 @@ def main() -> None:
             summary_row,
             trade_action_rows,
             config,
+            official_market_meta_by_condition=official_market_meta_cache,
         )
         row: Dict[str, Any] = {"user": user}
         row.update(metrics)
