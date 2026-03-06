@@ -30,6 +30,7 @@
   "accumulator_stale_reset_sec": 7200,
   "shadow_buy_ttl_sec": 900,
   "boot_sync_mode": "baseline_replay",
+  "actions_source": "actions",
   "actions_replay_window_sec": 86400,
   "hemostasis_recovery_enabled": true,
   "hemostasis_recovery_window_sec": 86400,
