@@ -74,6 +74,7 @@ def risk_check(
     cfg: Dict[str, object],
     token_title: Optional[str] = None,
     side: Optional[str] = None,
+    available_shares: Optional[float] = None,
     planned_total_notional: Optional[float] = None,
     planned_token_notional: Optional[float] = None,
     cumulative_total_usd: Optional[float] = None,
@@ -99,10 +100,13 @@ def risk_check(
     side_u = str(side).upper() if side is not None else ""
     allow_short = bool(cfg.get("allow_short", False))
     if side_u == "SELL":
-        if my_shares > 0:
+        sellable = float(available_shares) if available_shares is not None else float(my_shares)
+        if sellable > 0:
+            if float(order_shares) > sellable + 1e-9:
+                return False, "sell_exceeds_available"
             return True, "ok"
         if not allow_short:
-            return False, "short_disabled"
+            return False, "no_sellable_shares"
     apply_token_cap = side_u == "BUY" or (side_u == "SELL" and allow_short)
     if max_per_token > 0 and apply_token_cap:
         base_token = (

@@ -348,8 +348,10 @@ def reconcile_one(
         size = max_shares_cap
 
     allow_short = bool(cfg.get("allow_short"))
+    sell_buffer_shares = float(cfg.get("sell_available_buffer_shares") or 0.01)
+    sellable_shares = max(0.0, float(my_shares) - max(0.0, sell_buffer_shares))
     if side == "SELL" and not allow_short:
-        size = min(size, my_shares)
+        size = min(size, sellable_shares)
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
     api_min_shares = 0.0
@@ -614,7 +616,7 @@ def reconcile_one(
     if size > max_shares_cap:
         size = max_shares_cap
     if side == "SELL" and not allow_short:
-        size = min(size, my_shares)
+        size = min(size, sellable_shares)
     if size_step > 0 and not small_taker_override:
         size = round_to_step(size, size_step, direction="down")
         if side == "BUY" and size + 1e-12 < effective_min_shares:
@@ -622,7 +624,7 @@ def reconcile_one(
         if size > max_shares_cap:
             size = max_shares_cap
         if side == "SELL" and not allow_short:
-            size = min(size, my_shares)
+            size = min(size, sellable_shares)
     if (
         effective_min_shares > 0
         and size < effective_min_shares
@@ -713,6 +715,11 @@ def reconcile_one(
                         "price": price,
                         "size": size,
                         "ts": now_ts,
+                        **(
+                            {"_available_shares": sellable_shares}
+                            if side == "SELL" and not allow_short
+                            else {}
+                        ),
                         "_taker": True,
                         "_taker_spread": spread,
                         "_taker_thr": taker_spread_thr,
@@ -762,8 +769,9 @@ def reconcile_one(
                         "token_id": token_id,
                         "side": "SELL",
                         "price": price,
-                        "size": abs_delta,
+                        "size": min(abs_delta, sellable_shares),
                         "ts": now_ts,
+                        "_available_shares": sellable_shares,
                         "_exit_consolidate": True,
                     }
                 )
@@ -841,6 +849,11 @@ def reconcile_one(
             "price": price,
             "size": size,
             "ts": now_ts,
+            **(
+                {"_available_shares": sellable_shares}
+                if side == "SELL" and not allow_short
+                else {}
+            ),
             **(
                 {
                     "_taker": True,
@@ -1311,73 +1324,87 @@ def apply_actions(
                         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
                         min_order_shares = float(cfg.get("min_order_shares") or 0.0)
                         shrink_factor = float(cfg.get("retry_shrink_factor") or 0.5)
-                        old_usd = abs(size) * price
-                        new_usd = max(min_order_usd, old_usd * shrink_factor)
-                        if min_order_shares > 0:
-                            new_usd = max(new_usd, min_order_shares * price)
-                        if new_usd < old_usd * (1 - 1e-9):
+                        max_retry = max(1, int(cfg.get("sell_insufficient_retry_max") or 3))
+                        available_hint = safe_float(action.get("_available_shares")) or 0.0
+                        retry_size = min(size, available_hint) if available_hint > 0 else size
+                        retry_ok = False
+                        for attempt in range(1, max_retry + 1):
+                            old_usd = abs(retry_size) * price
+                            new_usd = max(min_order_usd, old_usd * shrink_factor)
+                            if min_order_shares > 0:
+                                new_usd = max(new_usd, min_order_shares * price)
                             new_size = new_usd / price
-                            if min_order_shares <= 0 or new_size + 1e-12 >= min_order_shares:
-                                try:
-                                    if is_taker:
-                                        response = place_market_order(
-                                            client,
-                                            token_id=str(action.get("token_id")),
-                                            side=side_u,
-                                            amount=abs(new_size),
-                                            price=price,
-                                            order_type="FAK" if allow_partial else "FOK",
-                                            timeout=api_timeout_sec,
-                                        )
-                                    else:
-                                        response = place_order(
-                                            client,
-                                            token_id=str(action.get("token_id")),
-                                            side=side_u,
-                                            price=price,
-                                            size=new_size,
-                                            allow_partial=allow_partial,
-                                            timeout=api_timeout_sec,
-                                        )
-                                except Exception as retry_exc:
-                                    logger.warning(
-                                        "[RETRY_SELL_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
-                                        action.get("token_id"),
-                                        old_usd,
-                                        new_usd,
-                                        retry_exc,
+                            if available_hint > 0:
+                                new_size = min(new_size, available_hint)
+                            if new_size >= retry_size * (1 - 1e-9):
+                                break
+                            if min_order_shares > 0 and new_size + 1e-12 < min_order_shares:
+                                break
+                            try:
+                                if is_taker:
+                                    response = place_market_order(
+                                        client,
+                                        token_id=str(action.get("token_id")),
+                                        side=side_u,
+                                        amount=abs(new_size),
+                                        price=price,
+                                        order_type="FAK" if allow_partial else "FOK",
+                                        timeout=api_timeout_sec,
                                     )
-                                    _bump_backoff(token_id, "sell_insufficient", str(retry_exc))
-                                    continue
-                                size_for_record = new_size
-                                logger.info(
-                                    "[RETRY_SELL_OK] token_id=%s old_usd=%s new_usd=%s",
+                                else:
+                                    response = place_order(
+                                        client,
+                                        token_id=str(action.get("token_id")),
+                                        side=side_u,
+                                        price=price,
+                                        size=new_size,
+                                        allow_partial=allow_partial,
+                                        timeout=api_timeout_sec,
+                                    )
+                            except Exception as retry_exc:
+                                logger.warning(
+                                    "[RETRY_SELL_FAIL] token_id=%s attempt=%s old_usd=%s new_usd=%s: %s",
                                     action.get("token_id"),
+                                    attempt,
                                     old_usd,
                                     new_usd,
+                                    retry_exc,
                                 )
-                                order_id = response.get("order_id")
-                                if order_id and not is_taker:
-                                    updated.append(
-                                        {
-                                            "order_id": order_id,
-                                            "side": action.get("side"),
-                                            "price": action.get("price"),
-                                            "size": size_for_record,
-                                            "ts": now_ts,
-                                        }
-                                    )
-                                    if state is not None:
-                                        token_id = str(action.get("token_id") or "")
-                                        place_fail_until = state.get("place_fail_until")
-                                        if isinstance(place_fail_until, dict):
-                                            place_fail_until.pop(token_id, None)
-                                        logger.info(
-                                            "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear "
-                                            "place_fail_until",
-                                            token_id,
-                                        )
+                                if not _is_insufficient_balance(retry_exc):
+                                    _bump_backoff(token_id, "sell_insufficient", str(retry_exc))
+                                    break
+                                retry_size = new_size
                                 continue
+                            size_for_record = new_size
+                            retry_ok = True
+                            logger.info(
+                                "[RETRY_SELL_OK] token_id=%s attempt=%s old_usd=%s new_usd=%s",
+                                action.get("token_id"),
+                                attempt,
+                                old_usd,
+                                new_usd,
+                            )
+                            order_id = response.get("order_id")
+                            if order_id and not is_taker:
+                                updated.append(
+                                    {
+                                        "order_id": order_id,
+                                        "side": action.get("side"),
+                                        "price": action.get("price"),
+                                        "size": size_for_record,
+                                        "ts": now_ts,
+                                    }
+                                )
+                            place_fail_until = state.get("place_fail_until")
+                            if isinstance(place_fail_until, dict):
+                                place_fail_until.pop(token_id, None)
+                            logger.info(
+                                "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear place_fail_until",
+                                token_id,
+                            )
+                            break
+                        if retry_ok:
+                            continue
                     _bump_backoff(token_id, "sell_insufficient", str(exc))
                 continue
             if not _is_insufficient_balance(exc):

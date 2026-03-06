@@ -575,6 +575,416 @@ def _fetch_all_target_actions(
     return all_actions, merged_info
 
 
+def _cfg_bool(value: Any, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
+            return True
+        if text in {"0", "false", "no", "n", "off", "disable", "disabled", ""}:
+            return False
+    return bool(value)
+
+
+def _collect_target_sell_token_ids(
+    cfg: Dict[str, Any],
+    data_client: Any,
+    target_addresses: List[str],
+    logger: logging.Logger,
+) -> set[str]:
+    now_ms = int(time.time() * 1000)
+    window_sec = max(60, int(cfg.get("hemostasis_recovery_window_sec") or 86400))
+    cursor_ms = now_ms - window_sec * 1000
+    actions_source = str(cfg.get("actions_source") or "trades").lower()
+    use_trades_api = actions_source in ("trade", "trades")
+    page_size = max(50, int(cfg.get("actions_page_size") or 300))
+    max_offset = max(300, min(int(cfg.get("actions_max_offset") or 3000), 3000))
+    actions_taker_only = _cfg_bool(cfg.get("actions_taker_only"), False)
+    token_map: Dict[str, str] = {}
+    sell_token_ids: set[str] = set()
+
+    actions_list, actions_info = _fetch_all_target_actions(
+        data_client=data_client,
+        target_addresses=target_addresses,
+        cursor_ms=cursor_ms,
+        use_trades_api=use_trades_api,
+        page_size=page_size,
+        max_offset=max_offset,
+        taker_only=actions_taker_only,
+        logger=logger,
+    )
+    for action in actions_list:
+        side = str(action.get("side") or "").upper()
+        if side != "SELL":
+            continue
+        try:
+            size = float(action.get("size") or 0.0)
+        except Exception:
+            size = 0.0
+        if size <= 0:
+            continue
+        token_id = str(action.get("token_id") or "").strip()
+        if not token_id:
+            token_id = str(_extract_token_id_from_raw(action.get("raw")) or "").strip()
+        token_key = str(action.get("token_key") or "").strip()
+        if not token_id and token_key:
+            token_id = str(token_map.get(token_key) or "").strip()
+        if not token_id and token_key:
+            try:
+                resolved = resolve_token_id(
+                    token_key,
+                    {
+                        "token_key": token_key,
+                        "condition_id": action.get("condition_id"),
+                        "outcome_index": action.get("outcome_index"),
+                        "raw": action.get("raw"),
+                    },
+                    token_map,
+                )
+                token_id = str(resolved or "").strip()
+            except Exception:
+                token_id = ""
+        if token_id:
+            if token_key:
+                token_map[token_key] = token_id
+            sell_token_ids.add(token_id)
+
+    logger.info(
+        "[HEMOSTASIS] target_sell_scan window_sec=%s actions=%s ok=%s incomplete=%s sell_tokens=%s",
+        window_sec,
+        len(actions_list),
+        actions_info.get("ok"),
+        actions_info.get("incomplete"),
+        len(sell_token_ids),
+    )
+    return sell_token_ids
+
+
+def _run_hemostasis_recovery_for_account(
+    cfg: Dict[str, Any],
+    data_client: Any,
+    acct_ctx: AccountContext,
+    sell_token_ids: set[str],
+    logger: logging.Logger,
+) -> Dict[str, Any]:
+    summary: Dict[str, Any] = {
+        "account": str(acct_ctx.my_address),
+        "enabled": True,
+        "scan_sell_tokens": len(sell_token_ids),
+        "rounds": 0,
+        "candidate_tokens": [],
+        "placed_tokens": [],
+        "skip_no_bid_tokens": [],
+        "remaining_tokens": [],
+        "remaining_count": 0,
+        "status": "ok",
+    }
+    if not sell_token_ids:
+        summary["status"] = "skip_no_sell_tokens"
+        return summary
+
+    max_rounds = max(1, int(cfg.get("hemostasis_recovery_max_rounds") or 5))
+    poll_sec = max(0.2, float(cfg.get("hemostasis_recovery_poll_sec") or 2.0))
+    min_shares = max(0.0, float(cfg.get("hemostasis_recovery_min_shares") or 0.0))
+    sell_buffer = max(0.0, float(cfg.get("hemostasis_recovery_sell_buffer_shares") or 0.0))
+    positions_limit = max(50, int(cfg.get("positions_limit") or 500))
+    positions_max_pages = max(1, int(cfg.get("positions_max_pages") or 20))
+    refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
+    my_positions_force_http = _cfg_bool(cfg.get("my_positions_force_http"), False)
+    cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
+    header_keys = cfg.get("positions_cache_header_keys") or [
+        "Age",
+        "CF-Cache-Status",
+        "X-Cache",
+        "Via",
+        "Cache-Control",
+    ]
+    try:
+        api_timeout_sec = float(cfg.get("api_timeout_sec") or 15.0)
+    except Exception:
+        api_timeout_sec = 15.0
+    if api_timeout_sec <= 0:
+        api_timeout_sec = None
+
+    my_address = str(acct_ctx.my_address)
+    logger.info(
+        "[HEMOSTASIS] account=%s begin max_rounds=%s sell_token_count=%s",
+        _shorten_address(my_address),
+        max_rounds,
+        len(sell_token_ids),
+    )
+
+    for round_idx in range(1, max_rounds + 1):
+        my_positions, my_info = fetch_positions_norm(
+            data_client,
+            my_address,
+            size_threshold=0.0,
+            positions_limit=positions_limit,
+            positions_max_pages=positions_max_pages,
+            refresh_sec=refresh_sec,
+            force_http=my_positions_force_http,
+            cache_bust_mode=cache_bust_mode,
+            header_keys=header_keys,
+        )
+        if not my_info.get("ok", True):
+            logger.warning(
+                "[HEMOSTASIS] account=%s fetch_positions failed: %s",
+                _shorten_address(my_address),
+                my_info.get("error_msg"),
+            )
+            summary["status"] = "fetch_positions_failed"
+            break
+
+        candidates: list[dict[str, Any]] = []
+        for pos in my_positions:
+            try:
+                shares = float(pos.get("size") or 0.0)
+            except Exception:
+                shares = 0.0
+            if shares <= min_shares:
+                continue
+            token_id = str(pos.get("token_id") or "").strip()
+            if not token_id:
+                token_id = str(_extract_token_id_from_raw(pos.get("raw")) or "").strip()
+            if token_id and token_id in sell_token_ids:
+                candidates.append({"token_id": token_id, "shares": shares})
+        summary["rounds"] = round_idx
+
+        if not candidates:
+            logger.info(
+                "[HEMOSTASIS] account=%s complete at round=%s",
+                _shorten_address(my_address),
+                round_idx,
+            )
+            summary["status"] = "cleared"
+            summary["remaining_count"] = 0
+            return summary
+
+        remote_orders, ok, err = fetch_open_orders_norm(acct_ctx.clob_client, api_timeout_sec)
+        if not ok:
+            logger.warning(
+                "[HEMOSTASIS] account=%s fetch_open_orders failed: %s",
+                _shorten_address(my_address),
+                err,
+            )
+            remote_orders = []
+
+        candidate_token_ids = {str(item["token_id"]) for item in candidates}
+        summary["candidate_tokens"] = sorted(candidate_token_ids)
+        actions: list[dict[str, Any]] = []
+        for order in remote_orders:
+            if str(order.get("token_id") or "") not in candidate_token_ids:
+                continue
+            order_id = str(order.get("order_id") or "").strip()
+            if not order_id:
+                continue
+            actions.append({"type": "cancel", "order_id": order_id})
+
+        for item in candidates:
+            token_id = str(item["token_id"])
+            shares = float(item["shares"])
+            sell_shares = max(0.0, shares - sell_buffer)
+            if sell_shares <= min_shares:
+                sell_shares = shares
+            if sell_shares <= 0:
+                continue
+            orderbook = get_orderbook(acct_ctx.clob_client, token_id, api_timeout_sec)
+            best_bid = orderbook.get("best_bid")
+            if best_bid is None or float(best_bid) <= 0:
+                logger.warning(
+                    "[HEMOSTASIS] account=%s skip token=%s reason=no_best_bid shares=%s",
+                    _shorten_address(my_address),
+                    token_id,
+                    shares,
+                )
+                skipped = summary.get("skip_no_bid_tokens")
+                if isinstance(skipped, list) and token_id not in skipped:
+                    skipped.append(token_id)
+                continue
+            actions.append(
+                {
+                    "type": "place",
+                    "token_id": token_id,
+                    "side": "SELL",
+                    "price": float(best_bid),
+                    "size": float(sell_shares),
+                    "_taker": True,
+                    "_available_shares": float(shares),
+                }
+            )
+            placed = summary.get("placed_tokens")
+            if isinstance(placed, list) and token_id not in placed:
+                placed.append(token_id)
+
+        place_count = sum(1 for action in actions if action.get("type") == "place")
+        if place_count <= 0:
+            logger.warning(
+                "[HEMOSTASIS] account=%s no executable sell actions at round=%s",
+                _shorten_address(my_address),
+                round_idx,
+            )
+            summary["status"] = "no_executable_actions"
+            break
+
+        now_ts = int(time.time())
+        apply_actions(
+            client=acct_ctx.clob_client,
+            actions=actions,
+            open_orders=remote_orders,
+            now_ts=now_ts,
+            dry_run=False,
+            cfg=cfg,
+            state=acct_ctx.state,
+        )
+        logger.info(
+            "[HEMOSTASIS] account=%s round=%s candidates=%s places=%s",
+            _shorten_address(my_address),
+            round_idx,
+            len(candidates),
+            place_count,
+        )
+        time.sleep(poll_sec)
+
+    my_positions, _ = fetch_positions_norm(
+        data_client,
+        my_address,
+        size_threshold=0.0,
+        positions_limit=positions_limit,
+        positions_max_pages=positions_max_pages,
+        refresh_sec=refresh_sec,
+        force_http=my_positions_force_http,
+        cache_bust_mode=cache_bust_mode,
+        header_keys=header_keys,
+    )
+    remain = 0
+    remaining_tokens: List[str] = []
+    for pos in my_positions:
+        token_id = str(pos.get("token_id") or "").strip()
+        if not token_id:
+            token_id = str(_extract_token_id_from_raw(pos.get("raw")) or "").strip()
+        if not token_id or token_id not in sell_token_ids:
+            continue
+        try:
+            shares = float(pos.get("size") or 0.0)
+        except Exception:
+            shares = 0.0
+        if shares > min_shares:
+            remain += 1
+            if token_id not in remaining_tokens:
+                remaining_tokens.append(token_id)
+    summary["remaining_count"] = remain
+    summary["remaining_tokens"] = sorted(remaining_tokens)
+    if remain > 0:
+        logger.warning(
+            "[HEMOSTASIS] account=%s exit_with_remaining=%s (max_rounds=%s)",
+            _shorten_address(my_address),
+            remain,
+            max_rounds,
+        )
+        if summary.get("status") == "ok":
+            summary["status"] = "exit_with_remaining"
+    else:
+        if summary.get("status") == "ok":
+            summary["status"] = "cleared"
+    return summary
+
+
+def _run_hemostasis_recovery_startup(
+    cfg: Dict[str, Any],
+    data_client: Any,
+    account_contexts: List[AccountContext],
+    target_addresses: List[str],
+    logger: logging.Logger,
+) -> None:
+    if not _cfg_bool(cfg.get("hemostasis_recovery_enabled"), False):
+        return
+    if not account_contexts:
+        return
+    try:
+        sell_token_ids = _collect_target_sell_token_ids(cfg, data_client, target_addresses, logger)
+    except Exception as exc:
+        logger.warning("[HEMOSTASIS] scan failed, skip recovery: %s", exc)
+        return
+    if not sell_token_ids:
+        logger.info("[HEMOSTASIS] no target sell token found in lookback window; skip recovery")
+        return
+    logger.info(
+        "[HEMOSTASIS] startup begin accounts=%s sell_tokens=%s",
+        len(account_contexts),
+        len(sell_token_ids),
+    )
+    summaries: List[Dict[str, Any]] = []
+    for acct_ctx in account_contexts:
+        try:
+            summary = _run_hemostasis_recovery_for_account(
+                cfg=cfg,
+                data_client=data_client,
+                acct_ctx=acct_ctx,
+                sell_token_ids=sell_token_ids,
+                logger=logger,
+            )
+            if isinstance(summary, dict):
+                summaries.append(summary)
+                logger.info(
+                    "[HEMOSTASIS_SUMMARY] account=%s status=%s rounds=%s candidates=%s placed=%s remain=%s",
+                    _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
+                    summary.get("status"),
+                    summary.get("rounds"),
+                    len(summary.get("candidate_tokens") or []),
+                    len(summary.get("placed_tokens") or []),
+                    summary.get("remaining_count"),
+                )
+                if summary.get("remaining_tokens"):
+                    logger.warning(
+                        "[HEMOSTASIS_SUMMARY] account=%s remaining_tokens=%s",
+                        _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
+                        ",".join(str(x) for x in (summary.get("remaining_tokens") or [])),
+                    )
+            try:
+                save_state(str(acct_ctx.state_path), acct_ctx.state)
+            except Exception as save_exc:
+                logger.warning(
+                    "[HEMOSTASIS] account=%s save_state failed: %s",
+                    _shorten_address(acct_ctx.my_address),
+                    save_exc,
+                )
+        except Exception as exc:
+            logger.warning(
+                "[HEMOSTASIS] account=%s failed: %s",
+                _shorten_address(acct_ctx.my_address),
+                exc,
+            )
+            summaries.append(
+                {
+                    "account": str(acct_ctx.my_address),
+                    "status": "exception",
+                    "error": str(exc),
+                    "remaining_count": None,
+                }
+            )
+    if summaries:
+        cleared = sum(1 for item in summaries if str(item.get("status")) == "cleared")
+        remained = sum(
+            1
+            for item in summaries
+            if str(item.get("status")) in {"exit_with_remaining", "no_executable_actions"}
+        )
+        failed = sum(1 for item in summaries if str(item.get("status")) in {"exception", "fetch_positions_failed"})
+        logger.info(
+            "[HEMOSTASIS] startup_summary accounts=%s cleared=%s remained=%s failed=%s",
+            len(summaries),
+            cleared,
+            remained,
+            failed,
+        )
+    logger.info("[HEMOSTASIS] startup complete")
+
+
 def _derive_api_creds(client):
     for name in ("derive_api_creds", "derive_api_key"):
         method = getattr(client, name, None)
@@ -1900,6 +2310,17 @@ def main() -> None:
             logger.info("[HTTP_TIMEOUT] clob_client httpx timeout=%s", timeout_sec)
         except Exception as exc:
             logger.warning("[HTTP_TIMEOUT] failed to set timeout=%s: %s", timeout_sec, exc)
+
+    # Optional startup recovery:
+    # replay target SELL actions within a lookback window and force-sell matching holdings
+    # before entering the normal copy-trading loop.
+    _run_hemostasis_recovery_startup(
+        cfg=cfg,
+        data_client=data_client,
+        account_contexts=account_contexts,
+        target_addresses=target_addresses,
+        logger=logger,
+    )
 
     logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
 
@@ -4042,6 +4463,24 @@ def main() -> None:
                             )
 
                         cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
+                        reserved_sell_open = 0.0
+                        if side == "SELL":
+                            for oo in open_orders:
+                                try:
+                                    if str(oo.get("side") or "").upper() != "SELL":
+                                        continue
+                                    reserved_sell_open += float(
+                                        oo.get("size") or oo.get("original_size") or 0.0
+                                    )
+                                except Exception:
+                                    continue
+                        sell_buffer_shares = float(cfg_for_action.get("sell_available_buffer_shares") or 0.01)
+                        available_shares = max(
+                            0.0,
+                            float(my_shares)
+                            - max(0.0, reserved_sell_open)
+                            - max(0.0, sell_buffer_shares),
+                        )
                         ok, reason = risk_check(
                             token_key,
                             size,
@@ -4050,6 +4489,7 @@ def main() -> None:
                             cfg_for_action,
                             token_title=token_title,
                             side=side,
+                            available_shares=available_shares if side == "SELL" else None,
                             planned_total_notional=planned_total_notional_risk,
                             planned_token_notional=planned_token_notional_risk,
                             cumulative_total_usd=None,
