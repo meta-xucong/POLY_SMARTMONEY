@@ -21,7 +21,7 @@
   "slice_max": 25,
   "order_size_mode": "auto_usd",
   "min_order_usd": 1,
-  "min_order_shares": 5,
+  "min_order_shares": 6,
   "max_order_usd": 6,
   "max_position_usd_per_token": 10,
   "max_notional_per_token": 0,
