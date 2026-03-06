@@ -1659,6 +1659,7 @@ def _extract_token_id_from_raw(raw: object) -> Optional[str]:
         "token_id",
         "clobTokenId",
         "clob_token_id",
+        "asset",
         "assetId",
         "asset_id",
         "outcomeTokenId",
@@ -3118,7 +3119,10 @@ def main() -> None:
                 token_key = str(pos.get("token_key") or "").strip()
                 if not token_key:
                     continue
-                raw_id = _extract_token_id_from_raw(pos.get("raw") or {})
+                raw_id = (
+                    str(pos.get("token_id") or "").strip()
+                    or _extract_token_id_from_raw(pos.get("raw") or {})
+                )
                 if raw_id:
                     token_map.setdefault(token_key, str(raw_id))
                 size = float(pos.get("size") or 0.0)
