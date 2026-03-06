@@ -680,6 +680,7 @@ def _run_hemostasis_recovery_for_account(
         "candidate_tokens": [],
         "placed_tokens": [],
         "skip_no_bid_tokens": [],
+        "blocked_tokens": {},
         "remaining_tokens": [],
         "remaining_count": 0,
         "status": "ok",
@@ -692,6 +693,12 @@ def _run_hemostasis_recovery_for_account(
     poll_sec = max(0.2, float(cfg.get("hemostasis_recovery_poll_sec") or 2.0))
     min_shares = max(0.0, float(cfg.get("hemostasis_recovery_min_shares") or 0.0))
     sell_buffer = max(0.0, float(cfg.get("hemostasis_recovery_sell_buffer_shares") or 0.0))
+    min_order_shares = max(0.0, float(cfg.get("min_order_shares") or 0.0))
+    min_order_usd_cfg = max(0.0, float(cfg.get("min_order_usd") or 0.0))
+    min_order_usd_effective = max(1.0, min_order_usd_cfg)
+    # If an attempted token still has almost unchanged shares on the next round,
+    # treat it as "no progress" and stop retrying during this startup recovery.
+    no_progress_eps_shares = max(0.01, float(cfg.get("hemostasis_no_progress_eps_shares") or 0.01))
     positions_limit = max(50, int(cfg.get("positions_limit") or 500))
     positions_max_pages = max(1, int(cfg.get("positions_max_pages") or 20))
     refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
@@ -718,6 +725,8 @@ def _run_hemostasis_recovery_for_account(
         max_rounds,
         len(sell_token_ids),
     )
+    blocked_tokens: Dict[str, str] = {}
+    attempted_shares: Dict[str, float] = {}
 
     for round_idx in range(1, max_rounds + 1):
         my_positions, my_info = fetch_positions_norm(
@@ -752,6 +761,12 @@ def _run_hemostasis_recovery_for_account(
             if not token_id:
                 token_id = str(_extract_token_id_from_raw(pos.get("raw")) or "").strip()
             if token_id and token_id in sell_token_ids:
+                if token_id in blocked_tokens:
+                    continue
+                prev_attempt_shares = attempted_shares.get(token_id)
+                if prev_attempt_shares is not None and abs(shares - prev_attempt_shares) <= no_progress_eps_shares:
+                    blocked_tokens[token_id] = "no_progress_after_attempt"
+                    continue
                 candidates.append({"token_id": token_id, "shares": shares})
         summary["rounds"] = round_idx
 
@@ -792,6 +807,7 @@ def _run_hemostasis_recovery_for_account(
             if sell_shares <= min_shares:
                 sell_shares = shares
             if sell_shares <= 0:
+                blocked_tokens[token_id] = "non_positive_sell_shares"
                 continue
             orderbook = get_orderbook(acct_ctx.clob_client, token_id, api_timeout_sec)
             best_bid = orderbook.get("best_bid")
@@ -802,9 +818,17 @@ def _run_hemostasis_recovery_for_account(
                     token_id,
                     shares,
                 )
+                blocked_tokens[token_id] = "no_best_bid"
                 skipped = summary.get("skip_no_bid_tokens")
                 if isinstance(skipped, list) and token_id not in skipped:
                     skipped.append(token_id)
+                continue
+            if min_order_shares > 0 and sell_shares + 1e-12 < min_order_shares:
+                blocked_tokens[token_id] = "below_min_order_shares"
+                continue
+            order_usd = abs(sell_shares) * float(best_bid)
+            if order_usd + 1e-9 < min_order_usd_effective:
+                blocked_tokens[token_id] = "below_min_order_usd"
                 continue
             actions.append(
                 {
@@ -820,6 +844,7 @@ def _run_hemostasis_recovery_for_account(
             placed = summary.get("placed_tokens")
             if isinstance(placed, list) and token_id not in placed:
                 placed.append(token_id)
+            attempted_shares[token_id] = float(shares)
 
         place_count = sum(1 for action in actions if action.get("type") == "place")
         if place_count <= 0:
@@ -879,6 +904,7 @@ def _run_hemostasis_recovery_for_account(
                 remaining_tokens.append(token_id)
     summary["remaining_count"] = remain
     summary["remaining_tokens"] = sorted(remaining_tokens)
+    summary["blocked_tokens"] = dict(sorted(blocked_tokens.items()))
     if remain > 0:
         logger.warning(
             "[HEMOSTASIS] account=%s exit_with_remaining=%s (max_rounds=%s)",
@@ -944,6 +970,13 @@ def _run_hemostasis_recovery_startup(
                         "[HEMOSTASIS_SUMMARY] account=%s remaining_tokens=%s",
                         _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
                         ",".join(str(x) for x in (summary.get("remaining_tokens") or [])),
+                    )
+                blocked = summary.get("blocked_tokens") or {}
+                if isinstance(blocked, dict) and blocked:
+                    logger.warning(
+                        "[HEMOSTASIS_SUMMARY] account=%s blocked_tokens=%s",
+                        _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
+                        ",".join(f"{k}:{v}" for k, v in sorted(blocked.items())),
                     )
             try:
                 save_state(str(acct_ctx.state_path), acct_ctx.state)
