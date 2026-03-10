@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import json
 import glob
 import logging
@@ -9,6 +10,7 @@ import os
 import re
 import random
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -119,6 +121,69 @@ class LogDeduplicator:
 
 # Global log deduplicator instance
 _log_dedup = LogDeduplicator()
+
+
+class ProgressWatchdog:
+    def __init__(self, logger: logging.Logger):
+        self._logger = logger
+        self._stall_sec = 0
+        self._check_sec = 10
+        self._enabled = False
+        self._last_progress_mono = time.monotonic()
+        self._last_stage = "init"
+        self._lock = threading.Lock()
+        self._thread: Optional[threading.Thread] = None
+
+    def configure(self, stall_sec: int, check_sec: int) -> None:
+        stall_sec = max(0, int(stall_sec))
+        check_sec = max(1, int(check_sec))
+        with self._lock:
+            self._stall_sec = stall_sec
+            self._check_sec = check_sec
+            self._enabled = stall_sec > 0
+        if self._enabled and self._thread is None:
+            self._thread = threading.Thread(
+                target=self._run,
+                name="copytrade-watchdog",
+                daemon=True,
+            )
+            self._thread.start()
+
+    def beat(self, stage: str) -> None:
+        with self._lock:
+            self._last_progress_mono = time.monotonic()
+            self._last_stage = stage
+
+    def _run(self) -> None:
+        while True:
+            with self._lock:
+                enabled = self._enabled
+                stall_sec = self._stall_sec
+                check_sec = self._check_sec
+                last_progress_mono = self._last_progress_mono
+                last_stage = self._last_stage
+            if enabled and stall_sec > 0:
+                stalled_for = time.monotonic() - last_progress_mono
+                if stalled_for >= stall_sec:
+                    self._logger.critical(
+                        "[WATCHDOG] no progress for %.1fs at stage=%s -> forcing restart",
+                        stalled_for,
+                        last_stage,
+                    )
+                    try:
+                        faulthandler.dump_traceback(file=sys.stderr, all_threads=True)
+                    except Exception:
+                        pass
+                    try:
+                        logging.shutdown()
+                    except Exception:
+                        pass
+                    try:
+                        sys.stderr.flush()
+                    except Exception:
+                        pass
+                    os._exit(70)
+            time.sleep(check_sec)
 
 _REPLAY_BOOT_MODES = {
     "baseline_replay",
@@ -2217,11 +2282,14 @@ def main() -> None:
     heartbeat_interval_sec = 600
     config_reload_sec = 600
     max_resolve_target_positions_per_loop = 20
+    watchdog_stall_sec = 900
+    watchdog_check_sec = 10
     last_config_reload_ts = time.time()
     last_config_mtime: Optional[float] = None
     resolved_target_address = cfg["target_address"]
     resolved_my_address = cfg["my_address"]
     risk_summary_interval_sec = 60
+    watchdog = ProgressWatchdog(logger)
 
     def _apply_overrides(payload: Dict[str, Any]) -> None:
         for key, value in arg_overrides.items():
@@ -2246,6 +2314,8 @@ def main() -> None:
         nonlocal config_reload_sec
         nonlocal max_resolve_target_positions_per_loop
         nonlocal risk_summary_interval_sec
+        nonlocal watchdog_stall_sec
+        nonlocal watchdog_check_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -2274,6 +2344,9 @@ def main() -> None:
             cfg.get("max_resolve_target_positions_per_loop") or 20
         )
         risk_summary_interval_sec = int(cfg.get("risk_summary_interval_sec") or 120)
+        watchdog_stall_sec = int(cfg.get("watchdog_stall_sec") or 900)
+        watchdog_check_sec = int(cfg.get("watchdog_check_sec") or 10)
+        watchdog.configure(watchdog_stall_sec, watchdog_check_sec)
         # Log deduplication: suppress repetitive logs within this window (0 = disabled)
         log_dedup_window = float(cfg.get("log_dedup_window_sec") or 300.0)
         _log_dedup.set_window(log_dedup_window)
@@ -2330,6 +2403,7 @@ def main() -> None:
 
     _apply_cfg_settings()
     _refresh_log_level()
+    watchdog.beat("config_ready")
     try:
         last_config_mtime = Path(args.config).stat().st_mtime
     except Exception:
@@ -2400,6 +2474,7 @@ def main() -> None:
     # Optional startup recovery:
     # replay target SELL actions within a lookback window and force-sell matching holdings
     # before entering the normal copy-trading loop.
+    watchdog.beat("startup_recovery_begin")
     _run_hemostasis_recovery_startup(
         cfg=cfg,
         data_client=data_client,
@@ -2407,10 +2482,12 @@ def main() -> None:
         target_addresses=target_addresses,
         logger=logger,
     )
+    watchdog.beat("startup_recovery_done")
 
     logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
 
     while True:
+        watchdog.beat("loop_begin")
         now_ts = int(time.time())
         now_wall = time.time()
 
@@ -2418,6 +2495,7 @@ def main() -> None:
         # MULTI-ACCOUNT: Select current account (round-robin)
         # ============================================================
         acct_ctx = account_contexts[current_account_idx]
+        watchdog.beat(f"account_{current_account_idx + 1}_selected")
         state = acct_ctx.state
         clob_client = acct_ctx.clob_client
         current_my_address = acct_ctx.my_address
@@ -2948,6 +3026,7 @@ def main() -> None:
             target_cache_mode = target_cache_bust_mode
 
         # MULTI-TARGET: Fetch and merge positions from all target addresses
+        watchdog.beat("fetch_target_positions_begin")
         target_pos, target_info, position_source = _fetch_all_target_positions(
             data_client,
             target_addresses,
@@ -2959,11 +3038,13 @@ def main() -> None:
             header_keys=header_keys,
             logger=logger,
         )
+        watchdog.beat("fetch_target_positions_done")
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
             logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
+        watchdog.beat("fetch_my_positions_begin")
         my_pos, my_info = fetch_positions_norm(
             data_client,
             current_my_address,
@@ -2975,6 +3056,7 @@ def main() -> None:
             cache_bust_mode=target_cache_bust_mode,
             header_keys=header_keys,
         )
+        watchdog.beat("fetch_my_positions_done")
         # Verify positions belong to the expected profile/proxy wallet.
         proxy_wallets = set()
         for pos in my_pos:
@@ -5890,7 +5972,9 @@ def main() -> None:
             state["sizing"]["last_k"] = cfg.get("_auto_order_k")
 
         state["last_sync_ts"] = now_ts
+        watchdog.beat("state_save_begin")
         save_state(args.state, state)
+        watchdog.beat("state_save_done")
 
         # ============================================================
         # MULTI-ACCOUNT: Rotate to next account for next iteration
