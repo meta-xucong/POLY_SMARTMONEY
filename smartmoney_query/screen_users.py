@@ -7,6 +7,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
 import requests
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
@@ -900,7 +901,9 @@ def _fetch_markets_by_condition_ids(
     chunk_size = max(1, min(int(config.get("gamma_condition_ids_chunk_size") or 50), 200))
 
     out: Dict[str, Dict[str, str]] = {}
-    for start in range(0, len(condition_ids), chunk_size):
+    total_chunks = max(1, math.ceil(len(condition_ids) / chunk_size))
+    progress_every = max(1, int(config.get("gamma_progress_every_chunks") or 10))
+    for chunk_index, start in enumerate(range(0, len(condition_ids), chunk_size), start=1):
         chunk = condition_ids[start : start + chunk_size]
         params = {"condition_ids": chunk, "limit": len(chunk)}
         last_error = None
@@ -965,7 +968,93 @@ def _fetch_markets_by_condition_ids(
                 "subcategory": subcategory,
                 "tag_text": tag_text,
             }
+        if chunk_index == 1 or chunk_index == total_chunks or chunk_index % progress_every == 0:
+            print(
+                f"[INFO] gamma category fetch progress: {chunk_index}/{total_chunks} chunks, "
+                f"cached_conditions={len(out)}",
+                flush=True,
+            )
     return out
+
+
+def _load_official_market_meta_cache(path: Path) -> Dict[str, Dict[str, str]]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    cache = payload.get("condition_meta") if "condition_meta" in payload else payload
+    if not isinstance(cache, dict):
+        return {}
+
+    normalized: Dict[str, Dict[str, str]] = {}
+    for condition_id, meta in cache.items():
+        key = _normalize_text(condition_id)
+        if not key or not isinstance(meta, dict):
+            continue
+        normalized[key] = {
+            "category": _normalize_text(meta.get("category")),
+            "subcategory": _normalize_text(meta.get("subcategory")),
+            "tag_text": _normalize_text(meta.get("tag_text")),
+        }
+    return normalized
+
+
+def _write_official_market_meta_cache(path: Path, cache: Dict[str, Dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+        "condition_meta": cache,
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _load_user_payloads(
+    users_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for user_dir in sorted(users_dir.iterdir() if users_dir.exists() else []):
+        if not user_dir.is_dir():
+            continue
+        user = user_dir.name
+        closed_rows = _read_csv(user_dir / "closed_positions.csv")
+        open_rows = _read_csv(user_dir / "positions.csv")
+        trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
+        summary_row = None
+        if (user_dir / "summary.csv").exists():
+            summary_rows = _read_csv(user_dir / "summary.csv")
+            if summary_rows:
+                summary_row = summary_rows[0]
+        elif user in summary_map:
+            summary_row = summary_map[user]
+        payloads.append(
+            {
+                "user": user,
+                "closed_rows": closed_rows,
+                "open_rows": open_rows,
+                "trade_action_rows": trade_action_rows,
+                "summary_row": summary_row,
+            }
+        )
+    return payloads
+
+
+def _collect_all_condition_ids(user_payloads: List[Dict[str, Any]]) -> List[str]:
+    condition_ids: set[str] = set()
+    for payload in user_payloads:
+        condition_ids.update(
+            _row_condition_ids_for_official_lookup(
+                payload.get("closed_rows", []),
+                payload.get("open_rows", []),
+            )
+        )
+    return sorted(condition_ids)
 
 
 def _build_price_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> str:
@@ -1079,37 +1168,59 @@ def main() -> None:
         metadata_path = (base_dir / metadata_path).resolve()
 
     summary_map = _load_user_summary_map(data_dir / "users_summary.csv")
+    user_payloads = _load_user_payloads(users_dir, summary_map)
+    total_users = len(user_payloads)
+    progress_every_users = max(1, int(config.get("screen_progress_every_users") or 100))
 
     features_rows: List[Dict[str, Any]] = []
     candidate_rows: List[Dict[str, Any]] = []
-    official_market_meta_cache: Dict[str, Dict[str, str]] = {}
     use_official_market_category = bool(config.get("use_official_market_category", True))
+    official_market_meta_cache: Dict[str, Dict[str, str]] = {}
 
-    for user_dir in sorted(users_dir.iterdir() if users_dir.exists() else []):
-        if not user_dir.is_dir():
-            continue
-        user = user_dir.name
-        closed_rows = _read_csv(user_dir / "closed_positions.csv")
-        open_rows = _read_csv(user_dir / "positions.csv")
-        trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
-        summary_row = None
-        if (user_dir / "summary.csv").exists():
-            summary_rows = _read_csv(user_dir / "summary.csv")
-            if summary_rows:
-                summary_row = summary_rows[0]
-        elif user in summary_map:
-            summary_row = summary_map[user]
+    print(f"[INFO] loaded user payloads: users={total_users}", flush=True)
 
-        if use_official_market_category:
-            condition_ids = _row_condition_ids_for_official_lookup(closed_rows, open_rows)
-            missing_ids = [item for item in condition_ids if item not in official_market_meta_cache]
-            if missing_ids:
-                official_market_meta_cache.update(
-                    _fetch_markets_by_condition_ids(
-                        condition_ids=missing_ids,
-                        config=config,
-                    )
-                )
+    official_cache_filename = str(
+        config.get("official_market_meta_cache_filename") or "data/official_market_meta_cache.json"
+    )
+    official_cache_path = Path(official_cache_filename)
+    if not official_cache_path.is_absolute():
+        official_cache_path = (base_dir / official_cache_path).resolve()
+
+    if use_official_market_category:
+        official_market_meta_cache = _load_official_market_meta_cache(official_cache_path)
+        print(
+            f"[INFO] loaded official market cache: conditions={len(official_market_meta_cache)} "
+            f"path={official_cache_path}",
+            flush=True,
+        )
+        all_condition_ids = _collect_all_condition_ids(user_payloads)
+        missing_ids = [item for item in all_condition_ids if item not in official_market_meta_cache]
+        print(
+            f"[INFO] official category lookup plan: total_conditions={len(all_condition_ids)} "
+            f"cached={len(all_condition_ids) - len(missing_ids)} missing={len(missing_ids)}",
+            flush=True,
+        )
+        if missing_ids:
+            fetched_meta = _fetch_markets_by_condition_ids(
+                condition_ids=missing_ids,
+                config=config,
+            )
+            official_market_meta_cache.update(fetched_meta)
+            _write_official_market_meta_cache(official_cache_path, official_market_meta_cache)
+            print(
+                f"[INFO] updated official market cache: fetched={len(fetched_meta)} "
+                f"total_cached={len(official_market_meta_cache)}",
+                flush=True,
+            )
+    else:
+        print("[INFO] official market category lookup disabled", flush=True)
+
+    for index, payload in enumerate(user_payloads, start=1):
+        user = payload["user"]
+        closed_rows = payload["closed_rows"]
+        open_rows = payload["open_rows"]
+        trade_action_rows = payload["trade_action_rows"]
+        summary_row = payload["summary_row"]
 
         metrics = _build_features(
             user,
@@ -1147,6 +1258,17 @@ def main() -> None:
         features_rows.append(row)
         if passed:
             candidate_rows.append(row)
+
+        if (
+            index == 1
+            or index == total_users
+            or index % progress_every_users == 0
+        ):
+            print(
+                f"[INFO] screen progress: {index}/{total_users} users processed, "
+                f"candidates={len(candidate_rows)}",
+                flush=True,
+            )
 
     features_rows = sorted(
         features_rows, key=lambda row: row.get("copy_score", 0), reverse=True
