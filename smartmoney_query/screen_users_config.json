@@ -75,6 +75,12 @@
   "_comment_screen_progress_every_users": "print screening progress every N users",
   "gamma_progress_every_chunks": 5,
   "_comment_gamma_progress_every_chunks": "print gamma progress every N chunks",
+  "max_users_to_scan": null,
+  "_comment_max_users_to_scan": "optional hard cap for total users processed in one run",
+  "official_category_lookup_user_limit": null,
+  "_comment_official_category_lookup_user_limit": "optional hard cap for users scanned during official category prefetch",
+  "official_category_lookup_condition_limit": null,
+  "_comment_official_category_lookup_condition_limit": "optional hard cap for missing condition ids fetched from Gamma",
   "_comment_gamma_condition_ids_chunk_size": "按 condition_ids 批量查询官方分类时每批数量",
 
   "price_bands": {

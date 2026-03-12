@@ -10,7 +10,7 @@ import json
 import math
 import requests
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 
 DEFAULT_POLITICAL_KEYWORDS: List[str] = [
@@ -50,7 +50,30 @@ def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"未找到配置文件：{path}")
     with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"invalid config payload: {path}")
+
+    extends_value = loaded.get("extends")
+    if not extends_value:
+        return loaded
+
+    extends_path = Path(str(extends_value))
+    if not extends_path.is_absolute():
+        extends_path = (path.parent / extends_path).resolve()
+
+    base_config = _load_config(extends_path)
+    return _merge_config_dicts(base_config, loaded)
+
+
+def _merge_config_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge_config_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _parse_float(value: str) -> Optional[float]:
@@ -899,81 +922,85 @@ def _fetch_markets_by_condition_ids(
     timeout_sec = float(config.get("gamma_timeout_sec") or 10.0)
     request_retries = max(1, int(config.get("gamma_request_retries") or 2))
     chunk_size = max(1, min(int(config.get("gamma_condition_ids_chunk_size") or 50), 200))
+    session = requests.Session()
 
     out: Dict[str, Dict[str, str]] = {}
     total_chunks = max(1, math.ceil(len(condition_ids) / chunk_size))
     progress_every = max(1, int(config.get("gamma_progress_every_chunks") or 10))
-    for chunk_index, start in enumerate(range(0, len(condition_ids), chunk_size), start=1):
-        chunk = condition_ids[start : start + chunk_size]
-        params = {"condition_ids": chunk, "limit": len(chunk)}
-        last_error = None
-        payload = None
-        for _ in range(request_retries):
-            try:
-                response = requests.get(
-                    f"{gamma_api_root}/markets",
-                    params=params,
-                    timeout=timeout_sec,
+    try:
+        for chunk_index, start in enumerate(range(0, len(condition_ids), chunk_size), start=1):
+            chunk = condition_ids[start : start + chunk_size]
+            params = {"condition_ids": chunk, "limit": len(chunk)}
+            last_error = None
+            payload = None
+            for _ in range(request_retries):
+                try:
+                    response = session.get(
+                        f"{gamma_api_root}/markets",
+                        params=params,
+                        timeout=timeout_sec,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    last_error = None
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    continue
+            if payload is None:
+                if last_error is not None:
+                    print(f"[WARN] gamma markets request failed: {last_error}", flush=True)
+                continue
+
+            markets = payload if isinstance(payload, list) else payload.get("data") or []
+            if not isinstance(markets, list):
+                continue
+
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                condition_id = _normalize_text(market.get("conditionId"))
+                if not condition_id:
+                    continue
+                category = _normalize_text(market.get("category"))
+                subcategory = _normalize_text(market.get("subcategory"))
+                tag_text = ""
+                tags = market.get("tags")
+                if isinstance(tags, list):
+                    tag_names: List[str] = []
+                    for item in tags:
+                        if isinstance(item, dict):
+                            name = _normalize_text(item.get("label") or item.get("name") or item.get("slug"))
+                            if name:
+                                tag_names.append(name)
+                        else:
+                            name = _normalize_text(item)
+                            if name:
+                                tag_names.append(name)
+                    tag_text = " ".join(tag_names)
+
+                if (not category or not subcategory) and isinstance(market.get("events"), list):
+                    events = market.get("events") or []
+                    if events and isinstance(events[0], dict):
+                        event_data = events[0]
+                        if not category:
+                            category = _normalize_text(event_data.get("category"))
+                        if not subcategory:
+                            subcategory = _normalize_text(event_data.get("subcategory"))
+
+                out[condition_id] = {
+                    "category": category,
+                    "subcategory": subcategory,
+                    "tag_text": tag_text,
+                }
+            if chunk_index == 1 or chunk_index == total_chunks or chunk_index % progress_every == 0:
+                print(
+                    f"[INFO] gamma category fetch progress: {chunk_index}/{total_chunks} chunks, "
+                    f"cached_conditions={len(out)}",
+                    flush=True,
                 )
-                response.raise_for_status()
-                payload = response.json()
-                last_error = None
-                break
-            except requests.RequestException as exc:
-                last_error = exc
-                continue
-        if payload is None:
-            if last_error is not None:
-                print(f"[WARN] gamma markets request failed: {last_error}", flush=True)
-            continue
-
-        markets = payload if isinstance(payload, list) else payload.get("data") or []
-        if not isinstance(markets, list):
-            continue
-
-        for market in markets:
-            if not isinstance(market, dict):
-                continue
-            condition_id = _normalize_text(market.get("conditionId"))
-            if not condition_id:
-                continue
-            category = _normalize_text(market.get("category"))
-            subcategory = _normalize_text(market.get("subcategory"))
-            tag_text = ""
-            tags = market.get("tags")
-            if isinstance(tags, list):
-                tag_names: List[str] = []
-                for item in tags:
-                    if isinstance(item, dict):
-                        name = _normalize_text(item.get("label") or item.get("name") or item.get("slug"))
-                        if name:
-                            tag_names.append(name)
-                    else:
-                        name = _normalize_text(item)
-                        if name:
-                            tag_names.append(name)
-                tag_text = " ".join(tag_names)
-
-            if (not category or not subcategory) and isinstance(market.get("events"), list):
-                events = market.get("events") or []
-                if events and isinstance(events[0], dict):
-                    event_data = events[0]
-                    if not category:
-                        category = _normalize_text(event_data.get("category"))
-                    if not subcategory:
-                        subcategory = _normalize_text(event_data.get("subcategory"))
-
-            out[condition_id] = {
-                "category": category,
-                "subcategory": subcategory,
-                "tag_text": tag_text,
-            }
-        if chunk_index == 1 or chunk_index == total_chunks or chunk_index % progress_every == 0:
-            print(
-                f"[INFO] gamma category fetch progress: {chunk_index}/{total_chunks} chunks, "
-                f"cached_conditions={len(out)}",
-                flush=True,
-            )
+    finally:
+        session.close()
     return out
 
 
@@ -1014,34 +1041,55 @@ def _write_official_market_meta_cache(path: Path, cache: Dict[str, Dict[str, str
         json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
+def _iter_user_dirs(
+    users_dir: Path,
+    max_users: Optional[int] = None,
+) -> Iterator[Path]:
+    if not users_dir.exists():
+        return
+
+    yielded = 0
+    for user_dir in sorted(users_dir.iterdir()):
+        if not user_dir.is_dir():
+            continue
+        yield user_dir
+        yielded += 1
+        if max_users is not None and yielded >= max_users:
+            break
+
+
+def _load_user_payload(
+    user_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    user = user_dir.name
+    closed_rows = _read_csv(user_dir / "closed_positions.csv")
+    open_rows = _read_csv(user_dir / "positions.csv")
+    trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
+    summary_row = None
+    if (user_dir / "summary.csv").exists():
+        summary_rows = _read_csv(user_dir / "summary.csv")
+        if summary_rows:
+            summary_row = summary_rows[0]
+    elif user in summary_map:
+        summary_row = summary_map[user]
+    return {
+        "user": user,
+        "closed_rows": closed_rows,
+        "open_rows": open_rows,
+        "trade_action_rows": trade_action_rows,
+        "summary_row": summary_row,
+    }
+
+
 def _load_user_payloads(
     users_dir: Path,
     summary_map: Dict[str, Dict[str, str]],
+    max_users: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     payloads: List[Dict[str, Any]] = []
-    for user_dir in sorted(users_dir.iterdir() if users_dir.exists() else []):
-        if not user_dir.is_dir():
-            continue
-        user = user_dir.name
-        closed_rows = _read_csv(user_dir / "closed_positions.csv")
-        open_rows = _read_csv(user_dir / "positions.csv")
-        trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
-        summary_row = None
-        if (user_dir / "summary.csv").exists():
-            summary_rows = _read_csv(user_dir / "summary.csv")
-            if summary_rows:
-                summary_row = summary_rows[0]
-        elif user in summary_map:
-            summary_row = summary_map[user]
-        payloads.append(
-            {
-                "user": user,
-                "closed_rows": closed_rows,
-                "open_rows": open_rows,
-                "trade_action_rows": trade_action_rows,
-                "summary_row": summary_row,
-            }
-        )
+    for user_dir in _iter_user_dirs(users_dir, max_users=max_users):
+        payloads.append(_load_user_payload(user_dir, summary_map))
     return payloads
 
 
@@ -1054,6 +1102,35 @@ def _collect_all_condition_ids(user_payloads: List[Dict[str, Any]]) -> List[str]
                 payload.get("open_rows", []),
             )
         )
+    return sorted(condition_ids)
+
+
+def _collect_all_condition_ids_from_user_dirs(
+    users_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+    max_users: Optional[int] = None,
+    progress_every_users: int = 100,
+) -> List[str]:
+    condition_ids: set[str] = set()
+    scanned_users = 0
+    for user_dir in _iter_user_dirs(users_dir, max_users=max_users):
+        payload = _load_user_payload(user_dir, summary_map)
+        condition_ids.update(
+            _row_condition_ids_for_official_lookup(
+                payload.get("closed_rows", []),
+                payload.get("open_rows", []),
+            )
+        )
+        scanned_users += 1
+        if (
+            scanned_users == 1
+            or scanned_users % progress_every_users == 0
+        ):
+            print(
+                f"[INFO] official category scan progress: users={scanned_users} "
+                f"unique_conditions={len(condition_ids)}",
+                flush=True,
+            )
     return sorted(condition_ids)
 
 
@@ -1168,8 +1245,14 @@ def main() -> None:
         metadata_path = (base_dir / metadata_path).resolve()
 
     summary_map = _load_user_summary_map(data_dir / "users_summary.csv")
-    user_payloads = _load_user_payloads(users_dir, summary_map)
-    total_users = len(user_payloads)
+    max_users_to_scan_raw = config.get("max_users_to_scan")
+    max_users_to_scan = (
+        max(1, int(max_users_to_scan_raw))
+        if isinstance(max_users_to_scan_raw, (int, float)) and int(max_users_to_scan_raw) > 0
+        else None
+    )
+    user_dirs = list(_iter_user_dirs(users_dir, max_users=max_users_to_scan))
+    total_users = len(user_dirs)
     progress_every_users = max(1, int(config.get("screen_progress_every_users") or 100))
 
     features_rows: List[Dict[str, Any]] = []
@@ -1177,7 +1260,11 @@ def main() -> None:
     use_official_market_category = bool(config.get("use_official_market_category", True))
     official_market_meta_cache: Dict[str, Dict[str, str]] = {}
 
-    print(f"[INFO] loaded user payloads: users={total_users}", flush=True)
+    print(
+        f"[INFO] discovered users: users={total_users}"
+        f"{' (limited)' if max_users_to_scan is not None else ''}",
+        flush=True,
+    )
 
     official_cache_filename = str(
         config.get("official_market_meta_cache_filename") or "data/official_market_meta_cache.json"
@@ -1193,7 +1280,31 @@ def main() -> None:
             f"path={official_cache_path}",
             flush=True,
         )
-        all_condition_ids = _collect_all_condition_ids(user_payloads)
+        category_scan_user_limit_raw = config.get("official_category_lookup_user_limit")
+        category_scan_user_limit = (
+            max(1, int(category_scan_user_limit_raw))
+            if isinstance(category_scan_user_limit_raw, (int, float)) and int(category_scan_user_limit_raw) > 0
+            else total_users
+        )
+        all_condition_ids = _collect_all_condition_ids_from_user_dirs(
+            users_dir=users_dir,
+            summary_map=summary_map,
+            max_users=category_scan_user_limit,
+            progress_every_users=progress_every_users,
+        )
+        condition_limit_raw = config.get("official_category_lookup_condition_limit")
+        condition_limit = (
+            max(1, int(condition_limit_raw))
+            if isinstance(condition_limit_raw, (int, float)) and int(condition_limit_raw) > 0
+            else None
+        )
+        if condition_limit is not None and len(all_condition_ids) > condition_limit:
+            print(
+                f"[WARN] official category lookup truncated: total_conditions={len(all_condition_ids)} "
+                f"limit={condition_limit}",
+                flush=True,
+            )
+            all_condition_ids = all_condition_ids[:condition_limit]
         missing_ids = [item for item in all_condition_ids if item not in official_market_meta_cache]
         print(
             f"[INFO] official category lookup plan: total_conditions={len(all_condition_ids)} "
@@ -1215,7 +1326,8 @@ def main() -> None:
     else:
         print("[INFO] official market category lookup disabled", flush=True)
 
-    for index, payload in enumerate(user_payloads, start=1):
+    for index, user_dir in enumerate(user_dirs, start=1):
+        payload = _load_user_payload(user_dir, summary_map)
         user = payload["user"]
         closed_rows = payload["closed_rows"]
         open_rows = payload["open_rows"]
