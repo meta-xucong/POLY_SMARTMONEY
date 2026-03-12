@@ -517,6 +517,13 @@ def _apply_filters(
     _check_min("min_account_age_days", "account_age_days")
     _check_min("min_political_condition_ratio", "political_condition_ratio")
     _check_min("min_stability_score", "stability_score")
+    _check_min("min_recent_closed_count", "recent_closed_count")
+    _check_min("min_recent_action_count", "recent_action_count")
+    _check_min("min_recent_condition_count", "recent_condition_count")
+    _check_min("min_recent_active_days", "recent_active_days")
+    _check_min("min_recent_trades_per_day", "recent_trades_per_day")
+    _check_min("min_recent_political_condition_ratio", "recent_political_condition_ratio")
+    _check_min("min_leaderboard_month_pnl", "leaderboard_month_pnl")
     _check_max("max_trades_per_day", "trades_per_day")
     _check_max("max_daily_trades", "max_trades_per_day")
     _check_max("max_p90_cost", "p90_cost")
@@ -548,6 +555,14 @@ def _apply_filters(
             failures.append(f"max_loss<{max_loss_threshold}")
         elif max_loss < max_loss_threshold:
             failures.append(f"max_loss<{max_loss_threshold}")
+
+    max_last_trade_days_ago = filters.get("max_last_trade_days_ago")
+    last_trade_days_ago = metrics.get("last_trade_days_ago")
+    if max_last_trade_days_ago is not None:
+        if last_trade_days_ago is None:
+            failures.append(f"last_trade_days_ago>{max_last_trade_days_ago}")
+        elif last_trade_days_ago > max_last_trade_days_ago:
+            failures.append(f"last_trade_days_ago>{max_last_trade_days_ago}")
 
     min_lifetime_pnl = filters.get("min_lifetime_realized_pnl")
     lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
@@ -754,6 +769,46 @@ def _build_features(
     if asof_time is None:
         asof_time = dt.datetime.now(tz=dt.timezone.utc)
 
+    recent_window_days = float(config.get("recent_window_days", 30))
+    if recent_window_days <= 0:
+        recent_window_days = 30.0
+    recent_cutoff = asof_time - dt.timedelta(days=recent_window_days)
+
+    recent_closed_rows: List[Dict[str, str]] = []
+    recent_trade_action_rows: List[Dict[str, str]] = []
+    recent_timing_timestamps: List[dt.datetime] = []
+    for row in closed_rows:
+        ts = _parse_datetime(row.get("timestamp", ""))
+        if ts is not None and ts >= recent_cutoff:
+            recent_closed_rows.append(row)
+    for row in trade_action_rows:
+        ts = _parse_datetime(row.get("timestamp", ""))
+        if ts is not None and ts >= recent_cutoff:
+            recent_trade_action_rows.append(row)
+            recent_timing_timestamps.append(ts)
+    if not recent_timing_timestamps:
+        for row in recent_closed_rows:
+            ts = _parse_datetime(row.get("timestamp", ""))
+            if ts is not None:
+                recent_timing_timestamps.append(ts)
+
+    recent_market_profile_metrics = _compute_political_and_hedge_metrics(
+        closed_rows=recent_closed_rows,
+        open_rows=recent_trade_action_rows,
+        config=config,
+        official_market_meta_by_condition=official_market_meta_by_condition,
+    )
+    recent_daily_counts = _collect_daily_counts(recent_timing_timestamps)
+    recent_active_days = float(len(recent_daily_counts))
+    recent_timing_count = len(recent_timing_timestamps)
+    recent_trades_per_day = recent_timing_count / recent_window_days if recent_window_days > 0 else None
+    last_trade_ts = max(timing_timestamps) if timing_timestamps else None
+    last_trade_days_ago = (
+        max((asof_time - last_trade_ts).total_seconds() / 86400.0, 0.0)
+        if last_trade_ts is not None
+        else None
+    )
+
     end_day = (end_time or asof_time).date()
     if start_time:
         start_day = start_time.date()
@@ -872,6 +927,19 @@ def _build_features(
         "trade_actions_records": trade_actions_records,
         "trade_actions_actions": trade_actions_actions,
         "leaderboard_month_pnl": leaderboard_month_pnl,
+        "recent_window_days": recent_window_days,
+        "recent_closed_count": float(len(recent_closed_rows)),
+        "recent_action_count": float(len(recent_trade_action_rows)),
+        "recent_active_days": recent_active_days,
+        "recent_trades_per_day": recent_trades_per_day,
+        "recent_condition_count": float(recent_market_profile_metrics.get("total_condition_count", 0.0)),
+        "recent_political_condition_count": float(
+            recent_market_profile_metrics.get("political_condition_count", 0.0)
+        ),
+        "recent_political_condition_ratio": float(
+            recent_market_profile_metrics.get("political_condition_ratio", 0.0)
+        ),
+        "last_trade_days_ago": last_trade_days_ago,
         "action_timing_count": len(action_timestamps),
         "profit_day_ratio": profit_day_ratio,
         "daily_sharpe_like": daily_sharpe_like,
