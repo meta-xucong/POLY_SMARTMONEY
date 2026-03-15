@@ -447,12 +447,26 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
     max_drawdown_ratio = float(metrics.get("max_drawdown_ratio") or 0.0)
     pnl_top1_day_share = float(metrics.get("pnl_top1_day_share") or 0.0)
     sharpe_like = float(metrics.get("daily_sharpe_like") or 0.0)
+    recent_active_days = float(metrics.get("recent_active_days") or 0.0)
+    recent_window_days = max(float(metrics.get("recent_window_days") or 0.0), 1.0)
+    recent_topic_ratio = float(metrics.get("recent_political_condition_ratio") or 0.0)
+    recent_action_count = float(metrics.get("recent_action_count") or 0.0)
+    political_ratio = float(metrics.get("political_condition_ratio") or 0.0)
+    specialist_active_ratio = _clamp01(recent_active_days / recent_window_days)
+    specialist_topic_ratio = max(recent_topic_ratio, political_ratio)
+    specialist_profile = _is_event_specialist_profile(metrics, config)
 
     dd_score = 1.0 - _clamp01(max_drawdown_ratio / dd_ratio_cap)
     conc_score = 1.0 - _clamp01(pnl_top1_day_share / conc_cap)
     sharpe_score = _clamp01(_tanh01(max(sharpe_like, 0.0) / 2.0))
 
     window_score = 0.35 * profit_day_ratio + 0.35 * dd_score + 0.15 * conc_score + 0.15 * sharpe_score
+
+    if specialist_profile:
+        # Event-driven specialists often realize PnL in bursts; do not over-penalize that profile.
+        specialist_consistency = 0.55 * specialist_active_ratio + 0.45 * specialist_topic_ratio
+        burst_relief = 0.12 * specialist_consistency + 0.04 * _clamp01(recent_action_count / 100.0)
+        window_score = min(1.0, window_score + burst_relief)
 
     if lifetime_score > 0:
         stability_score = 0.70 * lifetime_score + 0.30 * window_score
@@ -469,6 +483,34 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
         "pnl_top1_day_share": float(pnl_top1_day_share),
         "daily_sharpe_like": float(sharpe_like),
     }
+
+
+def _is_event_specialist_profile(metrics: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    params = config.get("specialist_relief", {})
+    if not isinstance(params, dict):
+        params = {}
+
+    min_topic_ratio = float(params.get("min_topic_ratio", 0.45))
+    min_recent_topic_ratio = float(params.get("min_recent_topic_ratio", 0.25))
+    min_recent_actions = float(params.get("min_recent_actions", 12.0))
+    min_lifetime_pnl = float(params.get("min_lifetime_pnl", 0.0))
+    max_hedge_ratio = float(params.get("max_hedge_ratio", 0.65))
+
+    political_ratio = float(metrics.get("political_condition_ratio") or 0.0)
+    recent_topic_ratio = float(metrics.get("recent_political_condition_ratio") or 0.0)
+    recent_action_count = float(metrics.get("recent_action_count") or 0.0)
+    hedge_ratio = float(metrics.get("hedge_condition_ratio") or 0.0)
+    lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
+
+    if lifetime_pnl is None:
+        return False
+    if float(lifetime_pnl) <= min_lifetime_pnl:
+        return False
+    if hedge_ratio > max_hedge_ratio:
+        return False
+    if recent_action_count < min_recent_actions:
+        return False
+    return political_ratio >= min_topic_ratio or recent_topic_ratio >= min_recent_topic_ratio
 
 
 def _apply_filters(
@@ -493,11 +535,30 @@ def _apply_filters(
             failures.append(f"action_timing_count<{min_action_timing}")
             return False, failures, warnings
 
+    specialist_profile = _is_event_specialist_profile(metrics, config)
+    specialist_params = config.get("specialist_relief", {})
+    if not isinstance(specialist_params, dict):
+        specialist_params = {}
+
+    stability_floor_delta = float(specialist_params.get("stability_floor_delta", 0.12))
+    max_trades_multiplier = float(specialist_params.get("max_trades_multiplier", 4.0))
+    max_daily_trades_multiplier = float(
+        specialist_params.get("max_daily_trades_multiplier", 10.0)
+    )
+    max_minute_burst_ratio_multiplier = float(
+        specialist_params.get("max_minute_burst_ratio_multiplier", 2.0)
+    )
+    max_pnl_top1_day_share_multiplier = float(
+        specialist_params.get("max_pnl_top1_day_share_multiplier", 1.35)
+    )
+
     def _check_min(key: str, label: str) -> None:
         threshold = filters.get(key)
         value = metrics.get(label)
         if threshold is None:
             return
+        if specialist_profile and key == "min_stability_score":
+            threshold = max(float(threshold) - stability_floor_delta, 0.0)
         if value is None or value < threshold:
             failures.append(f"{label}<{threshold}")
 
@@ -506,6 +567,13 @@ def _apply_filters(
         value = metrics.get(label)
         if threshold is None:
             return
+        if specialist_profile:
+            if key == "max_trades_per_day":
+                threshold = float(threshold) * max_trades_multiplier
+            elif key == "max_daily_trades":
+                threshold = float(threshold) * max_daily_trades_multiplier
+            elif key == "max_pnl_top1_day_share":
+                threshold = min(float(threshold) * max_pnl_top1_day_share_multiplier, 1.0)
         if value is None or value > threshold:
             failures.append(f"{label}>{threshold}")
 
@@ -540,13 +608,19 @@ def _apply_filters(
         minute_burst_ratio = metrics.get("minute_burst_ratio")
         near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
         near_expiry_high = float(copy_rules.get("near_expiry_ratio_high", 0.3))
+        effective_max_minute_burst_ratio = float(max_minute_burst_ratio)
+        if specialist_profile:
+            effective_max_minute_burst_ratio = min(
+                effective_max_minute_burst_ratio * max_minute_burst_ratio_multiplier,
+                1.0,
+            )
         if minute_burst_ratio is None:
-            failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
-        elif minute_burst_ratio > max_minute_burst_ratio:
+            failures.append(f"minute_burst_ratio>{effective_max_minute_burst_ratio}")
+        elif minute_burst_ratio > effective_max_minute_burst_ratio:
             if near_expiry_ratio >= near_expiry_high:
                 warnings.append("minute_burst_ratio_high_but_near_expiry")
             else:
-                failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
+                failures.append(f"minute_burst_ratio>{effective_max_minute_burst_ratio}")
 
     max_loss_threshold = filters.get("max_loss")
     max_loss = metrics.get("max_loss")
@@ -576,6 +650,36 @@ def _apply_filters(
             failures.append(f"lifetime_realized_pnl_sum<={min_lifetime_pnl}")
 
     return (len(failures) == 0), failures, warnings
+
+
+def _build_recent_topic_proxy_rows(
+    recent_closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+    recent_trade_action_rows: List[Dict[str, str]],
+) -> Tuple[List[Dict[str, str]], str, float]:
+    if not recent_trade_action_rows:
+        return recent_closed_rows, "closed_only", 0.0
+
+    # trade_actions.csv only preserves timestamps, so it cannot carry topic/category metadata.
+    # Use currently open positions as the best available proxy for themes that the user is still
+    # actively working in the recent window.
+    proxy_rows: List[Dict[str, str]] = list(recent_closed_rows)
+    seen_condition_ids = {
+        _row_condition_id(row) for row in recent_closed_rows if _row_condition_id(row)
+    }
+    proxy_open_condition_count = 0.0
+
+    for row in open_rows:
+        condition_id = _row_condition_id(row)
+        if not condition_id or condition_id in seen_condition_ids:
+            continue
+        proxy_rows.append(row)
+        seen_condition_ids.add(condition_id)
+        proxy_open_condition_count += 1.0
+
+    if proxy_open_condition_count > 0:
+        return proxy_rows, "closed_plus_open_positions", proxy_open_condition_count
+    return recent_closed_rows, "closed_only", 0.0
 
 
 def _build_features(
@@ -792,9 +896,17 @@ def _build_features(
             if ts is not None:
                 recent_timing_timestamps.append(ts)
 
+    recent_topic_rows, recent_topic_proxy_mode, recent_topic_proxy_open_condition_count = (
+        _build_recent_topic_proxy_rows(
+            recent_closed_rows=recent_closed_rows,
+            open_rows=open_rows,
+            recent_trade_action_rows=recent_trade_action_rows,
+        )
+    )
+
     recent_market_profile_metrics = _compute_political_and_hedge_metrics(
-        closed_rows=recent_closed_rows,
-        open_rows=recent_trade_action_rows,
+        closed_rows=recent_topic_rows,
+        open_rows=[],
         config=config,
         official_market_meta_by_condition=official_market_meta_by_condition,
     )
@@ -939,6 +1051,8 @@ def _build_features(
         "recent_political_condition_ratio": float(
             recent_market_profile_metrics.get("political_condition_ratio", 0.0)
         ),
+        "recent_topic_proxy_mode": recent_topic_proxy_mode,
+        "recent_topic_proxy_open_condition_count": recent_topic_proxy_open_condition_count,
         "last_trade_days_ago": last_trade_days_ago,
         "action_timing_count": len(action_timestamps),
         "profit_day_ratio": profit_day_ratio,
