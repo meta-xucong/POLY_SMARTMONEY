@@ -47,6 +47,12 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
             "election",
             "trump",
         ],
+        "recent_days": 90,
+        "max_last_trade_days_ago": 3,
+        "min_topic_trade_count": 3,
+        "min_markets_touched": 2,
+        "include_positions": False,
+        "min_user_score": 2.5,
     },
     "politics_event": {
         "category": "Politics",
@@ -76,6 +82,12 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
             "bitcoin",
             "ethereum",
         ],
+        "recent_days": 90,
+        "max_last_trade_days_ago": 3,
+        "min_topic_trade_count": 3,
+        "min_markets_touched": 2,
+        "include_positions": False,
+        "min_user_score": 2.5,
     },
 }
 
@@ -145,7 +157,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--min-user-score",
         type=float,
-        default=3.0,
+        default=None,
         help="Minimum discovery score required to keep a user in output.",
     )
     parser.add_argument(
@@ -159,6 +171,35 @@ def _parse_args() -> argparse.Namespace:
         type=float,
         default=20.0,
         help="HTTP request timeout.",
+    )
+    parser.add_argument(
+        "--recent-days",
+        type=int,
+        default=None,
+        help="Only count topic trades within this many recent days.",
+    )
+    parser.add_argument(
+        "--max-last-trade-days-ago",
+        type=float,
+        default=None,
+        help="Drop users whose latest topic trade is older than this threshold.",
+    )
+    parser.add_argument(
+        "--min-topic-trade-count",
+        type=int,
+        default=None,
+        help="Minimum recent topic trade count required per user.",
+    )
+    parser.add_argument(
+        "--min-markets-touched",
+        type=int,
+        default=None,
+        help="Minimum distinct topic markets touched per user.",
+    )
+    parser.add_argument(
+        "--include-positions",
+        action="store_true",
+        help="Also use market-positions holders as discovery seeds.",
     )
     return parser.parse_args()
 
@@ -371,22 +412,34 @@ def _extract_markets_from_events(
 
 
 def _update_user_stats_from_trade(
-    user_stats: Dict[str, Dict[str, float]],
+    user_stats: Dict[str, Dict[str, Any]],
     market: Dict[str, Any],
     trade: Dict[str, Any],
+    *,
+    recent_cutoff: Optional[dt.datetime],
 ) -> None:
     user = _normalize_text(trade.get("proxyWallet"))
     if not user:
+        return
+    trade_ts = _parse_datetime(
+        trade.get("timestamp") or trade.get("time") or trade.get("createdAt")
+    )
+    if recent_cutoff is not None and (trade_ts is None or trade_ts < recent_cutoff):
         return
     stats = user_stats[user]
     stats["trade_count"] += 1.0
     stats["trade_volume"] += _parse_float(trade.get("price")) * _parse_float(trade.get("size"))
     stats["market_trade_hits"] += 1.0
     stats.setdefault("markets_touched", set()).add(market["condition_id"])
+    if trade_ts is not None:
+        stats["active_days"].add(trade_ts.date().isoformat())
+        last_trade_at = stats.get("last_trade_at")
+        if last_trade_at is None or trade_ts > last_trade_at:
+            stats["last_trade_at"] = trade_ts
 
 
 def _update_user_stats_from_position(
-    user_stats: Dict[str, Dict[str, float]],
+    user_stats: Dict[str, Dict[str, Any]],
     market: Dict[str, Any],
     position: Dict[str, Any],
 ) -> None:
@@ -457,39 +510,65 @@ def _fetch_market_positions(
     return out
 
 
-def _score_user(stats: Dict[str, float]) -> float:
+def _score_user(stats: Dict[str, Any], *, include_positions: bool) -> float:
     markets_touched = float(len(stats.get("markets_touched", set())))
     trade_hits = float(stats.get("market_trade_hits", 0.0))
     position_hits = float(stats.get("position_market_hits", 0.0))
     trade_volume = float(stats.get("trade_volume", 0.0))
     position_value = float(stats.get("position_value", 0.0))
-    return (
+    score = (
         markets_touched * 1.6
-        + trade_hits * 0.08
-        + position_hits * 0.12
-        + min(trade_volume / 2000.0, 12.0)
-        + min(position_value / 1000.0, 8.0)
+        + trade_hits * 0.18
+        + min(trade_volume / 1500.0, 14.0)
     )
+    if include_positions:
+        score += position_hits * 0.08 + min(position_value / 1500.0, 6.0)
+    return score
 
 
 def _serialize_rows(
-    user_stats: Dict[str, Dict[str, float]],
+    user_stats: Dict[str, Dict[str, Any]],
     *,
     min_user_score: float,
     max_users: int,
+    min_topic_trade_count: int,
+    min_markets_touched: int,
+    max_last_trade_days_ago: Optional[float],
+    include_positions: bool,
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
+    now = dt.datetime.now(tz=dt.timezone.utc)
     for user, stats in user_stats.items():
-        score = _score_user(stats)
+        topic_trade_count = int(stats.get("trade_count", 0.0))
+        markets_touched = len(stats.get("markets_touched", set()))
+        last_trade_at = stats.get("last_trade_at")
+        if topic_trade_count < min_topic_trade_count:
+            continue
+        if markets_touched < min_markets_touched:
+            continue
+        if max_last_trade_days_ago is not None:
+            if last_trade_at is None:
+                continue
+            last_trade_days_ago = (now - last_trade_at).total_seconds() / 86400.0
+            if last_trade_days_ago > max_last_trade_days_ago:
+                continue
+        else:
+            last_trade_days_ago = None
+        score = _score_user(stats, include_positions=include_positions)
         if score < min_user_score:
             continue
         rows.append(
             {
                 "user": user,
                 "discovery_score": round(score, 6),
-                "topic_markets_touched": len(stats.get("markets_touched", set())),
-                "topic_trade_count": int(stats.get("trade_count", 0.0)),
+                "topic_markets_touched": markets_touched,
+                "topic_trade_count": topic_trade_count,
                 "topic_trade_volume": round(float(stats.get("trade_volume", 0.0)), 6),
+                "topic_active_days": len(stats.get("active_days", set())),
+                "last_topic_trade_at": last_trade_at.isoformat() if last_trade_at else "",
+                "last_topic_trade_days_ago": round(last_trade_days_ago, 6)
+                if last_trade_days_ago is not None
+                else "",
                 "topic_position_hits": int(stats.get("position_market_hits", 0.0)),
                 "topic_position_value": round(float(stats.get("position_value", 0.0)), 6),
                 "topic_position_realized_pnl": round(
@@ -500,6 +579,7 @@ def _serialize_rows(
     rows.sort(
         key=lambda item: (
             item["discovery_score"],
+            item["topic_trade_count"],
             item["topic_markets_touched"],
             item["topic_trade_volume"],
         ),
@@ -516,6 +596,9 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         "topic_markets_touched",
         "topic_trade_count",
         "topic_trade_volume",
+        "topic_active_days",
+        "last_topic_trade_at",
+        "last_topic_trade_days_ago",
         "topic_position_hits",
         "topic_position_value",
         "topic_position_realized_pnl",
@@ -530,6 +613,34 @@ def main() -> None:
     args = _parse_args()
     preset = PRESET_CONFIGS[args.preset]
     base_dir = Path(__file__).resolve().parent
+    recent_days = (
+        int(args.recent_days)
+        if args.recent_days is not None
+        else int(preset.get("recent_days", 90))
+    )
+    max_last_trade_days_ago = (
+        float(args.max_last_trade_days_ago)
+        if args.max_last_trade_days_ago is not None
+        else float(preset.get("max_last_trade_days_ago", 45))
+    )
+    min_topic_trade_count = (
+        int(args.min_topic_trade_count)
+        if args.min_topic_trade_count is not None
+        else int(preset.get("min_topic_trade_count", 3))
+    )
+    min_markets_touched = (
+        int(args.min_markets_touched)
+        if args.min_markets_touched is not None
+        else int(preset.get("min_markets_touched", 2))
+    )
+    include_positions = bool(args.include_positions or preset.get("include_positions", False))
+    min_user_score = (
+        float(args.min_user_score)
+        if args.min_user_score is not None
+        else float(preset.get("min_user_score", 3.0))
+    )
+    now = dt.datetime.now(tz=dt.timezone.utc)
+    recent_cutoff = now - dt.timedelta(days=max(1, recent_days))
 
     output_file = (
         Path(args.output_file)
@@ -551,7 +662,8 @@ def main() -> None:
     timeout = float(args.request_timeout_sec)
 
     print(
-        f"[INFO] Discovering topic users: preset={args.preset} category={preset['category']}",
+        f"[INFO] Discovering topic users: preset={args.preset} category={preset['category']} "
+        f"recent_days={recent_days} include_positions={str(include_positions).lower()}",
         flush=True,
     )
     events = _fetch_matching_events(
@@ -572,7 +684,7 @@ def main() -> None:
     )
     print(f"[INFO] Kept markets: {len(markets)}", flush=True)
 
-    user_stats: Dict[str, Dict[str, float]] = defaultdict(
+    user_stats: Dict[str, Dict[str, Any]] = defaultdict(
         lambda: {
             "trade_count": 0.0,
             "trade_volume": 0.0,
@@ -581,6 +693,8 @@ def main() -> None:
             "position_value": 0.0,
             "position_realized_pnl": 0.0,
             "markets_touched": set(),
+            "active_days": set(),
+            "last_trade_at": None,
         }
     )
 
@@ -599,28 +713,38 @@ def main() -> None:
                 timeout=timeout,
             )
             for trade in trades:
-                _update_user_stats_from_trade(user_stats, market, trade)
+                _update_user_stats_from_trade(
+                    user_stats,
+                    market,
+                    trade,
+                    recent_cutoff=recent_cutoff,
+                )
 
-            positions = _fetch_market_positions(
-                session,
-                market_condition_id=condition_id,
-                timeout=timeout,
-            )
-            positions.sort(
-                key=lambda item: _parse_float(item.get("currentValue"))
-                + _parse_float(item.get("realizedPnl")),
-                reverse=True,
-            )
-            for position in positions[: max(1, int(args.max_position_users_per_token))]:
-                _update_user_stats_from_position(user_stats, market, position)
+            if include_positions:
+                positions = _fetch_market_positions(
+                    session,
+                    market_condition_id=condition_id,
+                    timeout=timeout,
+                )
+                positions.sort(
+                    key=lambda item: _parse_float(item.get("currentValue"))
+                    + _parse_float(item.get("realizedPnl")),
+                    reverse=True,
+                )
+                for position in positions[: max(1, int(args.max_position_users_per_token))]:
+                    _update_user_stats_from_position(user_stats, market, position)
         except requests.RequestException as exc:
             print(f"[WARN] market discovery failed for {condition_id}: {exc}", flush=True)
         _sleep_with_jitter(DISCOVERY_MIN_REQUEST_INTERVAL, jitter_ratio=0.05)
 
     rows = _serialize_rows(
         user_stats,
-        min_user_score=float(args.min_user_score),
+        min_user_score=min_user_score,
         max_users=max(1, int(args.max_users)),
+        min_topic_trade_count=max(1, min_topic_trade_count),
+        min_markets_touched=max(1, min_markets_touched),
+        max_last_trade_days_ago=max_last_trade_days_ago,
+        include_positions=include_positions,
     )
     _write_csv(output_file, rows)
 
@@ -637,7 +761,13 @@ def main() -> None:
         "min_market_volume": args.min_market_volume,
         "trade_pages_per_market": args.trade_pages_per_market,
         "max_position_users_per_token": args.max_position_users_per_token,
-        "min_user_score": args.min_user_score,
+        "recent_days": recent_days,
+        "recent_cutoff": recent_cutoff.isoformat(),
+        "max_last_trade_days_ago": max_last_trade_days_ago,
+        "min_topic_trade_count": min_topic_trade_count,
+        "min_markets_touched": min_markets_touched,
+        "include_positions": include_positions,
+        "min_user_score": min_user_score,
         "sample_markets": markets[:20],
         "top_users": rows[:20],
     }
