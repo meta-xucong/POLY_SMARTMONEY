@@ -1,6 +1,6 @@
 {
   "extends": "screen_users_config.json",
-  "_comment_extends": "Focused override config for NBA/NCAAB human-like profitable accounts",
+  "_comment_extends": "Config tuned for NBA/NCAAB-focused profitable accounts with human-like behavior but tolerance for active event trading",
 
   "use_official_market_category": true,
   "political_keywords": [
@@ -8,15 +8,19 @@
     "ncaab",
     "ncaa basketball",
     "college basketball",
-    "basketball"
+    "basketball",
+    "march madness",
+    "playoffs",
+    "final four"
   ],
   "official_political_categories": [
     "nba",
     "ncaab",
-    "basketball"
+    "basketball",
+    "sports"
   ],
 
-  "recent_window_days": 45,
+  "recent_window_days": 30,
   "max_users_to_scan": 5000,
   "official_category_lookup_user_limit": 5000,
   "official_category_lookup_condition_limit": 60000,
@@ -30,46 +34,70 @@
     "min_closed_count": 15,
     "min_account_age_days": 300,
     "min_lifetime_realized_pnl": 0,
-    "min_political_condition_ratio": 0.55,
-    "max_hedge_condition_ratio": 0.35,
-    "min_stability_score": 0.25,
-    "max_max_drawdown_ratio": 0.70,
-    "max_pnl_top1_day_share": 0.65,
-    "max_trades_per_day": 35,
-    "max_daily_trades": 80,
-    "min_bayes_win_rate": 0.51,
-    "max_tail_high_ratio": 0.85,
-    "max_tail_low_ratio": 0.60,
-    "min_mid_ratio": 0.05,
-    "max_minute_burst_ratio": 0.35,
-    "min_interval_median_minutes": 1.5,
+    "min_political_condition_ratio": 0.60,
+    "max_hedge_condition_ratio": 0.40,
+    "min_stability_score": 0.18,
+    "max_max_drawdown_ratio": 0.80,
+    "max_pnl_top1_day_share": 0.75,
 
-    "min_recent_closed_count": 4,
-    "min_recent_action_count": 8,
-    "min_recent_condition_count": 3,
+    "max_trades_per_day": 50,
+    "max_daily_trades": 180,
+    "min_bayes_win_rate": 0.51,
+    "min_median_roi": 0.0,
+
+    "max_tail_high_ratio": 0.90,
+    "max_tail_low_ratio": 0.70,
+    "min_mid_ratio": 0.03,
+    "max_minute_burst_ratio": 0.50,
+    "min_interval_median_minutes": 0.5,
+
+    "min_recent_closed_count": 3,
+    "min_recent_action_count": 12,
+    "min_recent_condition_count": 4,
     "min_recent_active_days": 4,
-    "min_recent_trades_per_day": 0.15,
-    "min_recent_political_condition_ratio": 0.50,
-    "max_last_trade_days_ago": 30
+    "min_recent_trades_per_day": 0.20,
+    "min_recent_political_condition_ratio": 0.55,
+    "max_last_trade_days_ago": 21
+  },
+
+  "specialist_relief": {
+    "min_topic_ratio": 0.65,
+    "min_recent_topic_ratio": 0.55,
+    "min_recent_actions": 18,
+    "min_lifetime_pnl": 0.0,
+    "max_hedge_ratio": 0.45,
+    "stability_floor_delta": 0.06,
+    "max_trades_multiplier": 1.8,
+    "max_daily_trades_multiplier": 2.5,
+    "max_minute_burst_ratio_multiplier": 1.3,
+    "max_pnl_top1_day_share_multiplier": 1.10
+  },
+
+  "stability_params": {
+    "rate_cap": 120.0,
+    "share_cap": 0.80,
+    "surge_cap": 8.0,
+    "dd_ratio_cap": 1.0,
+    "conc_cap": 0.80
   },
 
   "score_weights": {
-    "bayes_win_rate": 0.20,
-    "median_roi": 0.10,
-    "profit_factor": 0.08,
-    "mid_ratio": 0.06,
-    "interval_median_minutes": 0.05,
+    "bayes_win_rate": 0.22,
+    "median_roi": 0.06,
+    "profit_factor": 0.10,
+    "mid_ratio": 0.04,
+    "interval_median_minutes": 0.02,
     "recent_closed_count": 0.10,
     "recent_action_count": 0.12,
     "recent_condition_count": 0.10,
     "recent_active_days": 0.10,
     "recent_trades_per_day": 0.08,
-    "recent_political_condition_ratio": 0.14,
-    "minute_burst_ratio": -0.10,
-    "tail_high_ratio": -0.04,
-    "tail_low_ratio": -0.04,
-    "trades_per_day": -0.08,
-    "burstiness": -0.07,
+    "recent_political_condition_ratio": 0.16,
+    "minute_burst_ratio": -0.05,
+    "tail_high_ratio": -0.02,
+    "tail_low_ratio": -0.02,
+    "trades_per_day": -0.06,
+    "burstiness": -0.05,
     "near_expiry_ratio": -0.02,
     "last_trade_days_ago": -0.08,
     "p90_cost": 0.0,
@@ -83,23 +111,33 @@
     "mid_ratio": 1.0,
     "interval_median_minutes": 120,
     "recent_closed_count": 30,
-    "recent_action_count": 80,
-    "recent_condition_count": 20,
-    "recent_active_days": 20,
-    "recent_trades_per_day": 3.0,
+    "recent_action_count": 120,
+    "recent_condition_count": 25,
+    "recent_active_days": 30,
+    "recent_trades_per_day": 4.0,
     "recent_political_condition_ratio": 1.0,
     "minute_burst_ratio": 1.0,
     "tail_high_ratio": 1.0,
     "tail_low_ratio": 1.0,
-    "trades_per_day": 40,
-    "burstiness": 8,
-    "near_expiry_ratio": 0.8,
-    "last_trade_days_ago": 60,
+    "trades_per_day": 80,
+    "burstiness": 12,
+    "near_expiry_ratio": 1.0,
+    "last_trade_days_ago": 30,
     "p90_cost": 50000,
     "open_exposure": 300000
   },
 
-  "stability_weight": 0.45,
+  "stability_weight": 0.32,
+
+  "label_rules": {
+    "copy_style": {
+      "minute_burst_ratio_high": 0.45,
+      "interval_median_minutes_fast": 2,
+      "trades_per_day_high": 45,
+      "burstiness_high": 6,
+      "near_expiry_ratio_high": 0.35
+    }
+  },
 
   "final_output": {
     "sort_by": "copy_score",
