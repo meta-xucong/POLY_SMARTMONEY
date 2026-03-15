@@ -3,7 +3,10 @@ from __future__ import annotations
 import argparse
 import csv
 import datetime as dt
+import email.utils
 import json
+import os
+import random
 import time
 from collections import defaultdict
 from pathlib import Path
@@ -14,6 +17,10 @@ import requests
 
 GAMMA_API_ROOT = "https://gamma-api.polymarket.com"
 DATA_API_ROOT = "https://data-api.polymarket.com"
+DISCOVERY_MAX_BACKOFF_SECONDS = float(os.environ.get("SMART_DISCOVERY_MAX_BACKOFF", "30"))
+DISCOVERY_MIN_REQUEST_INTERVAL = float(
+    os.environ.get("SMART_DISCOVERY_MIN_REQUEST_INTERVAL", "0.35")
+)
 
 PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
     "nba_ncaab": {
@@ -189,6 +196,65 @@ def _parse_datetime(value: object) -> Optional[dt.datetime]:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def _sleep_with_jitter(wait: float, jitter_ratio: float = 0.1) -> None:
+    if wait <= 0:
+        return
+    jitter = min(wait * jitter_ratio, 1.0)
+    time.sleep(wait + random.random() * jitter)
+
+
+def _parse_retry_after(header_value: Optional[str]) -> Optional[float]:
+    if not header_value:
+        return None
+    try:
+        return float(header_value)
+    except ValueError:
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(header_value)
+    except (TypeError, ValueError):
+        return None
+    if parsed is None:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=dt.timezone.utc)
+    return max((parsed - dt.datetime.now(tz=dt.timezone.utc)).total_seconds(), 0.0)
+
+
+def _paced_get(
+    session: requests.Session,
+    url: str,
+    *,
+    params: Optional[Dict[str, Any]],
+    timeout: float,
+    retries: int,
+) -> requests.Response:
+    wait = 1.0
+    for attempt in range(1, retries + 1):
+        try:
+            response = session.get(url, params=params, timeout=timeout)
+            response.raise_for_status()
+            _sleep_with_jitter(DISCOVERY_MIN_REQUEST_INTERVAL, jitter_ratio=0.05)
+            return response
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else None
+            retryable = status == 429 or (status is not None and 500 <= status < 600)
+            if not retryable or attempt >= retries:
+                raise
+            retry_after = None
+            if status == 429 and exc.response is not None:
+                retry_after = _parse_retry_after(exc.response.headers.get("Retry-After"))
+            _sleep_with_jitter(
+                retry_after if retry_after is not None else min(wait, DISCOVERY_MAX_BACKOFF_SECONDS)
+            )
+            wait = min(wait * 2.0, DISCOVERY_MAX_BACKOFF_SECONDS)
+        except requests.RequestException:
+            if attempt >= retries:
+                raise
+            _sleep_with_jitter(min(wait, DISCOVERY_MAX_BACKOFF_SECONDS))
+            wait = min(wait * 2.0, DISCOVERY_MAX_BACKOFF_SECONDS)
+
+
 def _request_json(
     session: requests.Session,
     url: str,
@@ -197,18 +263,14 @@ def _request_json(
     timeout: float,
     retries: int = 3,
 ) -> Any:
-    wait = 1.0
-    for attempt in range(1, retries + 1):
-        try:
-            resp = session.get(url, params=params, timeout=timeout)
-            resp.raise_for_status()
-            return resp.json()
-        except requests.RequestException:
-            if attempt >= retries:
-                raise
-            time.sleep(wait)
-            wait = min(wait * 2.0, 8.0)
-    raise RuntimeError("unreachable")
+    resp = _paced_get(
+        session,
+        url,
+        params=params,
+        timeout=timeout,
+        retries=retries,
+    )
+    return resp.json()
 
 
 def _event_matches(
@@ -553,6 +615,7 @@ def main() -> None:
                 _update_user_stats_from_position(user_stats, market, position)
         except requests.RequestException as exc:
             print(f"[WARN] market discovery failed for {condition_id}: {exc}", flush=True)
+        _sleep_with_jitter(DISCOVERY_MIN_REQUEST_INTERVAL, jitter_ratio=0.05)
 
     rows = _serialize_rows(
         user_stats,
