@@ -2462,12 +2462,38 @@ def main() -> None:
         if timeout_sec == last_http_timeout:
             return
         try:
-            import httpx
+            import requests
             from py_clob_client.http_helpers import helpers as clob_http_helpers
 
-            clob_http_helpers._http_client = httpx.Client(http2=True, timeout=timeout_sec)
+            read_timeout = float(timeout_sec) if timeout_sec is not None else 20.0
+            connect_timeout = max(1.0, min(5.0, read_timeout))
+
+            def _request_with_timeout(endpoint: str, method: str, headers=None, data=None):
+                try:
+                    headers = clob_http_helpers.overloadHeaders(method, headers)
+                    resp = requests.request(
+                        method=method,
+                        url=endpoint,
+                        headers=headers,
+                        json=data if data else None,
+                        timeout=(connect_timeout, read_timeout),
+                    )
+                    if resp.status_code != 200:
+                        raise clob_http_helpers.PolyApiException(resp)
+                    try:
+                        return resp.json()
+                    except requests.JSONDecodeError:
+                        return resp.text
+                except requests.RequestException:
+                    raise clob_http_helpers.PolyApiException(error_msg="Request exception!")
+
+            clob_http_helpers.request = _request_with_timeout
             last_http_timeout = timeout_sec
-            logger.info("[HTTP_TIMEOUT] clob_client httpx timeout=%s", timeout_sec)
+            logger.info(
+                "[HTTP_TIMEOUT] clob_client requests timeout connect=%s read=%s",
+                connect_timeout,
+                read_timeout,
+            )
         except Exception as exc:
             logger.warning("[HTTP_TIMEOUT] failed to set timeout=%s: %s", timeout_sec, exc)
 
