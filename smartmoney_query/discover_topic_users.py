@@ -54,9 +54,9 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "min_markets_touched": 2,
         "include_positions": False,
         "min_user_score": 2.5,
-        "events_limit": 4000,
-        "max_markets": 500,
-        "trade_pages_per_market": 8,
+        "events_limit": 1000,
+        "max_markets": 80,
+        "trade_pages_per_market": 2,
         "max_users": 10000,
     },
     "politics_event": {
@@ -94,9 +94,9 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
         "min_markets_touched": 2,
         "include_positions": False,
         "min_user_score": 2.5,
-        "events_limit": 4000,
-        "max_markets": 500,
-        "trade_pages_per_market": 8,
+        "events_limit": 1200,
+        "max_markets": 100,
+        "trade_pages_per_market": 2,
         "max_users": 10000,
     },
 }
@@ -253,6 +253,21 @@ def _parse_datetime(value: object) -> Optional[dt.datetime]:
     return parsed.astimezone(dt.timezone.utc)
 
 
+def _parse_timestamp(value: object) -> Optional[dt.datetime]:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return dt.datetime.fromtimestamp(float(value), tz=dt.timezone.utc)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        numeric = float(text)
+    except ValueError:
+        return _parse_datetime(text)
+    return dt.datetime.fromtimestamp(numeric, tz=dt.timezone.utc)
+
+
 def _sleep_with_jitter(wait: float, jitter_ratio: float = 0.1) -> None:
     if wait <= 0:
         return
@@ -330,18 +345,21 @@ def _request_json(
     return resp.json()
 
 
-def _event_matches(
-    event: Dict[str, Any],
+def _market_matches(
+    market: Dict[str, Any],
     *,
     keywords: List[str],
     exclude_keywords: List[str],
 ) -> bool:
     text_blob = " ".join(
         [
-            _normalize_text(event.get("title")),
-            _normalize_text(event.get("slug")),
-            _normalize_text(event.get("description")),
-            _normalize_text(event.get("category")),
+            _normalize_text(market.get("question")),
+            _normalize_text(market.get("title")),
+            _normalize_text(market.get("slug")),
+            _normalize_text(market.get("description")),
+            _normalize_text(market.get("category")),
+            _normalize_text(market.get("groupItemTitle")),
+            _normalize_text(market.get("eventTitle")),
         ]
     ).strip()
     if not text_blob:
@@ -351,64 +369,44 @@ def _event_matches(
     return any(item in text_blob for item in keywords)
 
 
-def _fetch_matching_events(
+def _fetch_matching_markets(
     session: requests.Session,
     *,
-    category: str,
     keywords: List[str],
     exclude_keywords: List[str],
-    events_limit: int,
-    min_event_volume: float,
+    markets_scan_limit: int,
+    min_market_volume: float,
+    recent_market_cutoff: Optional[dt.datetime],
     timeout: float,
 ) -> List[Dict[str, Any]]:
     matched: List[Dict[str, Any]] = []
+    seen: set[str] = set()
     offset = 0
     page_size = 100
-    while offset < max(events_limit, page_size):
+    while offset < max(markets_scan_limit, page_size):
         payload = _request_json(
             session,
-            f"{GAMMA_API_ROOT}/events",
+            f"{GAMMA_API_ROOT}/markets",
             params={
                 "limit": page_size,
                 "offset": offset,
-                "category": category,
+                "active": "true",
+                "closed": "false",
                 "archived": "false",
             },
             timeout=timeout,
         )
         if not isinstance(payload, list) or not payload:
             break
-        for event in payload:
-            if not isinstance(event, dict):
-                continue
-            if not _event_matches(event, keywords=keywords, exclude_keywords=exclude_keywords):
-                continue
-            if _parse_float(event.get("volume")) < min_event_volume:
-                continue
-            matched.append(event)
-        offset += len(payload)
-        if offset >= events_limit or len(payload) < page_size:
-            break
-    return matched
-
-
-def _extract_markets_from_events(
-    events: Iterable[Dict[str, Any]],
-    *,
-    min_market_volume: float,
-    max_markets: int,
-    recent_market_cutoff: Optional[dt.datetime],
-) -> List[Dict[str, Any]]:
-    seen: set[str] = set()
-    markets: List[Dict[str, Any]] = []
-    for event in events:
-        for market in event.get("markets") or []:
+        for market in payload:
             if not isinstance(market, dict):
+                continue
+            if not _market_matches(market, keywords=keywords, exclude_keywords=exclude_keywords):
                 continue
             condition_id = _normalize_text(market.get("conditionId"))
             if not condition_id or condition_id in seen:
                 continue
-            market_time = _parse_market_recency_time(event, market)
+            market_time = _parse_market_recency_time({}, market)
             if recent_market_cutoff is not None:
                 if market_time is None or market_time < recent_market_cutoff:
                     continue
@@ -416,27 +414,42 @@ def _extract_markets_from_events(
             if market_volume < min_market_volume:
                 continue
             seen.add(condition_id)
-            markets.append(
+            matched.append(
                 {
                     "condition_id": condition_id,
                     "slug": market.get("slug") or "",
-                    "question": market.get("question") or "",
-                    "event_slug": event.get("slug") or "",
-                    "event_title": event.get("title") or "",
-                    "event_id": str(event.get("id") or "").strip(),
-                    "event_volume": _parse_float(event.get("volume")),
+                    "question": market.get("question") or market.get("title") or "",
+                    "event_slug": market.get("groupItemSlug") or "",
+                    "event_title": market.get("groupItemTitle")
+                    or market.get("eventTitle")
+                    or "",
+                    "event_id": str(
+                        market.get("groupItemId") or market.get("eventId") or ""
+                    ).strip(),
+                    "event_volume": market_volume,
                     "market_volume": market_volume,
                     "market_time": market_time.isoformat() if market_time else "",
                 }
             )
-    markets.sort(key=lambda item: (item["event_volume"], item["market_volume"]), reverse=True)
-    return markets[:max_markets]
+        offset += len(payload)
+        if offset >= markets_scan_limit or len(payload) < page_size:
+            break
+    matched.sort(
+        key=lambda item: (
+            item["market_time"],
+            item["market_volume"],
+            item["event_volume"],
+        ),
+        reverse=True,
+    )
+    return matched
 
 
 def _parse_market_recency_time(
     event: Dict[str, Any],
     market: Dict[str, Any],
 ) -> Optional[dt.datetime]:
+    candidates: List[dt.datetime] = []
     for source in (market, event):
         for key in (
             "endDate",
@@ -444,15 +457,17 @@ def _parse_market_recency_time(
             "startDate",
             "start_date",
             "gameStartTime",
-            "createdAt",
             "updatedAt",
             "resolveDate",
             "resolutionDate",
+            "createdAt",
         ):
             parsed = _parse_datetime(source.get(key))
             if parsed is not None:
-                return parsed
-    return None
+                candidates.append(parsed)
+    if not candidates:
+        return None
+    return max(candidates)
 
 
 def _update_user_stats_from_trade(
@@ -465,7 +480,7 @@ def _update_user_stats_from_trade(
     user = _normalize_text(trade.get("proxyWallet"))
     if not user:
         return
-    trade_ts = _parse_datetime(
+    trade_ts = _parse_timestamp(
         trade.get("timestamp") or trade.get("time") or trade.get("createdAt")
     )
     if recent_cutoff is not None and (trade_ts is None or trade_ts < recent_cutoff):
@@ -741,23 +756,17 @@ def main() -> None:
         f"include_positions={str(include_positions).lower()} max_users={max_users}",
         flush=True,
     )
-    events = _fetch_matching_events(
+    markets = _fetch_matching_markets(
         session,
-        category=str(preset["category"]),
         keywords=list(preset["keywords"]),
         exclude_keywords=list(preset["exclude_keywords"]),
-        events_limit=max(1, events_limit),
-        min_event_volume=float(args.min_event_volume),
+        markets_scan_limit=max(1, events_limit),
+        min_market_volume=float(args.min_market_volume),
+        recent_market_cutoff=recent_market_cutoff,
         timeout=timeout,
     )
-    print(f"[INFO] Matched events: {len(events)}", flush=True)
-
-    markets = _extract_markets_from_events(
-        events,
-        min_market_volume=float(args.min_market_volume),
-        max_markets=max(1, max_markets),
-        recent_market_cutoff=recent_market_cutoff,
-    )
+    print(f"[INFO] Matched markets: {len(markets)}", flush=True)
+    markets = markets[: max(1, max_markets)]
     print(f"[INFO] Kept markets: {len(markets)}", flush=True)
 
     user_stats: Dict[str, Dict[str, Any]] = defaultdict(
@@ -828,7 +837,8 @@ def main() -> None:
         "preset": args.preset,
         "output_file": str(output_file),
         "generated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
-        "matched_events": len(events),
+        "matched_events": 0,
+        "matched_markets": len(markets),
         "kept_markets": len(markets),
         "discovered_users": len(rows),
         "events_limit": events_limit,
