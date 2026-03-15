@@ -48,11 +48,16 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
             "trump",
         ],
         "recent_days": 90,
+        "recent_market_days": 21,
         "max_last_trade_days_ago": 3,
         "min_topic_trade_count": 3,
         "min_markets_touched": 2,
         "include_positions": False,
         "min_user_score": 2.5,
+        "events_limit": 4000,
+        "max_markets": 500,
+        "trade_pages_per_market": 8,
+        "max_users": 10000,
     },
     "politics_event": {
         "category": "Politics",
@@ -83,11 +88,16 @@ PRESET_CONFIGS: Dict[str, Dict[str, Any]] = {
             "ethereum",
         ],
         "recent_days": 90,
+        "recent_market_days": 45,
         "max_last_trade_days_ago": 3,
         "min_topic_trade_count": 3,
         "min_markets_touched": 2,
         "include_positions": False,
         "min_user_score": 2.5,
+        "events_limit": 4000,
+        "max_markets": 500,
+        "trade_pages_per_market": 8,
+        "max_users": 10000,
     },
 }
 
@@ -115,13 +125,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--events-limit",
         type=int,
-        default=1200,
+        default=None,
         help="Maximum number of Gamma events to scan.",
     )
     parser.add_argument(
         "--max-markets",
         type=int,
-        default=150,
+        default=None,
         help="Maximum matched markets kept for user discovery.",
     )
     parser.add_argument(
@@ -145,7 +155,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--trade-pages-per-market",
         type=int,
-        default=5,
+        default=None,
         help="How many latest trade pages to inspect per market.",
     )
     parser.add_argument(
@@ -163,7 +173,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-users",
         type=int,
-        default=2000,
+        default=None,
         help="Maximum discovered users written to output.",
     )
     parser.add_argument(
@@ -200,6 +210,12 @@ def _parse_args() -> argparse.Namespace:
         "--include-positions",
         action="store_true",
         help="Also use market-positions holders as discovery seeds.",
+    )
+    parser.add_argument(
+        "--recent-market-days",
+        type=int,
+        default=None,
+        help="Only keep topic markets whose end/start/update time is within this many recent days.",
     )
     return parser.parse_args()
 
@@ -381,6 +397,7 @@ def _extract_markets_from_events(
     *,
     min_market_volume: float,
     max_markets: int,
+    recent_market_cutoff: Optional[dt.datetime],
 ) -> List[Dict[str, Any]]:
     seen: set[str] = set()
     markets: List[Dict[str, Any]] = []
@@ -391,6 +408,10 @@ def _extract_markets_from_events(
             condition_id = _normalize_text(market.get("conditionId"))
             if not condition_id or condition_id in seen:
                 continue
+            market_time = _parse_market_recency_time(event, market)
+            if recent_market_cutoff is not None:
+                if market_time is None or market_time < recent_market_cutoff:
+                    continue
             market_volume = _parse_float(market.get("volume"))
             if market_volume < min_market_volume:
                 continue
@@ -405,10 +426,33 @@ def _extract_markets_from_events(
                     "event_id": str(event.get("id") or "").strip(),
                     "event_volume": _parse_float(event.get("volume")),
                     "market_volume": market_volume,
+                    "market_time": market_time.isoformat() if market_time else "",
                 }
             )
     markets.sort(key=lambda item: (item["event_volume"], item["market_volume"]), reverse=True)
     return markets[:max_markets]
+
+
+def _parse_market_recency_time(
+    event: Dict[str, Any],
+    market: Dict[str, Any],
+) -> Optional[dt.datetime]:
+    for source in (market, event):
+        for key in (
+            "endDate",
+            "end_date",
+            "startDate",
+            "start_date",
+            "gameStartTime",
+            "createdAt",
+            "updatedAt",
+            "resolveDate",
+            "resolutionDate",
+        ):
+            parsed = _parse_datetime(source.get(key))
+            if parsed is not None:
+                return parsed
+    return None
 
 
 def _update_user_stats_from_trade(
@@ -613,10 +657,35 @@ def main() -> None:
     args = _parse_args()
     preset = PRESET_CONFIGS[args.preset]
     base_dir = Path(__file__).resolve().parent
+    events_limit = (
+        int(args.events_limit)
+        if args.events_limit is not None
+        else int(preset.get("events_limit", 1200))
+    )
+    max_markets = (
+        int(args.max_markets)
+        if args.max_markets is not None
+        else int(preset.get("max_markets", 150))
+    )
+    trade_pages_per_market = (
+        int(args.trade_pages_per_market)
+        if args.trade_pages_per_market is not None
+        else int(preset.get("trade_pages_per_market", 5))
+    )
+    max_users = (
+        int(args.max_users)
+        if args.max_users is not None
+        else int(preset.get("max_users", 2000))
+    )
     recent_days = (
         int(args.recent_days)
         if args.recent_days is not None
         else int(preset.get("recent_days", 90))
+    )
+    recent_market_days = (
+        int(args.recent_market_days)
+        if args.recent_market_days is not None
+        else int(preset.get("recent_market_days", 0))
     )
     max_last_trade_days_ago = (
         float(args.max_last_trade_days_ago)
@@ -641,6 +710,11 @@ def main() -> None:
     )
     now = dt.datetime.now(tz=dt.timezone.utc)
     recent_cutoff = now - dt.timedelta(days=max(1, recent_days))
+    recent_market_cutoff = (
+        now - dt.timedelta(days=max(1, recent_market_days))
+        if recent_market_days > 0
+        else None
+    )
 
     output_file = (
         Path(args.output_file)
@@ -663,7 +737,8 @@ def main() -> None:
 
     print(
         f"[INFO] Discovering topic users: preset={args.preset} category={preset['category']} "
-        f"recent_days={recent_days} include_positions={str(include_positions).lower()}",
+        f"recent_days={recent_days} recent_market_days={recent_market_days} "
+        f"include_positions={str(include_positions).lower()} max_users={max_users}",
         flush=True,
     )
     events = _fetch_matching_events(
@@ -671,7 +746,7 @@ def main() -> None:
         category=str(preset["category"]),
         keywords=list(preset["keywords"]),
         exclude_keywords=list(preset["exclude_keywords"]),
-        events_limit=max(1, int(args.events_limit)),
+        events_limit=max(1, events_limit),
         min_event_volume=float(args.min_event_volume),
         timeout=timeout,
     )
@@ -680,7 +755,8 @@ def main() -> None:
     markets = _extract_markets_from_events(
         events,
         min_market_volume=float(args.min_market_volume),
-        max_markets=max(1, int(args.max_markets)),
+        max_markets=max(1, max_markets),
+        recent_market_cutoff=recent_market_cutoff,
     )
     print(f"[INFO] Kept markets: {len(markets)}", flush=True)
 
@@ -709,7 +785,7 @@ def main() -> None:
                 session,
                 market_condition_id=condition_id,
                 page_size=max(1, int(args.trade_page_size)),
-                pages_per_market=max(1, int(args.trade_pages_per_market)),
+                pages_per_market=max(1, trade_pages_per_market),
                 timeout=timeout,
             )
             for trade in trades:
@@ -740,7 +816,7 @@ def main() -> None:
     rows = _serialize_rows(
         user_stats,
         min_user_score=min_user_score,
-        max_users=max(1, int(args.max_users)),
+        max_users=max(1, max_users),
         min_topic_trade_count=max(1, min_topic_trade_count),
         min_markets_touched=max(1, min_markets_touched),
         max_last_trade_days_ago=max_last_trade_days_ago,
@@ -755,14 +831,19 @@ def main() -> None:
         "matched_events": len(events),
         "kept_markets": len(markets),
         "discovered_users": len(rows),
-        "events_limit": args.events_limit,
-        "max_markets": args.max_markets,
+        "events_limit": events_limit,
+        "max_markets": max_markets,
         "min_event_volume": args.min_event_volume,
         "min_market_volume": args.min_market_volume,
-        "trade_pages_per_market": args.trade_pages_per_market,
+        "trade_pages_per_market": trade_pages_per_market,
         "max_position_users_per_token": args.max_position_users_per_token,
+        "max_users": max_users,
         "recent_days": recent_days,
         "recent_cutoff": recent_cutoff.isoformat(),
+        "recent_market_days": recent_market_days,
+        "recent_market_cutoff": recent_market_cutoff.isoformat()
+        if recent_market_cutoff is not None
+        else None,
         "max_last_trade_days_ago": max_last_trade_days_ago,
         "min_topic_trade_count": min_topic_trade_count,
         "min_markets_touched": min_markets_touched,
