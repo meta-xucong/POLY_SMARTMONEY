@@ -76,9 +76,9 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    export SMART_QUERY_MAX_RPS=3
    ```
 
-3. **直接执行示例脚本**：仓库根目录已提供 `poly_martmoney_query_run.py`，默认抓取「盈利榜（MONTH）」前 50 名并统计近 30 天数据，结果写入当前目录的 `data/` 下：
+3. **直接执行示例脚本**：旧的全市场入口已归档到 `legacy/poly_martmoney_query_run.py`，默认抓取「盈利榜（MONTH）」前 50 名并统计近 30 天数据，结果写入当前目录的 `data/` 下：
    ```bash
-   python poly_martmoney_query_run.py
+   python legacy/poly_martmoney_query_run.py
    ```
 
 4. **查看输出**：
@@ -87,7 +87,7 @@ write_market_stats_csv(Path("data/market_stats.csv"), stats)
    head -n 5 data/market_stats_summary.csv
    ```
 
-上述流程适合在 VPS 里开一个临时 `tmux`/`screen` 会话直接执行；若要定时运行，可直接调用 `python poly_martmoney_query_run.py` 并配合 `cron` 或 `systemd` 定时。
+上述流程适合在 VPS 里开一个临时 `tmux`/`screen` 会话直接执行；若要定时运行，可直接调用 `python legacy/poly_martmoney_query_run.py` 并配合 `cron` 或 `systemd` 定时。
 
 ## 与参考材料的衔接
 仓库中的《POLYMARKET_MAKER_REVERSE-原版代码参考材料》提供了构建连接、成交查询、条件筛选等已验证逻辑。本套脚本在请求节奏控制与数据解析上延续了原版做法，可直接替换或嵌入到原有自动化流程中，仅需按上述示例导入对应函数即可。
@@ -102,23 +102,23 @@ python -m compileall -q poly_martmoney_query
 若命令通过则表示当前 Python 环境能成功解析本目录脚本。
 
 ## 常用统计口径调整
-`poly_martmoney_query_run.py` 支持通过参数切换排行榜口径与统计窗口，常见需求如下：
+`legacy/poly_martmoney_query_run.py` 支持通过参数切换排行榜口径与统计窗口，常见需求如下：
 
 - **从盈利榜改为成交量榜**：将 `--order-by` 改成 `vol`（Data API 识别为 `VOL`）。
   ```bash
-  python poly_martmoney_query_run.py --order-by vol
+  python legacy/poly_martmoney_query_run.py --order-by vol
   ```
 - **调整 leaderboard 周期**：将 `--period` 改成你需要的口径（例如 `ALL` / `MONTH` 等）。
   ```bash
-  python poly_martmoney_query_run.py --period ALL
+  python legacy/poly_martmoney_query_run.py --period ALL
   ```
 - **调整统计窗口天数**：`--days` 控制 summary 的统计区间，默认 30 天。
   ```bash
-  python poly_martmoney_query_run.py --days 7
+  python legacy/poly_martmoney_query_run.py --days 7
   ```
 - **只统计单地址**：传入 `--user` 会跳过 leaderboard，直接查询该地址。
   ```bash
-  python poly_martmoney_query_run.py --user 0x1234...
+  python legacy/poly_martmoney_query_run.py --user 0x1234...
   ```
 
 输出的 `users_summary.csv`/`summary.csv` 已拆分为：
