@@ -1,0 +1,42 @@
+{
+  "extends": "screen_users_config_human_nba_ncaab.json",
+  "_comment_extends": "Relaxed NBA/NCAAB config keeping core quality constraints while allowing mixed-topic sports traders",
+
+  "filters": {
+    "min_political_condition_ratio": 0.70,
+    "min_recent_political_condition_ratio": 0.70,
+    "max_trades_per_day": 70,
+    "max_daily_trades": 260,
+    "max_minute_burst_ratio": 0.65,
+    "min_recent_action_count": 8,
+    "min_recent_condition_count": 3,
+    "min_recent_active_days": 3,
+    "min_recent_trades_per_day": 0.12,
+    "max_pnl_top1_day_share": 0.85,
+    "max_tail_high_ratio": 0.95,
+    "max_tail_low_ratio": 0.80
+  },
+
+  "specialist_relief": {
+    "min_topic_ratio": 0.75,
+    "min_recent_topic_ratio": 0.70,
+    "min_recent_actions": 12,
+    "min_lifetime_pnl": 0.0,
+    "max_hedge_ratio": 0.45,
+    "stability_floor_delta": 0.08,
+    "max_trades_multiplier": 2.0,
+    "max_daily_trades_multiplier": 3.0,
+    "max_minute_burst_ratio_multiplier": 1.5,
+    "max_pnl_top1_day_share_multiplier": 1.10
+  },
+
+  "label_rules": {
+    "copy_style": {
+      "minute_burst_ratio_high": 0.55,
+      "interval_median_minutes_fast": 2,
+      "trades_per_day_high": 60,
+      "burstiness_high": 8,
+      "near_expiry_ratio_high": 0.35
+    }
+  }
+}

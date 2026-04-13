@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 set -euo pipefail
 
 if [ "$#" -ne 4 ]; then
@@ -41,6 +41,8 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=${PYTHON_BIN} ${REPO_ROOT}/copytrade_v3_muti/copytrade_run.py
 Restart=always
 RestartSec=5
+KillMode=control-group
+TimeoutStopSec=20
 
 StandardOutput=append:${REPO_ROOT}/copytrade_v3_muti/logs/systemd.out.log
 StandardError=append:${REPO_ROOT}/copytrade_v3_muti/logs/systemd.err.log

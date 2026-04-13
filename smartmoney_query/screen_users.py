@@ -7,8 +7,33 @@ import argparse
 import csv
 import datetime as dt
 import json
+import math
+import requests
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+
+
+DEFAULT_POLITICAL_KEYWORDS: List[str] = [
+    "politic",
+    "election",
+    "president",
+    "senate",
+    "congress",
+    "government",
+    "gov",
+    "parliament",
+    "prime minister",
+    "campaign",
+    "vote",
+    "referendum",
+    "policy",
+    "trump",
+    "biden",
+    "harris",
+    "putin",
+    "xi",
+    "zelensky",
+]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -25,7 +50,30 @@ def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"未找到配置文件：{path}")
     with path.open("r", encoding="utf-8") as f:
-        return json.load(f)
+        loaded = json.load(f)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"invalid config payload: {path}")
+
+    extends_value = loaded.get("extends")
+    if not extends_value:
+        return loaded
+
+    extends_path = Path(str(extends_value))
+    if not extends_path.is_absolute():
+        extends_path = (path.parent / extends_path).resolve()
+
+    base_config = _load_config(extends_path)
+    return _merge_config_dicts(base_config, loaded)
+
+
+def _merge_config_dicts(base: Dict[str, Any], override: Dict[str, Any]) -> Dict[str, Any]:
+    merged: Dict[str, Any] = dict(base)
+    for key, value in override.items():
+        if key in merged and isinstance(merged[key], dict) and isinstance(value, dict):
+            merged[key] = _merge_config_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _parse_float(value: str) -> Optional[float]:
@@ -55,6 +103,129 @@ def _parse_datetime(value: str) -> Optional[dt.datetime]:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=dt.timezone.utc)
     return parsed.astimezone(dt.timezone.utc)
+
+
+def _normalize_text(value: object) -> str:
+    if value is None:
+        return ""
+    return str(value).strip().lower()
+
+
+def _row_condition_id(row: Dict[str, str]) -> str:
+    return str(row.get("condition_id") or "").strip().lower()
+
+
+def _row_outcome_side(row: Dict[str, str]) -> Optional[str]:
+    outcome_text = _normalize_text(row.get("outcome"))
+    if "yes" in outcome_text:
+        return "yes"
+    if "no" in outcome_text:
+        return "no"
+
+    outcome_index = _parse_float(row.get("outcome_index", ""))
+    if outcome_index is None:
+        return None
+    if int(outcome_index) in (0, 1):
+        return f"idx_{int(outcome_index)}"
+    return None
+
+
+def _compute_political_and_hedge_metrics(
+    closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+    config: Dict[str, Any],
+    official_market_meta_by_condition: Optional[Dict[str, Dict[str, str]]] = None,
+) -> Dict[str, float]:
+    keyword_values = config.get("political_keywords") or DEFAULT_POLITICAL_KEYWORDS
+    keywords = [
+        _normalize_text(item)
+        for item in keyword_values
+        if isinstance(item, (str, int, float)) and _normalize_text(item)
+    ]
+    if not keywords:
+        keywords = DEFAULT_POLITICAL_KEYWORDS
+
+    official_categories_values = config.get("official_political_categories") or ["politics"]
+    official_categories = [
+        _normalize_text(item)
+        for item in official_categories_values
+        if isinstance(item, (str, int, float)) and _normalize_text(item)
+    ]
+    if not official_categories:
+        official_categories = ["politics"]
+
+    all_rows = list(closed_rows) + list(open_rows)
+    if not all_rows:
+        return {
+            "political_condition_count": 0.0,
+            "total_condition_count": 0.0,
+            "political_condition_ratio": 0.0,
+            "hedge_condition_count": 0.0,
+            "hedge_condition_ratio": 0.0,
+        }
+
+    condition_text: Dict[str, str] = {}
+    condition_sides: Dict[str, set[str]] = {}
+    for row in all_rows:
+        condition_id = _row_condition_id(row)
+        if not condition_id:
+            continue
+        title_text = _normalize_text(row.get("title"))
+        slug_text = _normalize_text(row.get("slug"))
+        merged_text = f"{title_text} {slug_text}".strip()
+        if merged_text:
+            old_text = condition_text.get(condition_id, "")
+            condition_text[condition_id] = f"{old_text} {merged_text}".strip()
+
+        side = _row_outcome_side(row)
+        if side:
+            condition_sides.setdefault(condition_id, set()).add(side)
+
+    condition_ids = sorted(set(condition_text.keys()) | set(condition_sides.keys()))
+    total_conditions = len(condition_ids)
+    if total_conditions <= 0:
+        return {
+            "political_condition_count": 0.0,
+            "total_condition_count": 0.0,
+            "political_condition_ratio": 0.0,
+            "hedge_condition_count": 0.0,
+            "hedge_condition_ratio": 0.0,
+        }
+
+    political_count = 0
+    hedge_count = 0
+    for condition_id in condition_ids:
+        text_blob = condition_text.get(condition_id, "")
+        official_text_blob = ""
+        if isinstance(official_market_meta_by_condition, dict):
+            meta = official_market_meta_by_condition.get(condition_id) or {}
+            if isinstance(meta, dict):
+                official_text_blob = " ".join(
+                    [
+                        _normalize_text(meta.get("category")),
+                        _normalize_text(meta.get("subcategory")),
+                        _normalize_text(meta.get("tag_text")),
+                    ]
+                ).strip()
+
+        if official_text_blob:
+            # Official category/subcategory has higher priority than heuristic text matching.
+            if any(item in official_text_blob for item in official_categories):
+                political_count += 1
+        elif any(keyword in text_blob for keyword in keywords):
+            political_count += 1
+
+        sides = condition_sides.get(condition_id, set())
+        if len(sides) >= 2:
+            hedge_count += 1
+
+    return {
+        "political_condition_count": float(political_count),
+        "total_condition_count": float(total_conditions),
+        "political_condition_ratio": float(political_count) / float(total_conditions),
+        "hedge_condition_count": float(hedge_count),
+        "hedge_condition_ratio": float(hedge_count) / float(total_conditions),
+    }
 
 
 def _read_csv(path: Path) -> List[Dict[str, str]]:
@@ -276,12 +447,26 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
     max_drawdown_ratio = float(metrics.get("max_drawdown_ratio") or 0.0)
     pnl_top1_day_share = float(metrics.get("pnl_top1_day_share") or 0.0)
     sharpe_like = float(metrics.get("daily_sharpe_like") or 0.0)
+    recent_active_days = float(metrics.get("recent_active_days") or 0.0)
+    recent_window_days = max(float(metrics.get("recent_window_days") or 0.0), 1.0)
+    recent_topic_ratio = float(metrics.get("recent_political_condition_ratio") or 0.0)
+    recent_action_count = float(metrics.get("recent_action_count") or 0.0)
+    political_ratio = float(metrics.get("political_condition_ratio") or 0.0)
+    specialist_active_ratio = _clamp01(recent_active_days / recent_window_days)
+    specialist_topic_ratio = max(recent_topic_ratio, political_ratio)
+    specialist_profile = _is_event_specialist_profile(metrics, config)
 
     dd_score = 1.0 - _clamp01(max_drawdown_ratio / dd_ratio_cap)
     conc_score = 1.0 - _clamp01(pnl_top1_day_share / conc_cap)
     sharpe_score = _clamp01(_tanh01(max(sharpe_like, 0.0) / 2.0))
 
     window_score = 0.35 * profit_day_ratio + 0.35 * dd_score + 0.15 * conc_score + 0.15 * sharpe_score
+
+    if specialist_profile:
+        # Event-driven specialists often realize PnL in bursts; do not over-penalize that profile.
+        specialist_consistency = 0.55 * specialist_active_ratio + 0.45 * specialist_topic_ratio
+        burst_relief = 0.12 * specialist_consistency + 0.04 * _clamp01(recent_action_count / 100.0)
+        window_score = min(1.0, window_score + burst_relief)
 
     if lifetime_score > 0:
         stability_score = 0.70 * lifetime_score + 0.30 * window_score
@@ -298,6 +483,34 @@ def _compute_stability_score(metrics: Dict[str, Any], config: Dict[str, Any]) ->
         "pnl_top1_day_share": float(pnl_top1_day_share),
         "daily_sharpe_like": float(sharpe_like),
     }
+
+
+def _is_event_specialist_profile(metrics: Dict[str, Any], config: Dict[str, Any]) -> bool:
+    params = config.get("specialist_relief", {})
+    if not isinstance(params, dict):
+        params = {}
+
+    min_topic_ratio = float(params.get("min_topic_ratio", 0.45))
+    min_recent_topic_ratio = float(params.get("min_recent_topic_ratio", 0.25))
+    min_recent_actions = float(params.get("min_recent_actions", 12.0))
+    min_lifetime_pnl = float(params.get("min_lifetime_pnl", 0.0))
+    max_hedge_ratio = float(params.get("max_hedge_ratio", 0.65))
+
+    political_ratio = float(metrics.get("political_condition_ratio") or 0.0)
+    recent_topic_ratio = float(metrics.get("recent_political_condition_ratio") or 0.0)
+    recent_action_count = float(metrics.get("recent_action_count") or 0.0)
+    hedge_ratio = float(metrics.get("hedge_condition_ratio") or 0.0)
+    lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
+
+    if lifetime_pnl is None:
+        return False
+    if float(lifetime_pnl) <= min_lifetime_pnl:
+        return False
+    if hedge_ratio > max_hedge_ratio:
+        return False
+    if recent_action_count < min_recent_actions:
+        return False
+    return political_ratio >= min_topic_ratio or recent_topic_ratio >= min_recent_topic_ratio
 
 
 def _apply_filters(
@@ -322,11 +535,30 @@ def _apply_filters(
             failures.append(f"action_timing_count<{min_action_timing}")
             return False, failures, warnings
 
+    specialist_profile = _is_event_specialist_profile(metrics, config)
+    specialist_params = config.get("specialist_relief", {})
+    if not isinstance(specialist_params, dict):
+        specialist_params = {}
+
+    stability_floor_delta = float(specialist_params.get("stability_floor_delta", 0.12))
+    max_trades_multiplier = float(specialist_params.get("max_trades_multiplier", 4.0))
+    max_daily_trades_multiplier = float(
+        specialist_params.get("max_daily_trades_multiplier", 10.0)
+    )
+    max_minute_burst_ratio_multiplier = float(
+        specialist_params.get("max_minute_burst_ratio_multiplier", 2.0)
+    )
+    max_pnl_top1_day_share_multiplier = float(
+        specialist_params.get("max_pnl_top1_day_share_multiplier", 1.35)
+    )
+
     def _check_min(key: str, label: str) -> None:
         threshold = filters.get(key)
         value = metrics.get(label)
         if threshold is None:
             return
+        if specialist_profile and key == "min_stability_score":
+            threshold = max(float(threshold) - stability_floor_delta, 0.0)
         if value is None or value < threshold:
             failures.append(f"{label}<{threshold}")
 
@@ -335,6 +567,13 @@ def _apply_filters(
         value = metrics.get(label)
         if threshold is None:
             return
+        if specialist_profile:
+            if key == "max_trades_per_day":
+                threshold = float(threshold) * max_trades_multiplier
+            elif key == "max_daily_trades":
+                threshold = float(threshold) * max_daily_trades_multiplier
+            elif key == "max_pnl_top1_day_share":
+                threshold = min(float(threshold) * max_pnl_top1_day_share_multiplier, 1.0)
         if value is None or value > threshold:
             failures.append(f"{label}>{threshold}")
 
@@ -344,6 +583,15 @@ def _apply_filters(
     _check_min("min_mid_ratio", "mid_ratio")
     _check_min("min_interval_median_minutes", "interval_median_minutes")
     _check_min("min_account_age_days", "account_age_days")
+    _check_min("min_political_condition_ratio", "political_condition_ratio")
+    _check_min("min_stability_score", "stability_score")
+    _check_min("min_recent_closed_count", "recent_closed_count")
+    _check_min("min_recent_action_count", "recent_action_count")
+    _check_min("min_recent_condition_count", "recent_condition_count")
+    _check_min("min_recent_active_days", "recent_active_days")
+    _check_min("min_recent_trades_per_day", "recent_trades_per_day")
+    _check_min("min_recent_political_condition_ratio", "recent_political_condition_ratio")
+    _check_min("min_leaderboard_month_pnl", "leaderboard_month_pnl")
     _check_max("max_trades_per_day", "trades_per_day")
     _check_max("max_daily_trades", "max_trades_per_day")
     _check_max("max_p90_cost", "p90_cost")
@@ -351,19 +599,28 @@ def _apply_filters(
     _check_max("max_open_exposure", "open_exposure")
     _check_max("max_tail_high_ratio", "tail_high_ratio")
     _check_max("max_tail_low_ratio", "tail_low_ratio")
+    _check_max("max_hedge_condition_ratio", "hedge_condition_ratio")
+    _check_max("max_max_drawdown_ratio", "max_drawdown_ratio")
+    _check_max("max_pnl_top1_day_share", "pnl_top1_day_share")
 
     max_minute_burst_ratio = filters.get("max_minute_burst_ratio")
     if max_minute_burst_ratio is not None:
         minute_burst_ratio = metrics.get("minute_burst_ratio")
         near_expiry_ratio = metrics.get("near_expiry_ratio") or 0.0
         near_expiry_high = float(copy_rules.get("near_expiry_ratio_high", 0.3))
+        effective_max_minute_burst_ratio = float(max_minute_burst_ratio)
+        if specialist_profile:
+            effective_max_minute_burst_ratio = min(
+                effective_max_minute_burst_ratio * max_minute_burst_ratio_multiplier,
+                1.0,
+            )
         if minute_burst_ratio is None:
-            failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
-        elif minute_burst_ratio > max_minute_burst_ratio:
+            failures.append(f"minute_burst_ratio>{effective_max_minute_burst_ratio}")
+        elif minute_burst_ratio > effective_max_minute_burst_ratio:
             if near_expiry_ratio >= near_expiry_high:
                 warnings.append("minute_burst_ratio_high_but_near_expiry")
             else:
-                failures.append(f"minute_burst_ratio>{max_minute_burst_ratio}")
+                failures.append(f"minute_burst_ratio>{effective_max_minute_burst_ratio}")
 
     max_loss_threshold = filters.get("max_loss")
     max_loss = metrics.get("max_loss")
@@ -372,6 +629,14 @@ def _apply_filters(
             failures.append(f"max_loss<{max_loss_threshold}")
         elif max_loss < max_loss_threshold:
             failures.append(f"max_loss<{max_loss_threshold}")
+
+    max_last_trade_days_ago = filters.get("max_last_trade_days_ago")
+    last_trade_days_ago = metrics.get("last_trade_days_ago")
+    if max_last_trade_days_ago is not None:
+        if last_trade_days_ago is None:
+            failures.append(f"last_trade_days_ago>{max_last_trade_days_ago}")
+        elif last_trade_days_ago > max_last_trade_days_ago:
+            failures.append(f"last_trade_days_ago>{max_last_trade_days_ago}")
 
     min_lifetime_pnl = filters.get("min_lifetime_realized_pnl")
     lifetime_pnl = metrics.get("lifetime_realized_pnl_sum")
@@ -387,6 +652,36 @@ def _apply_filters(
     return (len(failures) == 0), failures, warnings
 
 
+def _build_recent_topic_proxy_rows(
+    recent_closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+    recent_trade_action_rows: List[Dict[str, str]],
+) -> Tuple[List[Dict[str, str]], str, float]:
+    if not recent_trade_action_rows:
+        return recent_closed_rows, "closed_only", 0.0
+
+    # trade_actions.csv only preserves timestamps, so it cannot carry topic/category metadata.
+    # Use currently open positions as the best available proxy for themes that the user is still
+    # actively working in the recent window.
+    proxy_rows: List[Dict[str, str]] = list(recent_closed_rows)
+    seen_condition_ids = {
+        _row_condition_id(row) for row in recent_closed_rows if _row_condition_id(row)
+    }
+    proxy_open_condition_count = 0.0
+
+    for row in open_rows:
+        condition_id = _row_condition_id(row)
+        if not condition_id or condition_id in seen_condition_ids:
+            continue
+        proxy_rows.append(row)
+        seen_condition_ids.add(condition_id)
+        proxy_open_condition_count += 1.0
+
+    if proxy_open_condition_count > 0:
+        return proxy_rows, "closed_plus_open_positions", proxy_open_condition_count
+    return recent_closed_rows, "closed_only", 0.0
+
+
 def _build_features(
     user: str,
     closed_rows: List[Dict[str, str]],
@@ -394,6 +689,7 @@ def _build_features(
     summary_row: Optional[Dict[str, str]],
     trade_action_rows: List[Dict[str, str]],
     config: Dict[str, Any],
+    official_market_meta_by_condition: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> Dict[str, Any]:
     flat_eps = float(config.get("flat_pnl_epsilon", 1e-9))
     min_cost_for_roi = float(config.get("min_cost_for_roi", 1.0))
@@ -506,6 +802,13 @@ def _build_features(
         )
         leaderboard_month_pnl = _parse_float(summary_row.get("leaderboard_month_pnl", ""))
 
+    market_profile_metrics = _compute_political_and_hedge_metrics(
+        closed_rows=closed_rows,
+        open_rows=open_rows,
+        config=config,
+        official_market_meta_by_condition=official_market_meta_by_condition,
+    )
+
     trades_per_day = None
     if window_days > 0:
         trades_per_day = timing_count / window_days
@@ -569,6 +872,54 @@ def _build_features(
     near_expiry_days = float(config.get("near_expiry_days", 3))
     if asof_time is None:
         asof_time = dt.datetime.now(tz=dt.timezone.utc)
+
+    recent_window_days = float(config.get("recent_window_days", 30))
+    if recent_window_days <= 0:
+        recent_window_days = 30.0
+    recent_cutoff = asof_time - dt.timedelta(days=recent_window_days)
+
+    recent_closed_rows: List[Dict[str, str]] = []
+    recent_trade_action_rows: List[Dict[str, str]] = []
+    recent_timing_timestamps: List[dt.datetime] = []
+    for row in closed_rows:
+        ts = _parse_datetime(row.get("timestamp", ""))
+        if ts is not None and ts >= recent_cutoff:
+            recent_closed_rows.append(row)
+    for row in trade_action_rows:
+        ts = _parse_datetime(row.get("timestamp", ""))
+        if ts is not None and ts >= recent_cutoff:
+            recent_trade_action_rows.append(row)
+            recent_timing_timestamps.append(ts)
+    if not recent_timing_timestamps:
+        for row in recent_closed_rows:
+            ts = _parse_datetime(row.get("timestamp", ""))
+            if ts is not None:
+                recent_timing_timestamps.append(ts)
+
+    recent_topic_rows, recent_topic_proxy_mode, recent_topic_proxy_open_condition_count = (
+        _build_recent_topic_proxy_rows(
+            recent_closed_rows=recent_closed_rows,
+            open_rows=open_rows,
+            recent_trade_action_rows=recent_trade_action_rows,
+        )
+    )
+
+    recent_market_profile_metrics = _compute_political_and_hedge_metrics(
+        closed_rows=recent_topic_rows,
+        open_rows=[],
+        config=config,
+        official_market_meta_by_condition=official_market_meta_by_condition,
+    )
+    recent_daily_counts = _collect_daily_counts(recent_timing_timestamps)
+    recent_active_days = float(len(recent_daily_counts))
+    recent_timing_count = len(recent_timing_timestamps)
+    recent_trades_per_day = recent_timing_count / recent_window_days if recent_window_days > 0 else None
+    last_trade_ts = max(timing_timestamps) if timing_timestamps else None
+    last_trade_days_ago = (
+        max((asof_time - last_trade_ts).total_seconds() / 86400.0, 0.0)
+        if last_trade_ts is not None
+        else None
+    )
 
     end_day = (end_time or asof_time).date()
     if start_time:
@@ -688,6 +1039,21 @@ def _build_features(
         "trade_actions_records": trade_actions_records,
         "trade_actions_actions": trade_actions_actions,
         "leaderboard_month_pnl": leaderboard_month_pnl,
+        "recent_window_days": recent_window_days,
+        "recent_closed_count": float(len(recent_closed_rows)),
+        "recent_action_count": float(len(recent_trade_action_rows)),
+        "recent_active_days": recent_active_days,
+        "recent_trades_per_day": recent_trades_per_day,
+        "recent_condition_count": float(recent_market_profile_metrics.get("total_condition_count", 0.0)),
+        "recent_political_condition_count": float(
+            recent_market_profile_metrics.get("political_condition_count", 0.0)
+        ),
+        "recent_political_condition_ratio": float(
+            recent_market_profile_metrics.get("political_condition_ratio", 0.0)
+        ),
+        "recent_topic_proxy_mode": recent_topic_proxy_mode,
+        "recent_topic_proxy_open_condition_count": recent_topic_proxy_open_condition_count,
+        "last_trade_days_ago": last_trade_days_ago,
         "action_timing_count": len(action_timestamps),
         "profit_day_ratio": profit_day_ratio,
         "daily_sharpe_like": daily_sharpe_like,
@@ -696,6 +1062,7 @@ def _build_features(
         "pnl_top1_day_share": pnl_top1_day_share,
         "ulcer_index": ulcer_index,
     }
+    metrics.update(market_profile_metrics)
 
     return metrics
 
@@ -712,6 +1079,241 @@ def _write_csv(path: Path, rows: List[Dict[str, Any]]) -> None:
         writer.writeheader()
         for row in rows:
             writer.writerow(row)
+
+
+def _row_condition_ids_for_official_lookup(
+    closed_rows: List[Dict[str, str]],
+    open_rows: List[Dict[str, str]],
+) -> List[str]:
+    condition_ids: set[str] = set()
+    for row in list(closed_rows) + list(open_rows):
+        condition_id = _row_condition_id(row)
+        if condition_id:
+            condition_ids.add(condition_id)
+    return sorted(condition_ids)
+
+
+def _fetch_markets_by_condition_ids(
+    condition_ids: List[str],
+    config: Dict[str, Any],
+) -> Dict[str, Dict[str, str]]:
+    if not condition_ids:
+        return {}
+
+    gamma_api_root = str(config.get("gamma_api_root") or "https://gamma-api.polymarket.com").rstrip("/")
+    timeout_sec = float(config.get("gamma_timeout_sec") or 10.0)
+    request_retries = max(1, int(config.get("gamma_request_retries") or 2))
+    chunk_size = max(1, min(int(config.get("gamma_condition_ids_chunk_size") or 50), 200))
+    session = requests.Session()
+
+    out: Dict[str, Dict[str, str]] = {}
+    total_chunks = max(1, math.ceil(len(condition_ids) / chunk_size))
+    progress_every = max(1, int(config.get("gamma_progress_every_chunks") or 10))
+    try:
+        for chunk_index, start in enumerate(range(0, len(condition_ids), chunk_size), start=1):
+            chunk = condition_ids[start : start + chunk_size]
+            params = {"condition_ids": chunk, "limit": len(chunk)}
+            last_error = None
+            payload = None
+            for _ in range(request_retries):
+                try:
+                    response = session.get(
+                        f"{gamma_api_root}/markets",
+                        params=params,
+                        timeout=timeout_sec,
+                    )
+                    response.raise_for_status()
+                    payload = response.json()
+                    last_error = None
+                    break
+                except requests.RequestException as exc:
+                    last_error = exc
+                    continue
+            if payload is None:
+                if last_error is not None:
+                    print(f"[WARN] gamma markets request failed: {last_error}", flush=True)
+                continue
+
+            markets = payload if isinstance(payload, list) else payload.get("data") or []
+            if not isinstance(markets, list):
+                continue
+
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                condition_id = _normalize_text(market.get("conditionId"))
+                if not condition_id:
+                    continue
+                category = _normalize_text(market.get("category"))
+                subcategory = _normalize_text(market.get("subcategory"))
+                tag_text = ""
+                tags = market.get("tags")
+                if isinstance(tags, list):
+                    tag_names: List[str] = []
+                    for item in tags:
+                        if isinstance(item, dict):
+                            name = _normalize_text(item.get("label") or item.get("name") or item.get("slug"))
+                            if name:
+                                tag_names.append(name)
+                        else:
+                            name = _normalize_text(item)
+                            if name:
+                                tag_names.append(name)
+                    tag_text = " ".join(tag_names)
+
+                if (not category or not subcategory) and isinstance(market.get("events"), list):
+                    events = market.get("events") or []
+                    if events and isinstance(events[0], dict):
+                        event_data = events[0]
+                        if not category:
+                            category = _normalize_text(event_data.get("category"))
+                        if not subcategory:
+                            subcategory = _normalize_text(event_data.get("subcategory"))
+
+                out[condition_id] = {
+                    "category": category,
+                    "subcategory": subcategory,
+                    "tag_text": tag_text,
+                }
+            if chunk_index == 1 or chunk_index == total_chunks or chunk_index % progress_every == 0:
+                print(
+                    f"[INFO] gamma category fetch progress: {chunk_index}/{total_chunks} chunks, "
+                    f"cached_conditions={len(out)}",
+                    flush=True,
+                )
+    finally:
+        session.close()
+    return out
+
+
+def _load_official_market_meta_cache(path: Path) -> Dict[str, Dict[str, str]]:
+    if not path.exists():
+        return {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    cache = payload.get("condition_meta") if "condition_meta" in payload else payload
+    if not isinstance(cache, dict):
+        return {}
+
+    normalized: Dict[str, Dict[str, str]] = {}
+    for condition_id, meta in cache.items():
+        key = _normalize_text(condition_id)
+        if not key or not isinstance(meta, dict):
+            continue
+        normalized[key] = {
+            "category": _normalize_text(meta.get("category")),
+            "subcategory": _normalize_text(meta.get("subcategory")),
+            "tag_text": _normalize_text(meta.get("tag_text")),
+        }
+    return normalized
+
+
+def _write_official_market_meta_cache(path: Path, cache: Dict[str, Dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "updated_at": dt.datetime.now(tz=dt.timezone.utc).isoformat(),
+        "condition_meta": cache,
+    }
+    with path.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _iter_user_dirs(
+    users_dir: Path,
+    max_users: Optional[int] = None,
+) -> Iterator[Path]:
+    if not users_dir.exists():
+        return
+
+    yielded = 0
+    for user_dir in sorted(users_dir.iterdir()):
+        if not user_dir.is_dir():
+            continue
+        yield user_dir
+        yielded += 1
+        if max_users is not None and yielded >= max_users:
+            break
+
+
+def _load_user_payload(
+    user_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+) -> Dict[str, Any]:
+    user = user_dir.name
+    closed_rows = _read_csv(user_dir / "closed_positions.csv")
+    open_rows = _read_csv(user_dir / "positions.csv")
+    trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
+    summary_row = None
+    if (user_dir / "summary.csv").exists():
+        summary_rows = _read_csv(user_dir / "summary.csv")
+        if summary_rows:
+            summary_row = summary_rows[0]
+    elif user in summary_map:
+        summary_row = summary_map[user]
+    return {
+        "user": user,
+        "closed_rows": closed_rows,
+        "open_rows": open_rows,
+        "trade_action_rows": trade_action_rows,
+        "summary_row": summary_row,
+    }
+
+
+def _load_user_payloads(
+    users_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+    max_users: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    payloads: List[Dict[str, Any]] = []
+    for user_dir in _iter_user_dirs(users_dir, max_users=max_users):
+        payloads.append(_load_user_payload(user_dir, summary_map))
+    return payloads
+
+
+def _collect_all_condition_ids(user_payloads: List[Dict[str, Any]]) -> List[str]:
+    condition_ids: set[str] = set()
+    for payload in user_payloads:
+        condition_ids.update(
+            _row_condition_ids_for_official_lookup(
+                payload.get("closed_rows", []),
+                payload.get("open_rows", []),
+            )
+        )
+    return sorted(condition_ids)
+
+
+def _collect_all_condition_ids_from_user_dirs(
+    users_dir: Path,
+    summary_map: Dict[str, Dict[str, str]],
+    max_users: Optional[int] = None,
+    progress_every_users: int = 100,
+) -> List[str]:
+    condition_ids: set[str] = set()
+    scanned_users = 0
+    for user_dir in _iter_user_dirs(users_dir, max_users=max_users):
+        payload = _load_user_payload(user_dir, summary_map)
+        condition_ids.update(
+            _row_condition_ids_for_official_lookup(
+                payload.get("closed_rows", []),
+                payload.get("open_rows", []),
+            )
+        )
+        scanned_users += 1
+        if (
+            scanned_users == 1
+            or scanned_users % progress_every_users == 0
+        ):
+            print(
+                f"[INFO] official category scan progress: users={scanned_users} "
+                f"unique_conditions={len(condition_ids)}",
+                flush=True,
+            )
+    return sorted(condition_ids)
 
 
 def _build_price_style(metrics: Dict[str, Optional[float]], rules: Dict[str, Any]) -> str:
@@ -825,24 +1427,94 @@ def main() -> None:
         metadata_path = (base_dir / metadata_path).resolve()
 
     summary_map = _load_user_summary_map(data_dir / "users_summary.csv")
+    max_users_to_scan_raw = config.get("max_users_to_scan")
+    max_users_to_scan = (
+        max(1, int(max_users_to_scan_raw))
+        if isinstance(max_users_to_scan_raw, (int, float)) and int(max_users_to_scan_raw) > 0
+        else None
+    )
+    user_dirs = list(_iter_user_dirs(users_dir, max_users=max_users_to_scan))
+    total_users = len(user_dirs)
+    progress_every_users = max(1, int(config.get("screen_progress_every_users") or 100))
 
     features_rows: List[Dict[str, Any]] = []
     candidate_rows: List[Dict[str, Any]] = []
+    use_official_market_category = bool(config.get("use_official_market_category", True))
+    official_market_meta_cache: Dict[str, Dict[str, str]] = {}
 
-    for user_dir in sorted(users_dir.iterdir() if users_dir.exists() else []):
-        if not user_dir.is_dir():
-            continue
-        user = user_dir.name
-        closed_rows = _read_csv(user_dir / "closed_positions.csv")
-        open_rows = _read_csv(user_dir / "positions.csv")
-        trade_action_rows = _read_csv(user_dir / "trade_actions.csv")
-        summary_row = None
-        if (user_dir / "summary.csv").exists():
-            summary_rows = _read_csv(user_dir / "summary.csv")
-            if summary_rows:
-                summary_row = summary_rows[0]
-        elif user in summary_map:
-            summary_row = summary_map[user]
+    print(
+        f"[INFO] discovered users: users={total_users}"
+        f"{' (limited)' if max_users_to_scan is not None else ''}",
+        flush=True,
+    )
+
+    official_cache_filename = str(
+        config.get("official_market_meta_cache_filename") or "data/official_market_meta_cache.json"
+    )
+    official_cache_path = Path(official_cache_filename)
+    if not official_cache_path.is_absolute():
+        official_cache_path = (base_dir / official_cache_path).resolve()
+
+    if use_official_market_category:
+        official_market_meta_cache = _load_official_market_meta_cache(official_cache_path)
+        print(
+            f"[INFO] loaded official market cache: conditions={len(official_market_meta_cache)} "
+            f"path={official_cache_path}",
+            flush=True,
+        )
+        category_scan_user_limit_raw = config.get("official_category_lookup_user_limit")
+        category_scan_user_limit = (
+            max(1, int(category_scan_user_limit_raw))
+            if isinstance(category_scan_user_limit_raw, (int, float)) and int(category_scan_user_limit_raw) > 0
+            else total_users
+        )
+        all_condition_ids = _collect_all_condition_ids_from_user_dirs(
+            users_dir=users_dir,
+            summary_map=summary_map,
+            max_users=category_scan_user_limit,
+            progress_every_users=progress_every_users,
+        )
+        condition_limit_raw = config.get("official_category_lookup_condition_limit")
+        condition_limit = (
+            max(1, int(condition_limit_raw))
+            if isinstance(condition_limit_raw, (int, float)) and int(condition_limit_raw) > 0
+            else None
+        )
+        if condition_limit is not None and len(all_condition_ids) > condition_limit:
+            print(
+                f"[WARN] official category lookup truncated: total_conditions={len(all_condition_ids)} "
+                f"limit={condition_limit}",
+                flush=True,
+            )
+            all_condition_ids = all_condition_ids[:condition_limit]
+        missing_ids = [item for item in all_condition_ids if item not in official_market_meta_cache]
+        print(
+            f"[INFO] official category lookup plan: total_conditions={len(all_condition_ids)} "
+            f"cached={len(all_condition_ids) - len(missing_ids)} missing={len(missing_ids)}",
+            flush=True,
+        )
+        if missing_ids:
+            fetched_meta = _fetch_markets_by_condition_ids(
+                condition_ids=missing_ids,
+                config=config,
+            )
+            official_market_meta_cache.update(fetched_meta)
+            _write_official_market_meta_cache(official_cache_path, official_market_meta_cache)
+            print(
+                f"[INFO] updated official market cache: fetched={len(fetched_meta)} "
+                f"total_cached={len(official_market_meta_cache)}",
+                flush=True,
+            )
+    else:
+        print("[INFO] official market category lookup disabled", flush=True)
+
+    for index, user_dir in enumerate(user_dirs, start=1):
+        payload = _load_user_payload(user_dir, summary_map)
+        user = payload["user"]
+        closed_rows = payload["closed_rows"]
+        open_rows = payload["open_rows"]
+        trade_action_rows = payload["trade_action_rows"]
+        summary_row = payload["summary_row"]
 
         metrics = _build_features(
             user,
@@ -851,6 +1523,7 @@ def main() -> None:
             summary_row,
             trade_action_rows,
             config,
+            official_market_meta_by_condition=official_market_meta_cache,
         )
         row: Dict[str, Any] = {"user": user}
         row.update(metrics)
@@ -879,6 +1552,17 @@ def main() -> None:
         features_rows.append(row)
         if passed:
             candidate_rows.append(row)
+
+        if (
+            index == 1
+            or index == total_users
+            or index % progress_every_users == 0
+        ):
+            print(
+                f"[INFO] screen progress: {index}/{total_users} users processed, "
+                f"candidates={len(candidate_rows)}",
+                flush=True,
+            )
 
     features_rows = sorted(
         features_rows, key=lambda row: row.get("copy_score", 0), reverse=True

@@ -1,0 +1,36 @@
+{
+  "extends": "screen_users_config_politics_event_specialist.json",
+  "_comment_extends": "Refined politics event specialist config with tighter control on ultra-high-frequency accounts",
+
+  "filters": {
+    "max_trades_per_day": 100,
+    "max_daily_trades": 350,
+    "max_tail_high_ratio": 0.85,
+    "max_tail_low_ratio": 0.65,
+    "max_minute_burst_ratio": 0.65,
+    "max_pnl_top1_day_share": 0.75
+  },
+
+  "specialist_relief": {
+    "min_topic_ratio": 0.50,
+    "min_recent_topic_ratio": 0.40,
+    "min_recent_actions": 25,
+    "min_lifetime_pnl": 1000.0,
+    "max_hedge_ratio": 0.55,
+    "stability_floor_delta": 0.08,
+    "max_trades_multiplier": 1.25,
+    "max_daily_trades_multiplier": 1.15,
+    "max_minute_burst_ratio_multiplier": 1.10,
+    "max_pnl_top1_day_share_multiplier": 1.05
+  },
+
+  "label_rules": {
+    "copy_style": {
+      "minute_burst_ratio_high": 0.45,
+      "interval_median_minutes_fast": 1,
+      "trades_per_day_high": 55,
+      "burstiness_high": 8,
+      "near_expiry_ratio_high": 0.40
+    }
+  }
+}

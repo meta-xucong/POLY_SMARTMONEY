@@ -3,78 +3,29 @@ from __future__ import annotations
 import datetime as dt
 import random
 import time
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple
 
 import requests
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
-from smartmoney_query.poly_martmoney_query.models import Position, Trade
-
-
-def _extract_token_id_from_raw(raw: Dict[str, object] | None) -> Optional[str]:
-    if not isinstance(raw, dict):
-        return None
-    for key in (
-        "tokenId",
-        "token_id",
-        "clobTokenId",
-        "clob_token_id",
-        "asset",  # CRITICAL FIX: Add support for 'asset' field from Polymarket Data API
-        "assetId",
-        "asset_id",
-        "outcomeTokenId",
-        "outcome_token_id",
-    ):
-        value = raw.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    value = raw.get("id")
-    if value is not None:
-        text = str(value).strip()
-        if text:
-            return text
-    return None
+from smartmoney_query.poly_martmoney_query.models import Position
 
 
 def _normalize_position(pos: Position) -> Dict[str, object] | None:
-    raw = pos.raw
     if pos.outcome_index is None:
-        raw_norm = _normalize_position_raw(raw) if isinstance(raw, dict) else None
-        if raw_norm is not None:
-            return raw_norm
-        token_id = _extract_token_id_from_raw(raw)
-        if token_id:
-            return {
-                "token_key": "",
-                "token_id": token_id,
-                "condition_id": pos.condition_id,
-                "outcome_index": None,
-                "size": float(pos.size),
-                "avg_price": float(pos.avg_price),
-                "cur_price": float(getattr(pos, "cur_price", 0.0) or 0.0),
-                "slug": pos.slug,
-                "title": pos.title,
-                "end_date": pos.end_date.isoformat() if pos.end_date is not None else None,
-                "raw": raw,
-            }
         return None
     token_key = f"{pos.condition_id}:{pos.outcome_index}"
     end_date = pos.end_date.isoformat() if pos.end_date is not None else None
     return {
         "token_key": token_key,
-        "token_id": _extract_token_id_from_raw(raw),
         "condition_id": pos.condition_id,
         "outcome_index": int(pos.outcome_index),
         "size": float(pos.size),
         "avg_price": float(pos.avg_price),
-        "cur_price": float(getattr(pos, "cur_price", 0.0) or 0.0),
         "slug": pos.slug,
         "title": pos.title,
         "end_date": end_date,
-        "raw": raw,
+        "raw": pos.raw,
     }
 
 
@@ -91,17 +42,9 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
 
     size = raw.get("size") or raw.get("shares") or raw.get("positionSize")
     avg_price = raw.get("avgPrice") or raw.get("avg_price") or raw.get("averagePrice") or 0.0
-    cur_price = (
-        raw.get("curPrice")
-        or raw.get("cur_price")
-        or raw.get("currentPrice")
-        or raw.get("price")
-        or 0.0
-    )
     try:
         size_f = float(size or 0.0)
         avg_f = float(avg_price or 0.0)
-        cur_f = float(cur_price or 0.0)
     except Exception:
         return None
 
@@ -110,15 +53,12 @@ def _normalize_position_raw(raw: Dict[str, object]) -> Dict[str, object] | None:
     end_date = raw.get("endDate") or raw.get("end_date")
 
     token_key = f"{condition_id}:{idx}"
-    token_id = _extract_token_id_from_raw(raw)
     return {
         "token_key": token_key,
-        "token_id": token_id,
         "condition_id": str(condition_id),
         "outcome_index": idx,
         "size": size_f,
         "avg_price": avg_f,
-        "cur_price": cur_f,
         "slug": slug,
         "title": title,
         "end_date": end_date,
@@ -234,56 +174,18 @@ def _fetch_positions_norm_http(
             "Expires": "0",
         }
 
-        payload = None
-        resp = None
-        last_exc = None
-        retry_delays = [0.5, 1.0, 2.0]
-        max_attempts = len(retry_delays) + 1
-        for attempt in range(max_attempts):
-            retryable = False
-            try:
-                if callable(cache_disable_ctx):
-                    with cache_disable_ctx():
-                        resp = session.get(url, params=params, headers=headers, timeout=15.0)
-                else:
+        try:
+            if callable(cache_disable_ctx):
+                with cache_disable_ctx():
                     resp = session.get(url, params=params, headers=headers, timeout=15.0)
-                if resp.status_code == 429 or 500 <= resp.status_code < 600:
-                    retryable = True
-                    raise requests.HTTPError(
-                        f"retryable_status_{resp.status_code}",
-                        response=resp,
-                    )
-                resp.raise_for_status()
-                payload = resp.json()
-                last_exc = None
-                break
-            except (requests.Timeout, requests.ConnectionError) as exc:
-                last_exc = exc
-                retryable = True
-            except requests.HTTPError as exc:
-                status_code = exc.response.status_code if exc.response is not None else None
-                if status_code == 429 or (status_code and 500 <= status_code < 600):
-                    last_exc = exc
-                    retryable = True
-                else:
-                    last_exc = exc
-            except Exception as exc:
-                last_exc = exc
-            if last_exc and retryable and attempt < len(retry_delays):
-                time.sleep(retry_delays[attempt])
-                continue
-            break
-
-        if last_exc is not None or payload is None:
-            if resp is not None:
-                try:
-                    last_status = resp.status_code
-                    last_url = resp.url
-                except Exception:
-                    pass
+            else:
+                resp = session.get(url, params=params, headers=headers, timeout=15.0)
+            resp.raise_for_status()
+            payload = resp.json()
+        except Exception as exc:
             ok = False
             incomplete = True
-            last_error = str(last_exc)
+            last_error = str(exc)
             break
 
         if pages == 0:
@@ -427,78 +329,6 @@ def _parse_timestamp(value: object) -> dt.datetime | None:
     return None
 
 
-def _deep_find_first(
-    obj: object,
-    keys: tuple[str, ...],
-    *,
-    max_depth: int = 6,
-) -> object | None:
-    keyset = set(keys)
-    stack: list[tuple[object, int]] = [(obj, 0)]
-    seen: set[int] = set()
-    while stack:
-        cur, depth = stack.pop()
-        if depth > max_depth:
-            continue
-        oid = id(cur)
-        if oid in seen:
-            continue
-        seen.add(oid)
-        if isinstance(cur, dict):
-            for k, v in cur.items():
-                if k in keyset and v is not None:
-                    return v
-                if isinstance(v, (dict, list)):
-                    stack.append((v, depth + 1))
-        elif isinstance(cur, list):
-            for v in cur:
-                if isinstance(v, (dict, list)):
-                    stack.append((v, depth + 1))
-    return None
-
-
-def _deep_extract_token_id(obj: object, *, max_depth: int = 6) -> object | None:
-    # 不要无脑 deep 搜 "id"（会误抓到用户/订单/市场 id）
-    direct_keys = (
-        "tokenId",
-        "token_id",
-        "clobTokenId",
-        "clob_token_id",
-        "asset",
-        "assetId",
-        "asset_id",
-        "outcomeTokenId",
-        "outcome_token_id",
-    )
-    hit = _deep_find_first(obj, direct_keys, max_depth=max_depth)
-    if hit is not None:
-        return hit
-
-    # 允许在 asset/token/outcome 这类父节点下取 "id"
-    id_parent_ok = {"asset", "token", "outcomeToken", "outcome_token", "clobToken", "clob_token"}
-    stack: list[tuple[object, int, str | None]] = [(obj, 0, None)]
-    seen: set[int] = set()
-    while stack:
-        cur, depth, parent = stack.pop()
-        if depth > max_depth:
-            continue
-        oid = id(cur)
-        if oid in seen:
-            continue
-        seen.add(oid)
-        if isinstance(cur, dict):
-            for k, v in cur.items():
-                if k == "id" and parent in id_parent_ok and v is not None:
-                    return v
-                if isinstance(v, (dict, list)):
-                    stack.append((v, depth + 1, k))
-        elif isinstance(cur, list):
-            for v in cur:
-                if isinstance(v, (dict, list)):
-                    stack.append((v, depth + 1, parent))
-    return None
-
-
 def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
     side = str(raw.get("side") or raw.get("action") or raw.get("type") or "").upper()
     event_type = str(
@@ -527,30 +357,14 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
         or raw.get("token_id")
         or raw.get("clobTokenId")
         or raw.get("clob_token_id")
-        or raw.get("asset")
         or raw.get("assetId")
         or raw.get("asset_id")
         or raw.get("outcomeTokenId")
         or raw.get("outcome_token_id")
     )
-    if token_id is None:
-        token_id = _deep_extract_token_id(raw)
     token_id_text = str(token_id).strip() if token_id is not None else ""
-    condition_id = (
-        raw.get("conditionId")
-        or raw.get("condition_id")
-        or raw.get("marketId")
-        or raw.get("market_id")
-    )
-    if condition_id is None:
-        condition_id = _deep_find_first(
-            raw,
-            ("conditionId", "condition_id", "marketId", "market_id"),
-            max_depth=6,
-        )
+    condition_id = raw.get("conditionId") or raw.get("condition_id") or raw.get("marketId")
     outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
-    if outcome_index is None:
-        outcome_index = _deep_find_first(raw, ("outcomeIndex", "outcome_index"), max_depth=6)
     token_key = None
     if condition_id is not None and outcome_index is not None:
         try:
@@ -569,67 +383,7 @@ def _normalize_action(raw: Dict[str, object]) -> Dict[str, object] | None:
         "outcome_index": int(outcome_index) if outcome_index is not None else None,
         "side": side,
         "size": size_val,
-        "price": raw.get("price") or raw.get("fillPrice") or raw.get("avgPrice"),
         "timestamp": ts,
-        "raw": raw,
-    }
-
-
-def _normalize_trade_action(trade: Trade) -> Dict[str, object] | None:
-    side = str(trade.side or "").upper()
-    if side not in ("BUY", "SELL"):
-        return None
-    if trade.size <= 0:
-        return None
-
-    raw = trade.raw or {}
-    token_id = (
-        raw.get("tokenId")
-        or raw.get("token_id")
-        or raw.get("clobTokenId")
-        or raw.get("clob_token_id")
-        or raw.get("asset")
-        or raw.get("assetId")
-        or raw.get("asset_id")
-        or raw.get("outcomeTokenId")
-        or raw.get("outcome_token_id")
-    )
-    if token_id is None:
-        token_id = _deep_extract_token_id(raw)
-    token_id_text = str(token_id).strip() if token_id is not None else ""
-    condition_id = (
-        raw.get("conditionId")
-        or raw.get("condition_id")
-        or raw.get("marketId")
-        or raw.get("market_id")
-        or trade.market_id
-    )
-    if condition_id is None:
-        condition_id = _deep_find_first(
-            raw,
-            ("conditionId", "condition_id", "marketId", "market_id"),
-            max_depth=6,
-        )
-    outcome_index = raw.get("outcomeIndex") or raw.get("outcome_index")
-    if outcome_index is None:
-        outcome_index = _deep_find_first(raw, ("outcomeIndex", "outcome_index"), max_depth=6)
-
-    token_key = None
-    if condition_id is not None and outcome_index is not None:
-        try:
-            token_key = f"{condition_id}:{int(outcome_index)}"
-        except Exception:
-            token_key = None
-
-    return {
-        "token_id": token_id_text or None,
-        "token_key": token_key,
-        "condition_id": str(condition_id) if condition_id is not None else None,
-        "outcome_index": int(outcome_index) if outcome_index is not None else None,
-        "side": side,
-        "size": float(trade.size),
-        "price": float(trade.price),
-        "timestamp": trade.timestamp,
         "raw": raw,
     }
 
@@ -680,50 +434,6 @@ def fetch_target_actions_since(
     return normalized, info
 
 
-def fetch_target_trades_since(
-    client: DataApiClient,
-    user: str,
-    since_ms: int,
-    *,
-    page_size: int = 500,
-    max_offset: int = 10000,
-    taker_only: bool = False,
-) -> Tuple[List[Dict[str, object]], Dict[str, object]]:
-    start_time = dt.datetime.fromtimestamp(since_ms / 1000.0, tz=dt.timezone.utc)
-    max_pages = max(1, int(max_offset // max(1, page_size)))
-    trades = client.fetch_trades(
-        user,
-        start_time=start_time,
-        page_size=page_size,
-        max_pages=max_pages,
-        taker_only=taker_only,
-    )
-
-    normalized: List[Dict[str, object]] = []
-    latest_ms = 0
-    for trade in trades:
-        action = _normalize_trade_action(trade)
-        if action is None:
-            continue
-        action_ms = int(action["timestamp"].timestamp() * 1000)
-        if action_ms <= since_ms:
-            continue
-        latest_ms = max(latest_ms, action_ms)
-        normalized.append(action)
-
-    info: Dict[str, object] = {
-        "ok": True,
-        "incomplete": False,
-        "limit": page_size,
-        "total": len(trades),
-        "normalized": len(normalized),
-        "latest_ms": latest_ms,
-        "source": "trades",
-        "taker_only": taker_only,
-    }
-    return normalized, info
-
-
 def _fetch_activity_actions(
     client: DataApiClient,
     user: str,
@@ -766,7 +476,7 @@ def _fetch_activity_actions_fallback(
     session = getattr(client, "session", None) or requests.Session()
     url = f"{host}/activity"
     page_size = max(1, min(int(page_size), 500))
-    max_offset = max(0, min(int(max_offset), 3000))
+    max_offset = max(0, min(int(max_offset), 10000))
     start_ts_sec = int(start_time.timestamp())
     end_ts_sec = int(end_time.timestamp())
     ok = True

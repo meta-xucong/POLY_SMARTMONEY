@@ -14,6 +14,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import sys
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -234,7 +235,10 @@ def _update_users_summary_csv(
             if key not in fieldnames:
                 fieldnames.append(key)
 
-    serialized = {key: _serialize_summary_value(key, value) for key, value in summary_row.items()}
+    serialized = {
+        key: value if isinstance(value, str) else _serialize_summary_value(key, value)
+        for key, value in summary_row.items()
+    }
     user_value = str(summary_row.get("user") or "").lower()
     updated = False
     for row in rows:
@@ -443,7 +447,10 @@ def main() -> None:
             import subprocess
 
             print("[INFO] 重新运行 screen_users.py ...", flush=True)
-            subprocess.run(["python", str(screen_script), "--config", str(config_path)], check=False)
+            subprocess.run(
+                [sys.executable, str(screen_script), "--config", str(config_path)],
+                check=False,
+            )
         else:
             print("[WARN] 未找到 screen_users.py，跳过 rerun-screen")
 

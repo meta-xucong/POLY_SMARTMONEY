@@ -1,0 +1,7 @@
+{
+  "extends": "../../screen_users_config_politics_event_specialist_refined.json",
+  "data_dir": "topics/politics_event/data",
+  "users_dir": "topics/politics_event/data/users",
+  "output_dir": "topics/politics_event/data",
+  "official_market_meta_cache_filename": "topics/politics_event/data/official_market_meta_cache.json"
+}

@@ -375,6 +375,39 @@ def _summary_row(summary: UserSummary) -> Dict[str, object]:
 def _serialize_summary_value(key: str, value: object) -> str:
     if value is None:
         return ""
+    if isinstance(value, str):
+        text = value.strip()
+        if text == "":
+            return ""
+        if key in {"lifetime_realized_pnl_sum", "leaderboard_month_pnl"}:
+            try:
+                return f"{float(text):.6f}"
+            except (TypeError, ValueError):
+                return ""
+        if key in {
+            "lifetime_closed_count",
+            "closed_count",
+            "win_count",
+            "loss_count",
+            "flat_count",
+            "open_count",
+            "trade_actions_pages",
+            "trade_actions_records",
+            "trade_actions_actions",
+            "suspected_hft",
+        }:
+            try:
+                return str(int(float(text)))
+            except (TypeError, ValueError):
+                return ""
+        if key in {"lifetime_incomplete"}:
+            normalized = text.lower()
+            if normalized in {"true", "1", "yes"}:
+                return "true"
+            if normalized in {"false", "0", "no"}:
+                return "false"
+            return ""
+        return text
     if key in {"lifetime_realized_pnl_sum", "leaderboard_month_pnl"}:
         return f"{float(value):.6f}"
     if key in {

@@ -18,6 +18,15 @@ MIN_REQUEST_INTERVAL = 1.0 / MAX_REQUESTS_PER_SECOND if MAX_REQUESTS_PER_SECOND 
 BASE_PAGE_SLEEP = float(os.environ.get("SMART_QUERY_BASE_SLEEP", "0.3"))
 HFT_MAX_ACTIVITY_RECORDS = int(os.environ.get("SMART_HFT_MAX_ACTIVITY_RECORDS", "50000"))
 HFT_MAX_UNIQUE_TX = int(os.environ.get("SMART_HFT_MAX_UNIQUE_TX", "20000"))
+# Official Data API /activity historical offset upper bound.
+ACTIVITY_MAX_OFFSET = int(os.environ.get("SMART_ACTIVITY_MAX_OFFSET", "3000"))
+# Keep /activity offset shallow to avoid unstable deep pagination (HTTP 500 at large offsets).
+ACTIVITY_WINDOW_OFFSET_CAP = int(
+    os.environ.get("SMART_ACTIVITY_WINDOW_OFFSET_CAP", "1200")
+)
+ACTIVITY_ERROR_RECOVERY_LIMIT = int(
+    os.environ.get("SMART_ACTIVITY_ERROR_RECOVERY_LIMIT", "2")
+)
 
 
 class RateLimiter:
@@ -393,13 +402,14 @@ class DataApiClient:
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
         page_size: int = 300,
-        max_offset: int = 10000,
+        max_offset: int = ACTIVITY_MAX_OFFSET,
         progress_every: Optional[int] = None,
         return_info: bool = False,
     ) -> List[TradeAction] | tuple[List[TradeAction], Dict[str, object]]:
         url = f"{self.host}/activity"
         page_size = max(1, min(int(page_size), 500))
-        max_offset = max(0, min(int(max_offset), 10000))
+        max_offset = max(0, min(int(max_offset), ACTIVITY_MAX_OFFSET))
+        window_offset_cap = max(1, min(int(max_offset or 1), ACTIVITY_WINDOW_OFFSET_CAP))
         start_ts_sec = _to_timestamp_int(start_time)
         end_ts_sec = _to_timestamp_int(end_time)
         actions: Dict[str, dt.datetime] = {}
@@ -419,6 +429,8 @@ class DataApiClient:
         )
         offset = 0
         progress_every = progress_every or 0
+        last_page_min_ts_sec: Optional[int] = None
+        recovery_count = 0
 
         while True:
             params = {
@@ -435,6 +447,25 @@ class DataApiClient:
 
             resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
             if resp is None:
+                if (
+                    offset > 0
+                    and last_page_min_ts_sec is not None
+                    and recovery_count < max(0, ACTIVITY_ERROR_RECOVERY_LIMIT)
+                ):
+                    shifted_end = int(last_page_min_ts_sec) - 1
+                    if shifted_end < cursor_end_sec and (
+                        start_ts_sec is None or shifted_end >= start_ts_sec
+                    ):
+                        recovery_count += 1
+                        cursor_end_sec = shifted_end
+                        offset = 0
+                        last_error = _combine_error(
+                            last_error,
+                            f"recover_from_activity_error(offset={params.get('offset')}, "
+                            f"new_end={shifted_end}, err={error_msg or 'request_failed'})",
+                        )
+                        _sleep_with_jitter(BASE_PAGE_SLEEP)
+                        continue
                 error_msg = error_msg or "request_failed"
                 incomplete = True
                 ok = False
@@ -530,10 +561,12 @@ class DataApiClient:
                 ok = False
                 last_error = _combine_error(last_error, "missing_timestamps")
                 break
+            last_page_min_ts_sec = int(min_ts_sec)
+            recovery_count = 0
 
             offset += len(raw_items)
 
-            if offset >= max_offset:
+            if offset >= window_offset_cap:
                 if min_ts_sec is None:
                     hit_max_pages = True
                     incomplete = True
@@ -552,7 +585,7 @@ class DataApiClient:
                     )
                     break
 
-                cursor_end_sec = int(min_ts_sec)
+                cursor_end_sec = int(min_ts_sec) - 1
                 offset = 0
 
             if start_ts_sec is not None and cursor_end_sec < start_ts_sec:
@@ -588,12 +621,13 @@ class DataApiClient:
         start_time: Optional[dt.datetime] = None,
         end_time: Optional[dt.datetime] = None,
         page_size: int = 300,
-        max_offset: int = 10000,
+        max_offset: int = ACTIVITY_MAX_OFFSET,
         return_info: bool = False,
     ) -> List[Dict[str, Any]] | tuple[List[Dict[str, Any]], Dict[str, object]]:
         url = f"{self.host}/activity"
         page_size = max(1, min(int(page_size), 500))
-        max_offset = max(0, min(int(max_offset), 10000))
+        max_offset = max(0, min(int(max_offset), ACTIVITY_MAX_OFFSET))
+        window_offset_cap = max(1, min(int(max_offset or 1), ACTIVITY_WINDOW_OFFSET_CAP))
         start_ts_sec = _to_timestamp_int(start_time)
         end_ts_sec = _to_timestamp_int(end_time)
         ok = True
@@ -608,6 +642,8 @@ class DataApiClient:
         )
         offset = 0
         results: List[Dict[str, Any]] = []
+        last_page_min_ts_sec: Optional[int] = None
+        recovery_count = 0
 
         while True:
             params = {
@@ -624,6 +660,25 @@ class DataApiClient:
 
             resp, error_msg = _request_with_backoff(url, params=params, session=self.session)
             if resp is None:
+                if (
+                    offset > 0
+                    and last_page_min_ts_sec is not None
+                    and recovery_count < max(0, ACTIVITY_ERROR_RECOVERY_LIMIT)
+                ):
+                    shifted_end = int(last_page_min_ts_sec) - 1
+                    if shifted_end < cursor_end_sec and (
+                        start_ts_sec is None or shifted_end >= start_ts_sec
+                    ):
+                        recovery_count += 1
+                        cursor_end_sec = shifted_end
+                        offset = 0
+                        last_error = _combine_error(
+                            last_error,
+                            f"recover_from_activity_error(offset={params.get('offset')}, "
+                            f"new_end={shifted_end}, err={error_msg or 'request_failed'})",
+                        )
+                        _sleep_with_jitter(BASE_PAGE_SLEEP)
+                        continue
                 error_msg = error_msg or "request_failed"
                 incomplete = True
                 ok = False
@@ -669,9 +724,17 @@ class DataApiClient:
             pages_fetched += 1
             if len(raw_items) < page_size:
                 break
+            if min_ts_sec is None:
+                hit_max_pages = True
+                incomplete = True
+                ok = False
+                last_error = _combine_error(last_error, "missing_timestamps_for_window_shift")
+                break
+            last_page_min_ts_sec = int(min_ts_sec)
+            recovery_count = 0
 
             offset += len(raw_items)
-            if offset >= max_offset:
+            if offset >= window_offset_cap:
                 if min_ts_sec is None:
                     hit_max_pages = True
                     incomplete = True
@@ -686,7 +749,7 @@ class DataApiClient:
                         last_error, f"hit_max_offset_same_end={max_offset}"
                     )
                     break
-                cursor_end_sec = int(min_ts_sec)
+                cursor_end_sec = int(min_ts_sec) - 1
                 offset = 0
 
             if start_ts_sec is not None and cursor_end_sec < start_ts_sec:

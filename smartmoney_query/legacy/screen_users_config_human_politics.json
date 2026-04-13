@@ -1,0 +1,75 @@
+{
+  "extends": "screen_users_config.json",
+  "_comment_extends": "Override config for non-HFT political-market human traders",
+
+  "use_official_market_category": true,
+  "official_political_categories": [
+    "politics",
+    "political",
+    "election"
+  ],
+
+  "max_users_to_scan": 2000,
+  "official_category_lookup_user_limit": 1200,
+  "official_category_lookup_condition_limit": 12000,
+  "gamma_condition_ids_chunk_size": 40,
+  "gamma_timeout_sec": 6,
+  "gamma_request_retries": 1,
+  "screen_progress_every_users": 25,
+  "gamma_progress_every_chunks": 3,
+
+  "filters": {
+    "min_closed_count": 25,
+    "min_account_age_days": 120,
+    "min_lifetime_realized_pnl": 500,
+    "min_political_condition_ratio": 0.55,
+    "max_hedge_condition_ratio": 0.20,
+    "min_stability_score": 0.52,
+    "max_max_drawdown_ratio": 0.45,
+    "max_pnl_top1_day_share": 0.35,
+    "max_trades_per_day": 18,
+    "max_daily_trades": 35,
+    "min_bayes_win_rate": 0.54,
+    "min_median_roi": 0.025,
+    "max_tail_high_ratio": 0.55,
+    "max_tail_low_ratio": 0.20,
+    "min_mid_ratio": 0.25,
+    "max_minute_burst_ratio": 0.18,
+    "min_interval_median_minutes": 8
+  },
+
+  "score_weights": {
+    "bayes_win_rate": 0.28,
+    "median_roi": 0.18,
+    "profit_factor": 0.12,
+    "mid_ratio": 0.18,
+    "interval_median_minutes": 0.14,
+    "minute_burst_ratio": -0.22,
+    "tail_high_ratio": -0.08,
+    "tail_low_ratio": -0.12,
+    "trades_per_day": -0.12,
+    "burstiness": -0.10,
+    "near_expiry_ratio": -0.10,
+    "p90_cost": 0.0,
+    "open_exposure": 0.0
+  },
+
+  "score_clamps": {
+    "interval_median_minutes": 180,
+    "trades_per_day": 25,
+    "burstiness": 6,
+    "near_expiry_ratio": 0.6
+  },
+
+  "stability_weight": 0.68,
+
+  "label_rules": {
+    "copy_style": {
+      "minute_burst_ratio_high": 0.18,
+      "interval_median_minutes_fast": 5,
+      "trades_per_day_high": 16,
+      "burstiness_high": 3,
+      "near_expiry_ratio_high": 0.22
+    }
+  }
+}

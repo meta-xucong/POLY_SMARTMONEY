@@ -1,0 +1,7 @@
+{
+  "extends": "../../screen_users_config_human_nba_ncaab_relaxed.json",
+  "data_dir": "topics/nba_ncaab/data",
+  "users_dir": "topics/nba_ncaab/data/users",
+  "output_dir": "topics/nba_ncaab/data",
+  "official_market_meta_cache_filename": "topics/nba_ncaab/data/official_market_meta_cache.json"
+}

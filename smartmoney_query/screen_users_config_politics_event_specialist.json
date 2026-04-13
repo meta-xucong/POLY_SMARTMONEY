@@ -1,0 +1,148 @@
+{
+  "extends": "screen_users_config.json",
+  "_comment_extends": "Config tuned for active, profitable politics/event specialists similar to high-conviction manual event traders",
+
+  "use_official_market_category": true,
+  "official_political_categories": [
+    "politics",
+    "political",
+    "election",
+    "world",
+    "news"
+  ],
+  "political_keywords": [
+    "politic",
+    "election",
+    "president",
+    "senate",
+    "congress",
+    "government",
+    "parliament",
+    "campaign",
+    "vote",
+    "policy",
+    "trump",
+    "biden",
+    "harris",
+    "putin",
+    "xi",
+    "zelensky",
+    "iran",
+    "israel",
+    "ukraine",
+    "tariff",
+    "ceasefire",
+    "regime",
+    "supreme leader",
+    "strike"
+  ],
+
+  "recent_window_days": 45,
+  "max_users_to_scan": 5000,
+  "official_category_lookup_user_limit": 5000,
+  "official_category_lookup_condition_limit": 60000,
+  "gamma_condition_ids_chunk_size": 40,
+  "gamma_timeout_sec": 6,
+  "gamma_request_retries": 1,
+  "screen_progress_every_users": 50,
+  "gamma_progress_every_chunks": 5,
+
+  "filters": {
+    "min_closed_count": 25,
+    "min_account_age_days": 180,
+    "min_lifetime_realized_pnl": 500,
+    "min_political_condition_ratio": 0.45,
+    "max_hedge_condition_ratio": 0.55,
+    "min_stability_score": 0.16,
+    "max_max_drawdown_ratio": 0.90,
+    "max_pnl_top1_day_share": 0.85,
+
+    "max_trades_per_day": 140,
+    "max_daily_trades": 800,
+    "min_bayes_win_rate": 0.505,
+    "min_median_roi": 0.0,
+
+    "max_tail_high_ratio": 0.95,
+    "max_tail_low_ratio": 0.85,
+    "min_mid_ratio": 0.02,
+    "max_minute_burst_ratio": 0.85,
+    "min_interval_median_minutes": 0.0,
+
+    "min_recent_closed_count": 3,
+    "min_recent_action_count": 25,
+    "min_recent_condition_count": 6,
+    "min_recent_active_days": 8,
+    "min_recent_trades_per_day": 0.4,
+    "min_recent_political_condition_ratio": 0.35,
+    "min_leaderboard_month_pnl": 0,
+    "max_last_trade_days_ago": 21
+  },
+
+  "stability_params": {
+    "rate_cap": 200.0,
+    "share_cap": 0.90,
+    "surge_cap": 12.0,
+    "dd_ratio_cap": 1.20,
+    "conc_cap": 0.90
+  },
+
+  "score_weights": {
+    "bayes_win_rate": 0.18,
+    "median_roi": 0.04,
+    "profit_factor": 0.12,
+    "mid_ratio": 0.02,
+    "interval_median_minutes": 0.00,
+    "recent_closed_count": 0.10,
+    "recent_action_count": 0.12,
+    "recent_condition_count": 0.12,
+    "recent_active_days": 0.10,
+    "recent_trades_per_day": 0.08,
+    "recent_political_condition_ratio": 0.16,
+    "leaderboard_month_pnl": 0.10,
+    "minute_burst_ratio": -0.02,
+    "tail_high_ratio": -0.01,
+    "tail_low_ratio": -0.01,
+    "trades_per_day": -0.02,
+    "burstiness": -0.02,
+    "near_expiry_ratio": -0.02,
+    "last_trade_days_ago": -0.08,
+    "p90_cost": 0.0,
+    "open_exposure": 0.0
+  },
+
+  "score_clamps": {
+    "bayes_win_rate": 1.0,
+    "median_roi": 1.0,
+    "profit_factor": 10.0,
+    "mid_ratio": 1.0,
+    "interval_median_minutes": 120,
+    "recent_closed_count": 40,
+    "recent_action_count": 400,
+    "recent_condition_count": 40,
+    "recent_active_days": 45,
+    "recent_trades_per_day": 12.0,
+    "recent_political_condition_ratio": 1.0,
+    "leaderboard_month_pnl": 10000,
+    "minute_burst_ratio": 1.0,
+    "tail_high_ratio": 1.0,
+    "tail_low_ratio": 1.0,
+    "trades_per_day": 160,
+    "burstiness": 20,
+    "near_expiry_ratio": 1.0,
+    "last_trade_days_ago": 45,
+    "p90_cost": 100000,
+    "open_exposure": 500000
+  },
+
+  "stability_weight": 0.28,
+
+  "label_rules": {
+    "copy_style": {
+      "minute_burst_ratio_high": 0.60,
+      "interval_median_minutes_fast": 1,
+      "trades_per_day_high": 80,
+      "burstiness_high": 10,
+      "near_expiry_ratio_high": 0.40
+    }
+  }
+}

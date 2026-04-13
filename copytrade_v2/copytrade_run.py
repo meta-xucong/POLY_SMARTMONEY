@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -10,34 +10,10 @@ import re
 import random
 import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, Optional, Set
 from zoneinfo import ZoneInfo
-
-
-# ============================================================
-# MULTI-ACCOUNT & MULTI-TARGET SUPPORT (v3_muti)
-# - Follower accounts loaded from accounts.json
-# - Sequential round-robin processing for multiple follower accounts
-# - Support multiple target addresses (target_addresses array)
-# - When multiple targets hold same token, take MAXIMUM position change
-# ============================================================
-
-@dataclass
-class AccountContext:
-    """Context for a single follower account in multi-account mode."""
-    name: str  # Account name/label
-    my_address: str
-    private_key: str  # Private key loaded from config
-    follow_ratio: float
-    clob_client: Any  # ClobClient instance
-    state: Dict[str, Any]
-    state_path: Path
-    enabled: bool = True
-    max_notional_per_token: Optional[float] = None
-    max_notional_total: Optional[float] = None
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -120,14 +96,6 @@ class LogDeduplicator:
 # Global log deduplicator instance
 _log_dedup = LogDeduplicator()
 
-_REPLAY_BOOT_MODES = {
-    "baseline_replay",
-    "replay_24h",
-    "replay_actions",
-    "replay",
-}
-_DEFAULT_BOOT_REPLAY_WINDOW_SEC = 86400
-
 
 def _state_path_for_target(state_path: Path, target_address: str) -> Path:
     """Derive per-target state file path when user didn't explicitly provide one."""
@@ -142,10 +110,10 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
 
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
-        raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
+        raise FileNotFoundError(f"配置文件不存在: {path}")
     payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
-        raise ValueError("閰嶇疆鏂囦欢蹇呴』涓?JSON dict")
+        raise ValueError("配置文件必须为 JSON dict")
     return payload
 
 
@@ -160,9 +128,9 @@ def _is_placeholder_addr(value: Optional[str]) -> bool:
     if not value:
         return True
     text = value.strip()
-    if text.lower() in ("0x...", "0x"):
+    if text.lower() in ("0x...", "0x…", "0x"):
         return True
-    if "..." in text:
+    if "..." in text or "…" in text:
         return True
     return False
 
@@ -181,74 +149,6 @@ def _is_pure_reprice(actions: Optional[list[dict]]) -> bool:
             continue
         return False
     return True
-
-
-def _update_sell_health_monitor(
-    state: Dict[str, Any],
-    cfg: Dict[str, Any],
-    now_ts: int,
-    sell_signals_inc: int,
-    sell_actions_inc: int,
-    logger: logging.Logger,
-    account_label: str = "",
-) -> None:
-    """
-    Track sell signal->execution health in a rolling window and emit warning on imbalance.
-
-    signals: target SELL actions observed this loop.
-    actions: SELL place actions that passed all local gates and were sent to apply_actions.
-    """
-    window_sec = int(cfg.get("sell_health_window_sec") or 600)
-    if window_sec <= 0:
-        return
-    min_signals = max(1, int(cfg.get("sell_health_min_signals") or 10))
-    min_exec_ratio = float(cfg.get("sell_health_min_exec_ratio") or 0.4)
-    max_gap = max(1, int(cfg.get("sell_health_max_signal_action_gap") or 20))
-    warn_cooldown_sec = int(cfg.get("sell_health_warn_cooldown_sec") or window_sec)
-    monitor = state.setdefault("sell_health_monitor", {})
-    if not isinstance(monitor, dict):
-        state["sell_health_monitor"] = {}
-        monitor = state["sell_health_monitor"]
-    start_ts = int(monitor.get("start_ts") or now_ts)
-    signals = int(monitor.get("signals") or 0) + max(0, int(sell_signals_inc))
-    actions = int(monitor.get("actions") or 0) + max(0, int(sell_actions_inc))
-    monitor["start_ts"] = start_ts
-    monitor["signals"] = signals
-    monitor["actions"] = actions
-    if now_ts - start_ts < window_sec:
-        return
-
-    ratio = (actions / signals) if signals > 0 else 1.0
-    gap = max(0, signals - actions)
-    is_bad = signals >= min_signals and (ratio + 1e-9 < min_exec_ratio or gap >= max_gap)
-    acct_text = f" account={account_label}" if account_label else ""
-    if is_bad:
-        last_warn_ts = int(monitor.get("last_warn_ts") or 0)
-        if warn_cooldown_sec <= 0 or now_ts - last_warn_ts >= warn_cooldown_sec:
-            logger.warning(
-                "[SELL_HEALTH]%s window_sec=%s signals=%s actions=%s ratio=%.3f gap=%s thr_ratio=%.3f thr_gap=%s",
-                acct_text,
-                window_sec,
-                signals,
-                actions,
-                ratio,
-                gap,
-                min_exec_ratio,
-                max_gap,
-            )
-            monitor["last_warn_ts"] = now_ts
-    elif bool(cfg.get("sell_health_log_ok", False)) and signals >= min_signals:
-        logger.info(
-            "[SELL_HEALTH_OK]%s window_sec=%s signals=%s actions=%s ratio=%.3f",
-            acct_text,
-            window_sec,
-            signals,
-            actions,
-            ratio,
-        )
-    monitor["start_ts"] = now_ts
-    monitor["signals"] = 0
-    monitor["actions"] = 0
 
 
 def _is_evm_address(value: Optional[str]) -> bool:
@@ -272,31 +172,6 @@ def _shorten_address(address: str) -> str:
     return f"{text[:6]}..{text[-4:]}"
 
 
-def _is_replay_mode(cfg: Dict[str, Any]) -> bool:
-    mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
-    return mode in _REPLAY_BOOT_MODES
-
-
-def _get_actions_replay_window_sec(cfg: Dict[str, Any], is_replay_mode: Optional[bool] = None) -> int:
-    if is_replay_mode is None:
-        is_replay_mode = _is_replay_mode(cfg)
-    raw = cfg.get("actions_replay_window_sec")
-    if raw is None or raw == "":
-        return _DEFAULT_BOOT_REPLAY_WINDOW_SEC if is_replay_mode else 600
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return _DEFAULT_BOOT_REPLAY_WINDOW_SEC if is_replay_mode else 600
-
-
-def _get_replay_floor_ms(cfg: Dict[str, Any], state: Dict[str, Any]) -> int:
-    run_start_ms = int(state.get("run_start_ms") or 0)
-    if not _is_replay_mode(cfg):
-        return run_start_ms
-    window_sec = _get_actions_replay_window_sec(cfg, True)
-    return max(0, run_start_ms - window_sec * 1000)
-
-
 def _setup_logging(
     cfg: Dict[str, Any],
     target_address: str,
@@ -308,8 +183,8 @@ def _setup_logging(
         log_dir = base_dir / log_dir
     log_dir.mkdir(parents=True, exist_ok=True)
     short = _shorten_address(target_address)
-    today = datetime.now().strftime("%Y-%m-%d")
-    log_path = log_dir / f"copytrade_{short}_{today}.log"
+    # Stable filename — TimedRotatingFileHandler appends date suffix on rotation
+    log_path = log_dir / f"copytrade_{short}.log"
 
     log_retention_days = int(cfg.get("log_retention_days") or 7)
 
@@ -331,8 +206,15 @@ def _setup_logging(
     stream_handler.setLevel(level)
     stream_handler.setFormatter(formatter)
 
-    # Daily log file 鈥?filename already contains the date; no rotation handler needed
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    # Daily rotation at midnight; keep log_retention_days days of history
+    file_handler = logging.handlers.TimedRotatingFileHandler(
+        log_path,
+        when="midnight",
+        interval=1,
+        backupCount=log_retention_days,
+        encoding="utf-8",
+    )
+    file_handler.suffix = "%Y-%m-%d"
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
 
@@ -344,7 +226,7 @@ def _setup_logging(
     _suppress_verbose_third_party_loggers(level)
 
     logger = logging.getLogger(__name__)
-    logger.debug("鏃ュ織鍒濆鍖栧畬鎴? %s (daily log, retention=%dd)", log_path, log_retention_days)
+    logger.info("日志初始化完成: %s (daily rotation, retention=%dd)", log_path, log_retention_days)
 
     # Run one-time cleanup of legacy log files (old naming with pid/timestamp)
     _cleanup_old_logs(log_dir, log_retention_days, logger)
@@ -403,955 +285,10 @@ def _resolve_addr(name: str, current: Optional[str], env_keys: list[str]) -> str
 
     if not _is_evm_address(current):
         raise ValueError(
-            f"{name} is missing or invalid: {current!r}. "
-            f"Expected EVM address format 0x + 40 hex chars. "
-            f"Set {name} in copytrade_config.json or env vars: {env_keys}"
+            f"{name} 未配置或格式不合法：{current!r}。需要 0x + 40 位十六进制地址。"
+            f" 你可以在 copytrade_config.json 里填 {name}，或设置环境变量：{env_keys}"
         )
     return current.strip()
-
-
-def _resolve_target_addresses(cfg: Dict[str, Any], logger: logging.Logger) -> List[str]:
-    """
-    Resolve multiple target addresses from config.
-
-    Supports both:
-    - target_addresses: ["0x...", "0x..."] (new multi-target format)
-    - target_address: "0x..." (backward compatible single target)
-
-    Returns list of valid target addresses.
-    """
-    targets: List[str] = []
-
-    # Try target_addresses array first
-    target_list = cfg.get("target_addresses")
-    if isinstance(target_list, list) and target_list:
-        for addr in target_list:
-            addr_str = str(addr).strip()
-            if _is_evm_address(addr_str) and not _is_placeholder_addr(addr_str):
-                targets.append(addr_str)
-            else:
-                logger.warning("[MULTI-TARGET] Invalid target address skipped: %s", addr_str)
-
-    # Fall back to single target_address if no valid targets from array
-    if not targets:
-        single_target = cfg.get("target_address")
-        if single_target and _is_evm_address(single_target) and not _is_placeholder_addr(single_target):
-            targets.append(str(single_target).strip())
-
-    if not targets:
-        raise ValueError("No valid target addresses configured. Set target_addresses or target_address.")
-
-    return targets
-
-
-def _fetch_all_target_positions(
-    data_client: Any,
-    target_addresses: List[str],
-    target_ratios: Dict[str, float],
-    target_blacklists: Dict[str, List[str]],
-    size_threshold: float,
-    positions_limit: int,
-    positions_max_pages: int,
-    refresh_sec: int,
-    cache_bust_mode: str,
-    header_keys: List[str],
-    logger: logging.Logger,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any], Dict[str, str]]:
-    """
-    Fetch positions from all target addresses and merge them.
-
-    Merge strategy: For each token, take the MAXIMUM position size across all targets.
-
-    Returns:
-        - merged_positions: List of merged position dicts
-        - merged_info: Combined info dict
-        - position_source: Dict mapping token_id to source target address
-    """
-    from ct_data import fetch_positions_norm
-
-    all_positions_by_token: Dict[str, Dict[str, Any]] = {}  # token_key -> best position
-    position_source: Dict[str, str] = {}  # token_id -> source target address
-    any_ok = False
-    any_incomplete = False
-
-    for target_addr in target_addresses:
-        try:
-            positions, info = fetch_positions_norm(
-                data_client,
-                target_addr,
-                size_threshold,
-                positions_limit=positions_limit,
-                positions_max_pages=positions_max_pages,
-                refresh_sec=refresh_sec,
-                force_http=True,
-                cache_bust_mode=cache_bust_mode,
-                header_keys=header_keys,
-            )
-
-            if info.get("ok"):
-                any_ok = True
-            if info.get("incomplete"):
-                any_incomplete = True
-
-            # Merge positions - take maximum for each token (apply per-target ratio)
-            ratio = target_ratios.get(target_addr.lower(), 1.0)
-            blacklist = target_blacklists.get(target_addr.lower(), [])
-            for pos in positions:
-                token_key = str(pos.get("token_key") or "")
-                if not token_key:
-                    continue
-
-                # Per-target blacklist filter (matches token title)
-                if blacklist:
-                    title_l = str(pos.get("title") or "").lower()
-                    if any(str(bl_item).lower() in title_l for bl_item in blacklist if bl_item is not None):
-                        continue
-
-                size = float(pos.get("size") or 0.0) * ratio
-                token_id = pos.get("token_id") or pos.get("raw", {}).get("asset")
-
-                existing = all_positions_by_token.get(token_key)
-                if existing is None or size > float(existing.get("size") or 0.0):
-                    # This target has larger position, use it
-                    pos_copy = dict(pos)
-                    pos_copy["size"] = size
-                    pos_copy["_source_target"] = target_addr  # Track source
-                    pos_copy["_target_ratio"] = ratio
-                    all_positions_by_token[token_key] = pos_copy
-                    if token_id:
-                        position_source[str(token_id)] = target_addr
-
-            logger.debug(
-                "[MULTI-TARGET] Fetched %d positions from target=%s",
-                len(positions),
-                _shorten_address(target_addr),
-            )
-
-        except Exception as exc:
-            logger.warning(
-                "[MULTI-TARGET] Failed to fetch positions from target=%s: %s",
-                _shorten_address(target_addr),
-                exc,
-            )
-
-    merged_positions = list(all_positions_by_token.values())
-    merged_info = {
-        "ok": any_ok,
-        "incomplete": any_incomplete,
-        "target_count": len(target_addresses),
-        "merged_token_count": len(merged_positions),
-    }
-
-    if len(target_addresses) > 1:
-        logger.info(
-            "[MULTI-TARGET] Merged positions from %d targets: %d unique tokens",
-            len(target_addresses),
-            len(merged_positions),
-        )
-
-    return merged_positions, merged_info, position_source
-
-
-def _fetch_all_target_actions(
-    data_client: Any,
-    target_addresses: List[str],
-    cursor_ms: int,
-    use_trades_api: bool,
-    page_size: int,
-    max_offset: int,
-    taker_only: bool,
-    logger: logging.Logger,
-    target_blacklists: Dict[str, List[str]] | None = None,
-) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    """
-    Fetch actions/trades from all target addresses and merge them.
-
-    Actions are aggregated - all buy/sell actions from all targets are combined.
-
-    Returns:
-        - merged_actions: Combined list of actions from all targets
-        - merged_info: Combined info dict (includes latest_ms for cursor updates)
-    """
-    from ct_data import fetch_target_actions_since, fetch_target_trades_since
-
-    all_actions: List[Dict[str, Any]] = []
-    any_ok = False
-    any_incomplete = False
-    max_latest_ms = 0  # Track latest timestamp across all targets
-
-    for target_addr in target_addresses:
-        try:
-            if use_trades_api:
-                actions, info = fetch_target_trades_since(
-                    data_client,
-                    target_addr,
-                    cursor_ms,
-                    page_size=page_size,
-                    max_offset=max_offset,
-                    taker_only=taker_only,
-                )
-            else:
-                actions, info = fetch_target_actions_since(
-                    data_client,
-                    target_addr,
-                    cursor_ms,
-                    page_size=page_size,
-                    max_offset=max_offset,
-                )
-
-            if info.get("ok"):
-                any_ok = True
-            if info.get("incomplete"):
-                any_incomplete = True
-
-            # Track latest timestamp from this target
-            target_latest_ms = int(info.get("latest_ms") or 0)
-            if target_latest_ms > max_latest_ms:
-                max_latest_ms = target_latest_ms
-
-            # Add source target to each action (with per-target blacklist filter on BUY only)
-            blacklist = (target_blacklists or {}).get(target_addr.lower(), [])
-            skipped_blacklist = 0
-            for action in actions:
-                action_copy = dict(action)
-                action_copy["_source_target"] = target_addr
-                side = str(action_copy.get("side") or "").upper()
-                if blacklist and side == "BUY":
-                    title_l = str(
-                        action_copy.get("title")
-                        or (action_copy.get("raw") or {}).get("title")
-                        or ""
-                    ).lower()
-                    if any(str(bl_item).lower() in title_l for bl_item in blacklist if bl_item is not None):
-                        skipped_blacklist += 1
-                        continue
-                all_actions.append(action_copy)
-            if skipped_blacklist:
-                logger.debug(
-                    "[MULTI-TARGET] Skipped %d blacklisted BUY actions from target=%s",
-                    skipped_blacklist,
-                    _shorten_address(target_addr),
-                )
-
-            if actions:
-                logger.debug(
-                    "[MULTI-TARGET] Fetched %d actions from target=%s",
-                    len(actions),
-                    _shorten_address(target_addr),
-                )
-
-        except Exception as exc:
-            logger.warning(
-                "[MULTI-TARGET] Failed to fetch actions from target=%s: %s",
-                _shorten_address(target_addr),
-                exc,
-            )
-
-    # Sort by timestamp
-    all_actions.sort(key=lambda a: int(a.get("timestamp_ms") or a.get("ts") or 0))
-
-    # Also check latest from merged actions (in case info.latest_ms wasn't set)
-    if all_actions:
-        last_action = all_actions[-1]
-        action_ts = int(last_action.get("timestamp_ms") or last_action.get("ts") or 0)
-        if action_ts > max_latest_ms:
-            max_latest_ms = action_ts
-
-    merged_info = {
-        "ok": any_ok,
-        "incomplete": any_incomplete,
-        "target_count": len(target_addresses),
-        "total_actions": len(all_actions),
-        "latest_ms": max_latest_ms,  # CRITICAL: needed for cursor updates
-    }
-
-    return all_actions, merged_info
-
-
-def _cfg_bool(value: Any, default: bool = False) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return default
-    if isinstance(value, (int, float)):
-        return value != 0
-    if isinstance(value, str):
-        text = value.strip().lower()
-        if text in {"1", "true", "yes", "y", "on", "enable", "enabled"}:
-            return True
-        if text in {"0", "false", "no", "n", "off", "disable", "disabled", ""}:
-            return False
-    return bool(value)
-
-
-def _book_min_order_shares(
-    client: Any,
-    token_id: str,
-    timeout_sec: Optional[float] = None,
-) -> float:
-    """
-    Read token-level minimum order size from CLOB orderbook payload.
-    This is the authoritative per-market minimum tradable shares threshold.
-    """
-    book_fetcher = getattr(client, "get_order_book", None)
-    if not callable(book_fetcher):
-        return 0.0
-    payload: Any = None
-    try:
-        try:
-            payload = book_fetcher(str(token_id), timeout=timeout_sec)
-        except TypeError:
-            payload = book_fetcher(str(token_id))
-    except Exception:
-        return 0.0
-    if hasattr(payload, "dict"):
-        try:
-            payload = payload.dict()
-        except Exception:
-            pass
-    elif hasattr(payload, "__dict__") and not isinstance(payload, dict):
-        try:
-            payload = dict(payload.__dict__)
-        except Exception:
-            pass
-    if not isinstance(payload, dict):
-        return 0.0
-    try:
-        return max(
-            0.0,
-            float(
-                payload.get("min_order_size")
-                or payload.get("minimum_order_size")
-                or payload.get("minOrderSize")
-                or 0.0
-            ),
-        )
-    except Exception:
-        return 0.0
-
-
-def _collect_target_sell_token_ids(
-    cfg: Dict[str, Any],
-    data_client: Any,
-    target_addresses: List[str],
-    logger: logging.Logger,
-) -> set[str]:
-    now_ms = int(time.time() * 1000)
-    window_sec = max(60, int(cfg.get("hemostasis_recovery_window_sec") or 86400))
-    cursor_ms = now_ms - window_sec * 1000
-    actions_source = str(cfg.get("actions_source") or "trades").lower()
-    use_trades_api = actions_source in ("trade", "trades")
-    page_size = max(50, int(cfg.get("actions_page_size") or 300))
-    max_offset = max(300, min(int(cfg.get("actions_max_offset") or 3000), 3000))
-    actions_taker_only = _cfg_bool(cfg.get("actions_taker_only"), False)
-    token_map: Dict[str, str] = {}
-    sell_token_ids: set[str] = set()
-
-    actions_list, actions_info = _fetch_all_target_actions(
-        data_client=data_client,
-        target_addresses=target_addresses,
-        cursor_ms=cursor_ms,
-        use_trades_api=use_trades_api,
-        page_size=page_size,
-        max_offset=max_offset,
-        taker_only=actions_taker_only,
-        logger=logger,
-    )
-    for action in actions_list:
-        side = str(action.get("side") or "").upper()
-        if side != "SELL":
-            continue
-        try:
-            size = float(action.get("size") or 0.0)
-        except Exception:
-            size = 0.0
-        if size <= 0:
-            continue
-        token_id = str(action.get("token_id") or "").strip()
-        if not token_id:
-            token_id = str(_extract_token_id_from_raw(action.get("raw")) or "").strip()
-        token_key = str(action.get("token_key") or "").strip()
-        if not token_id and token_key:
-            token_id = str(token_map.get(token_key) or "").strip()
-        if not token_id and token_key:
-            try:
-                resolved = resolve_token_id(
-                    token_key,
-                    {
-                        "token_key": token_key,
-                        "condition_id": action.get("condition_id"),
-                        "outcome_index": action.get("outcome_index"),
-                        "raw": action.get("raw"),
-                    },
-                    token_map,
-                )
-                token_id = str(resolved or "").strip()
-            except Exception:
-                token_id = ""
-        if token_id:
-            if token_key:
-                token_map[token_key] = token_id
-            sell_token_ids.add(token_id)
-
-    logger.info(
-        "[HEMOSTASIS] target_sell_scan window_sec=%s actions=%s ok=%s incomplete=%s sell_tokens=%s",
-        window_sec,
-        len(actions_list),
-        actions_info.get("ok"),
-        actions_info.get("incomplete"),
-        len(sell_token_ids),
-    )
-    return sell_token_ids
-
-
-def _reconcile_accumulator_for_account(
-    cfg: Dict[str, Any],
-    acct_ctx: AccountContext,
-    logger: logging.Logger,
-) -> None:
-    max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
-    if max_position_usd_per_token <= 0:
-        return
-    state = acct_ctx.state
-    accumulator = state.get("buy_notional_accumulator")
-    if not isinstance(accumulator, dict) or not accumulator:
-        return
-    my_positions = state.get("my_positions", [])
-    my_by_token_id: Dict[str, float] = {}
-    for pos in my_positions:
-        tid = str(pos.get("token_id") or pos.get("asset_id") or "").strip()
-        if tid:
-            try:
-                my_by_token_id[tid] = float(pos.get("size") or 0.0)
-            except Exception:
-                my_by_token_id[tid] = 0.0
-    mid_cache = state.get("last_mid_price_by_token_id", {})
-    status_cache = state.get("market_status_cache", {})
-    for token_id, acc_data in list(accumulator.items()):
-        if not isinstance(acc_data, dict):
-            continue
-        acc_usd = float(acc_data.get("usd", 0.0))
-        if acc_usd <= max_position_usd_per_token:
-            continue
-        ref_price = float(mid_cache.get(token_id) or 0.0)
-        if ref_price <= 0:
-            cached = status_cache.get(token_id) or {}
-            meta = cached.get("meta") or {}
-            ref_price = float(meta.get("lastTradePrice") or 0.0)
-        my_shares = my_by_token_id.get(token_id, 0.0)
-        planned_usd = my_shares * ref_price if ref_price > 0 else 0.0
-        if planned_usd <= max_position_usd_per_token * 0.95:
-            if planned_usd <= 0.01:
-                accumulator.pop(token_id, None)
-                logger.warning(
-                    "[ACCUMULATOR_RECONCILE] token_id=%s old=%s new=0 reason=position_below_threshold",
-                    token_id,
-                    acc_usd,
-                )
-            else:
-                acc_data["usd"] = planned_usd
-                logger.warning(
-                    "[ACCUMULATOR_RECONCILE] token_id=%s old=%s new=%s reason=align_to_position",
-                    token_id,
-                    acc_usd,
-                    planned_usd,
-                )
-
-
-def _run_hemostasis_recovery_for_account(
-    cfg: Dict[str, Any],
-    data_client: Any,
-    acct_ctx: AccountContext,
-    sell_token_ids: set[str],
-    logger: logging.Logger,
-    dry_run: bool = False,
-) -> Dict[str, Any]:
-    summary: Dict[str, Any] = {
-        "account": str(acct_ctx.my_address),
-        "enabled": True,
-        "scan_sell_tokens": len(sell_token_ids),
-        "rounds": 0,
-        "candidate_tokens": [],
-        "placed_tokens": [],
-        "skip_no_bid_tokens": [],
-        "blocked_tokens": {},
-        "remaining_tokens": [],
-        "remaining_count": 0,
-        "status": "ok",
-    }
-    if not sell_token_ids:
-        summary["status"] = "skip_no_sell_tokens"
-        return summary
-
-    max_rounds = max(1, int(cfg.get("hemostasis_recovery_max_rounds") or 5))
-    poll_sec = max(0.2, float(cfg.get("hemostasis_recovery_poll_sec") or 2.0))
-    min_shares = max(0.0, float(cfg.get("hemostasis_recovery_min_shares") or 0.0))
-    sell_buffer = max(0.0, float(cfg.get("hemostasis_recovery_sell_buffer_shares") or 0.0))
-    min_trade_usd_gate = max(0.0, float(cfg.get("hemostasis_recovery_min_trade_usd") or 0.0))
-    # If an attempted token still has almost unchanged shares on the next round,
-    # treat it as "no progress" and stop retrying during this startup recovery.
-    no_progress_eps_shares = max(0.01, float(cfg.get("hemostasis_no_progress_eps_shares") or 0.01))
-    positions_limit = max(50, int(cfg.get("positions_limit") or 500))
-    positions_max_pages = max(1, int(cfg.get("positions_max_pages") or 20))
-    refresh_sec = int(cfg.get("target_positions_refresh_sec") or 25)
-    my_positions_force_http = _cfg_bool(cfg.get("my_positions_force_http"), False)
-    cache_bust_mode = str(cfg.get("target_cache_bust_mode") or "bucket")
-    header_keys = cfg.get("positions_cache_header_keys") or [
-        "Age",
-        "CF-Cache-Status",
-        "X-Cache",
-        "Via",
-        "Cache-Control",
-    ]
-    try:
-        api_timeout_sec = float(cfg.get("api_timeout_sec") or 15.0)
-    except Exception:
-        api_timeout_sec = 15.0
-    if api_timeout_sec <= 0:
-        api_timeout_sec = None
-
-    my_address = str(acct_ctx.my_address)
-    acct_state = acct_ctx.state
-    must_exit_tokens = acct_state.setdefault("must_exit_tokens", {})
-    if not isinstance(must_exit_tokens, dict):
-        must_exit_tokens = {}
-        acct_state["must_exit_tokens"] = must_exit_tokens
-    last_nonzero_my_shares = acct_state.setdefault("last_nonzero_my_shares", {})
-    if not isinstance(last_nonzero_my_shares, dict):
-        last_nonzero_my_shares = {}
-        acct_state["last_nonzero_my_shares"] = last_nonzero_my_shares
-    known_for_seed: set[str] = set()
-    open_orders_ledger = acct_state.get("open_orders", {})
-    if isinstance(open_orders_ledger, dict):
-        known_for_seed.update(str(tid) for tid in open_orders_ledger.keys())
-    if isinstance(last_nonzero_my_shares, dict):
-        known_for_seed.update(str(tid) for tid in last_nonzero_my_shares.keys())
-    topic_state_seed = acct_state.get("topic_state", {})
-    if isinstance(topic_state_seed, dict):
-        known_for_seed.update(str(tid) for tid in topic_state_seed.keys())
-    target_last_seed = acct_state.get("target_last_shares", {})
-    if isinstance(target_last_seed, dict):
-        known_for_seed.update(str(tid) for tid in target_last_seed.keys())
-    for token_id in sell_token_ids:
-        if token_id in known_for_seed:
-            _mark_must_exit_token(
-                acct_state,
-                str(token_id),
-                int(time.time()),
-                source="hemostasis_seed",
-            )
-    logger.info(
-        "[HEMOSTASIS] account=%s begin max_rounds=%s sell_token_count=%s",
-        _shorten_address(my_address),
-        max_rounds,
-        len(sell_token_ids),
-    )
-    blocked_tokens: Dict[str, str] = {}
-    attempted_shares: Dict[str, float] = {}
-    book_min_shares_cache: Dict[str, float] = {}
-
-    max_position_usd_per_token = float(cfg.get("max_position_usd_per_token") or 0.0)
-    for round_idx in range(1, max_rounds + 1):
-        my_positions, my_info = fetch_positions_norm(
-            data_client,
-            my_address,
-            size_threshold=0.0,
-            positions_limit=positions_limit,
-            positions_max_pages=positions_max_pages,
-            refresh_sec=refresh_sec,
-            force_http=my_positions_force_http,
-            cache_bust_mode=cache_bust_mode,
-            header_keys=header_keys,
-        )
-        if not my_info.get("ok", True):
-            logger.warning(
-                "[HEMOSTASIS] account=%s fetch_positions failed: %s",
-                _shorten_address(my_address),
-                my_info.get("error_msg"),
-            )
-            summary["status"] = "fetch_positions_failed"
-            break
-
-        remote_orders, ok, err = fetch_open_orders_norm(acct_ctx.clob_client, api_timeout_sec)
-        if not ok:
-            logger.warning(
-                "[HEMOSTASIS] account=%s fetch_open_orders failed: %s",
-                _shorten_address(my_address),
-                err,
-            )
-            remote_orders = []
-
-        sell_or_must_exit_tokens = set(str(tid) for tid in sell_token_ids)
-        sell_or_must_exit_tokens.update(str(tid) for tid in must_exit_tokens.keys())
-        candidate_shares_by_token: Dict[str, float] = {}
-
-        for pos in my_positions:
-            try:
-                shares = float(pos.get("size") or 0.0)
-            except Exception:
-                shares = 0.0
-            if shares <= min_shares:
-                continue
-            token_id = str(pos.get("token_id") or "").strip()
-            if not token_id:
-                token_id = str(_extract_token_id_from_raw(pos.get("raw")) or "").strip()
-            if not token_id or token_id not in sell_or_must_exit_tokens:
-                continue
-            candidate_shares_by_token[token_id] = max(
-                float(candidate_shares_by_token.get(token_id) or 0.0),
-                float(shares),
-            )
-
-        for order in remote_orders:
-            token_id = str(order.get("token_id") or "").strip()
-            if not token_id or token_id not in sell_or_must_exit_tokens:
-                continue
-            side = str(order.get("side") or "").upper()
-            if side != "SELL":
-                continue
-            try:
-                size = float(order.get("size") or 0.0)
-            except Exception:
-                size = 0.0
-            if size <= min_shares:
-                continue
-            candidate_shares_by_token[token_id] = max(
-                float(candidate_shares_by_token.get(token_id) or 0.0),
-                float(size),
-            )
-
-        open_orders_ledger = acct_state.get("open_orders", {})
-        if isinstance(open_orders_ledger, dict):
-            for token_id, orders in open_orders_ledger.items():
-                token_id = str(token_id or "").strip()
-                if not token_id or token_id not in sell_or_must_exit_tokens:
-                    continue
-                for order in orders or []:
-                    if str(order.get("side") or "").upper() != "SELL":
-                        continue
-                    try:
-                        size = float(order.get("size") or 0.0)
-                    except Exception:
-                        size = 0.0
-                    if size <= min_shares:
-                        continue
-                    candidate_shares_by_token[token_id] = max(
-                        float(candidate_shares_by_token.get(token_id) or 0.0),
-                        float(size),
-                    )
-
-        for token_id in sell_or_must_exit_tokens:
-            if token_id in candidate_shares_by_token:
-                continue
-            shares_est = _estimate_recovery_shares_from_state(acct_state, token_id)
-            if shares_est > min_shares:
-                candidate_shares_by_token[token_id] = float(shares_est)
-
-        candidates: list[dict[str, Any]] = []
-        for token_id, shares in candidate_shares_by_token.items():
-            if token_id in blocked_tokens:
-                continue
-            if max_position_usd_per_token > 0:
-                acc_usd = float(
-                    acct_state.get("buy_notional_accumulator", {}).get(token_id, {}).get("usd", 0.0)
-                )
-                if acc_usd > max_position_usd_per_token:
-                    logger.info(
-                        "[HEMOSTASIS] account=%s skip token=%s reason=grandfather_over_limit acc=%s max=%s",
-                        _shorten_address(my_address),
-                        token_id,
-                        acc_usd,
-                        max_position_usd_per_token,
-                    )
-                    continue
-            prev_attempt_shares = attempted_shares.get(token_id)
-            if prev_attempt_shares is not None and abs(shares - prev_attempt_shares) <= no_progress_eps_shares:
-                blocked_tokens[token_id] = "no_progress_after_attempt"
-                continue
-            candidates.append({"token_id": token_id, "shares": shares})
-            _mark_must_exit_token(
-                acct_state,
-                token_id,
-                int(time.time()),
-                source="hemostasis_candidate",
-            )
-        summary["rounds"] = round_idx
-
-        if not candidates:
-            pending_tokens = []
-            for token_id in sorted(set(str(tid) for tid in must_exit_tokens.keys())):
-                shares_est = _estimate_recovery_shares_from_state(acct_state, token_id)
-                has_remote_sell_order = any(
-                    str(order.get("token_id") or "") == token_id
-                    and str(order.get("side") or "").upper() == "SELL"
-                    for order in remote_orders
-                )
-                if shares_est > min_shares or has_remote_sell_order:
-                    pending_tokens.append(token_id)
-            if pending_tokens:
-                summary["status"] = "pending_no_visible_inventory"
-                summary["remaining_count"] = len(pending_tokens)
-                summary["remaining_tokens"] = pending_tokens
-                logger.warning(
-                    "[HEMOSTASIS] account=%s pending_no_visible_inventory round=%s tokens=%s",
-                    _shorten_address(my_address),
-                    round_idx,
-                    len(pending_tokens),
-                )
-                return summary
-            logger.info(
-                "[HEMOSTASIS] account=%s complete at round=%s",
-                _shorten_address(my_address),
-                round_idx,
-            )
-            summary["status"] = "cleared"
-            summary["remaining_count"] = 0
-            return summary
-
-        candidate_token_ids = {str(item["token_id"]) for item in candidates}
-        summary["candidate_tokens"] = sorted(candidate_token_ids)
-        actions: list[dict[str, Any]] = []
-        for order in remote_orders:
-            if str(order.get("token_id") or "") not in candidate_token_ids:
-                continue
-            order_id = str(order.get("order_id") or "").strip()
-            if not order_id:
-                continue
-            actions.append({"type": "cancel", "order_id": order_id})
-
-        for item in candidates:
-            token_id = str(item["token_id"])
-            shares = float(item["shares"])
-            sell_shares = max(0.0, shares - sell_buffer)
-            if sell_shares <= min_shares:
-                sell_shares = shares
-            if sell_shares <= 0:
-                blocked_tokens[token_id] = "non_positive_sell_shares"
-                continue
-            orderbook = get_orderbook(acct_ctx.clob_client, token_id, api_timeout_sec)
-            best_bid = orderbook.get("best_bid")
-            if best_bid is None or float(best_bid) <= 0:
-                logger.warning(
-                    "[HEMOSTASIS] account=%s skip token=%s reason=no_best_bid shares=%s",
-                    _shorten_address(my_address),
-                    token_id,
-                    shares,
-                )
-                blocked_tokens[token_id] = "no_best_bid"
-                skipped = summary.get("skip_no_bid_tokens")
-                if isinstance(skipped, list) and token_id not in skipped:
-                    skipped.append(token_id)
-                continue
-            if token_id not in book_min_shares_cache:
-                book_min_shares_cache[token_id] = _book_min_order_shares(
-                    acct_ctx.clob_client,
-                    token_id,
-                    api_timeout_sec,
-                )
-            min_shares_token = float(book_min_shares_cache.get(token_id) or 0.0)
-            if min_shares_token > 0 and sell_shares + 1e-12 < min_shares_token:
-                blocked_tokens[token_id] = "below_book_min_order_shares"
-                continue
-            order_usd = abs(sell_shares) * float(best_bid)
-            if min_trade_usd_gate > 0 and order_usd + 1e-9 < min_trade_usd_gate:
-                blocked_tokens[token_id] = "below_min_trade_usd"
-                continue
-            actions.append(
-                {
-                    "type": "place",
-                    "token_id": token_id,
-                    "side": "SELL",
-                    "price": float(best_bid),
-                    "size": float(sell_shares),
-                    "_taker": True,
-                    "_available_shares": float(shares),
-                }
-            )
-            placed = summary.get("placed_tokens")
-            if isinstance(placed, list) and token_id not in placed:
-                placed.append(token_id)
-            attempted_shares[token_id] = float(shares)
-
-        place_count = sum(1 for action in actions if action.get("type") == "place")
-        if place_count <= 0:
-            logger.warning(
-                "[HEMOSTASIS] account=%s no executable sell actions at round=%s",
-                _shorten_address(my_address),
-                round_idx,
-            )
-            summary["status"] = "no_executable_actions"
-            break
-
-        now_ts = int(time.time())
-        apply_actions(
-            client=acct_ctx.clob_client,
-            actions=actions,
-            open_orders=remote_orders,
-            now_ts=now_ts,
-            dry_run=dry_run,
-            cfg=cfg,
-            state=acct_ctx.state,
-        )
-        logger.info(
-            "[HEMOSTASIS] account=%s round=%s candidates=%s places=%s dry_run=%s",
-            _shorten_address(my_address),
-            round_idx,
-            len(candidates),
-            place_count,
-            dry_run,
-        )
-        time.sleep(poll_sec)
-
-    my_positions, _ = fetch_positions_norm(
-        data_client,
-        my_address,
-        size_threshold=0.0,
-        positions_limit=positions_limit,
-        positions_max_pages=positions_max_pages,
-        refresh_sec=refresh_sec,
-        force_http=my_positions_force_http,
-        cache_bust_mode=cache_bust_mode,
-        header_keys=header_keys,
-    )
-    remain = 0
-    remaining_tokens: List[str] = []
-    remain_scope_tokens: set[str] = set(str(tid) for tid in sell_token_ids)
-    remain_scope_tokens.update(str(tid) for tid in must_exit_tokens.keys())
-    for pos in my_positions:
-        token_id = str(pos.get("token_id") or "").strip()
-        if not token_id:
-            token_id = str(_extract_token_id_from_raw(pos.get("raw")) or "").strip()
-        if not token_id or token_id not in remain_scope_tokens:
-            continue
-        try:
-            shares = float(pos.get("size") or 0.0)
-        except Exception:
-            shares = 0.0
-        if shares > min_shares:
-            remain += 1
-            if token_id not in remaining_tokens:
-                remaining_tokens.append(token_id)
-    summary["remaining_count"] = remain
-    summary["remaining_tokens"] = sorted(remaining_tokens)
-    summary["blocked_tokens"] = dict(sorted(blocked_tokens.items()))
-    if remain > 0:
-        logger.warning(
-            "[HEMOSTASIS] account=%s exit_with_remaining=%s (max_rounds=%s)",
-            _shorten_address(my_address),
-            remain,
-            max_rounds,
-        )
-        if summary.get("status") == "ok":
-            summary["status"] = "exit_with_remaining"
-    else:
-        if summary.get("status") == "ok":
-            summary["status"] = "cleared"
-    return summary
-
-
-def _run_hemostasis_recovery_startup(
-    cfg: Dict[str, Any],
-    data_client: Any,
-    account_contexts: List[AccountContext],
-    target_addresses: List[str],
-    logger: logging.Logger,
-    dry_run: bool = False,
-) -> None:
-    if not _cfg_bool(cfg.get("hemostasis_recovery_enabled"), False):
-        return
-    if not account_contexts:
-        return
-    try:
-        sell_token_ids = _collect_target_sell_token_ids(cfg, data_client, target_addresses, logger)
-    except Exception as exc:
-        logger.warning("[HEMOSTASIS] scan failed, skip recovery: %s", exc)
-        return
-    if not sell_token_ids:
-        logger.info("[HEMOSTASIS] no target sell token found in lookback window; skip recovery")
-        return
-    logger.info(
-        "[HEMOSTASIS] startup begin accounts=%s sell_tokens=%s",
-        len(account_contexts),
-        len(sell_token_ids),
-    )
-    summaries: List[Dict[str, Any]] = []
-    for acct_ctx in account_contexts:
-        try:
-            _reconcile_accumulator_for_account(cfg, acct_ctx, logger)
-            summary = _run_hemostasis_recovery_for_account(
-                cfg=cfg,
-                data_client=data_client,
-                acct_ctx=acct_ctx,
-                sell_token_ids=sell_token_ids,
-                logger=logger,
-                dry_run=dry_run,
-            )
-            if isinstance(summary, dict):
-                summaries.append(summary)
-                logger.info(
-                    "[HEMOSTASIS_SUMMARY] account=%s status=%s rounds=%s candidates=%s placed=%s remain=%s",
-                    _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
-                    summary.get("status"),
-                    summary.get("rounds"),
-                    len(summary.get("candidate_tokens") or []),
-                    len(summary.get("placed_tokens") or []),
-                    summary.get("remaining_count"),
-                )
-                if summary.get("remaining_tokens"):
-                    logger.warning(
-                        "[HEMOSTASIS_SUMMARY] account=%s remaining_tokens=%s",
-                        _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
-                        ",".join(str(x) for x in (summary.get("remaining_tokens") or [])),
-                    )
-                blocked = summary.get("blocked_tokens") or {}
-                if isinstance(blocked, dict) and blocked:
-                    logger.warning(
-                        "[HEMOSTASIS_SUMMARY] account=%s blocked_tokens=%s",
-                        _shorten_address(str(summary.get("account") or acct_ctx.my_address)),
-                        ",".join(f"{k}:{v}" for k, v in sorted(blocked.items())),
-                    )
-            try:
-                save_state(str(acct_ctx.state_path), acct_ctx.state)
-            except Exception as save_exc:
-                logger.warning(
-                    "[HEMOSTASIS] account=%s save_state failed: %s",
-                    _shorten_address(acct_ctx.my_address),
-                    save_exc,
-                )
-        except Exception as exc:
-            logger.warning(
-                "[HEMOSTASIS] account=%s failed: %s",
-                _shorten_address(acct_ctx.my_address),
-                exc,
-            )
-            summaries.append(
-                {
-                    "account": str(acct_ctx.my_address),
-                    "status": "exception",
-                    "error": str(exc),
-                    "remaining_count": None,
-                }
-            )
-    if summaries:
-        cleared = sum(1 for item in summaries if str(item.get("status")) == "cleared")
-        remained = sum(
-            1
-            for item in summaries
-            if str(item.get("status")) in {
-                "exit_with_remaining",
-                "no_executable_actions",
-                "pending_no_visible_inventory",
-            }
-        )
-        failed = sum(1 for item in summaries if str(item.get("status")) in {"exception", "fetch_positions_failed"})
-        logger.info(
-            "[HEMOSTASIS] startup_summary accounts=%s cleared=%s remained=%s failed=%s",
-            len(summaries),
-            cleared,
-            remained,
-            failed,
-        )
-    logger.info("[HEMOSTASIS] startup complete")
 
 
 def _derive_api_creds(client):
@@ -1362,39 +299,21 @@ def _derive_api_creds(client):
     return None
 
 
-def init_clob_client(
-    private_key: str,
-    funder_address: str,
-    cfg: Optional[Dict[str, Any]] = None,
-):
-    """
-    Initialize CLOB client for a specific account.
-
-    Args:
-        private_key: Private key for this account (from accounts.json)
-        funder_address: The account address (my_address)
-        cfg: Optional config dict containing poly_host, poly_chain_id, poly_signature
-    """
+def init_clob_client():
     from py_clob_client.client import ClobClient
 
-    # Priority: config > environment variable > default
-    if cfg:
-        host = cfg.get("poly_host") or os.getenv("POLY_HOST", "https://clob.polymarket.com")
-        chain_id = int(cfg.get("poly_chain_id") or os.getenv("POLY_CHAIN_ID", "137"))
-        signature_type = int(cfg.get("poly_signature") or os.getenv("POLY_SIGNATURE", "2"))
-    else:
-        host = os.getenv("POLY_HOST", "https://clob.polymarket.com")
-        chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
-        signature_type = int(os.getenv("POLY_SIGNATURE", "2"))
-
-    key = _normalize_privkey(private_key)
+    host = os.getenv("POLY_HOST", "https://clob.polymarket.com")
+    chain_id = int(os.getenv("POLY_CHAIN_ID", "137"))
+    signature_type = int(os.getenv("POLY_SIGNATURE", "2"))
+    key = _normalize_privkey(os.environ["POLY_KEY"])
+    funder = os.environ["POLY_FUNDER"]
 
     client = ClobClient(
         host,
         key=key,
         chain_id=chain_id,
         signature_type=signature_type,
-        funder=funder_address,
+        funder=funder,
     )
     api_creds = _derive_api_creds(client)
     if not api_creds:
@@ -1574,7 +493,7 @@ def _calc_used_notional_totals(
     for token_id, shares in my_by_token_id.items():
         mid = float(mid_cache.get(token_id, 0.0))
         if mid <= 0:
-            # 鎷夸笉鍒颁环鏍?鏃犵洏鍙ｏ細浣跨敤 fallback_mid_price 鍏滃簳锛岄伩鍏嶆寔浠撲及鍊艰娓呴浂
+            # 拿不到价格/无盘口：使用 fallback_mid_price 兜底，避免持仓估值被清零
             mid = 0.0
             if fallback_mid_price > 0 and abs(shares) > 0:
                 mid = fallback_mid_price
@@ -1797,27 +716,6 @@ def _calc_planned_notional_with_fallback(
     return total, by_token, order_info_by_id, shadow_total
 
 
-def _get_condition_id(state: Dict[str, Any], token_id: str) -> Optional[str]:
-    cache = state.get("market_status_cache", {})
-    data = cache.get(token_id)
-    if isinstance(data, dict):
-        meta = data.get("meta") or {}
-        return meta.get("conditionId")
-    return None
-
-
-def _get_event_id(state: Dict[str, Any], token_id: str) -> Optional[str]:
-    cache = state.get("market_status_cache", {})
-    data = cache.get(token_id)
-    if isinstance(data, dict):
-        meta = data.get("meta") or {}
-        event_id = meta.get("eventId")
-        if not event_id and isinstance(meta.get("events"), list) and meta["events"]:
-            event_id = meta["events"][0].get("id")
-        return event_id
-    return None
-
-
 def _shrink_on_risk_limit(
     act: Dict[str, Any],
     max_total: float,
@@ -1887,109 +785,6 @@ def _refresh_managed_order_ids(state: Dict[str, Any]) -> None:
     state["managed_order_ids"] = sorted(managed_ids)
 
 
-def _mark_must_exit_token(
-    state: Dict[str, Any],
-    token_id: str,
-    now_ts: int,
-    source: str,
-    target_sell_ms: int = 0,
-) -> None:
-    token_id = str(token_id or "").strip()
-    if not token_id:
-        return
-    must_exit = state.setdefault("must_exit_tokens", {})
-    if not isinstance(must_exit, dict):
-        must_exit = {}
-        state["must_exit_tokens"] = must_exit
-    meta = must_exit.get(token_id)
-    if not isinstance(meta, dict):
-        meta = {
-            "first_ts": int(now_ts),
-        }
-    if int(meta.get("first_ts") or 0) <= 0:
-        meta["first_ts"] = int(now_ts)
-    meta["last_ts"] = int(now_ts)
-    meta["source"] = str(source or "unknown")
-    if int(target_sell_ms or 0) > int(meta.get("target_sell_ms") or 0):
-        meta["target_sell_ms"] = int(target_sell_ms)
-    must_exit[token_id] = meta
-
-
-def _get_last_nonzero_shares(
-    state: Dict[str, Any],
-    token_id: str,
-) -> tuple[float, int]:
-    cache = state.get("last_nonzero_my_shares", {})
-    if not isinstance(cache, dict):
-        return 0.0, 0
-    meta = cache.get(str(token_id))
-    if not isinstance(meta, dict):
-        return 0.0, 0
-    try:
-        shares = float(meta.get("shares") or 0.0)
-    except Exception:
-        shares = 0.0
-    try:
-        ts = int(meta.get("ts") or 0)
-    except Exception:
-        ts = 0
-    return max(0.0, shares), max(0, ts)
-
-
-def _estimate_recovery_shares_from_state(
-    state: Dict[str, Any],
-    token_id: str,
-) -> float:
-    token_id = str(token_id or "").strip()
-    if not token_id:
-        return 0.0
-    est = 0.0
-    shares_last, _ = _get_last_nonzero_shares(state, token_id)
-    est = max(est, shares_last)
-    open_orders = state.get("open_orders", {})
-    if isinstance(open_orders, dict):
-        for order in (open_orders.get(token_id) or []):
-            if str(order.get("side") or "").upper() != "SELL":
-                continue
-            try:
-                size = float(order.get("size") or 0.0)
-            except Exception:
-                size = 0.0
-            if size > est:
-                est = size
-    return max(0.0, est)
-
-
-def _should_clear_must_exit_without_inventory(
-    state: Dict[str, Any],
-    token_id: str,
-    now_ts: int,
-    eps: float,
-    cfg: Dict[str, Any],
-) -> bool:
-    token_id = str(token_id or "").strip()
-    if not token_id:
-        return False
-    acc_usd = 0.0
-    acc = state.get("buy_notional_accumulator", {})
-    if isinstance(acc, dict):
-        acc_meta = acc.get(token_id)
-        if isinstance(acc_meta, dict):
-            try:
-                acc_usd = float(acc_meta.get("usd") or 0.0)
-            except Exception:
-                acc_usd = 0.0
-    last_shares, last_ts = _get_last_nonzero_shares(state, token_id)
-    cache_hold_sec = int(cfg.get("must_exit_cache_hold_sec") or 1800)
-    cache_hold_sec = max(0, cache_hold_sec)
-    cache_active = (
-        last_shares > max(0.0, eps)
-        and last_ts > 0
-        and now_ts - int(last_ts) <= cache_hold_sec
-    )
-    return acc_usd <= 0.01 and (not cache_active)
-
-
 def _intent_key(phase: str, desired_side: str, desired_shares: float) -> Dict[str, Any]:
     return {
         "phase": phase,
@@ -2057,15 +852,8 @@ def _action_identity(action: Dict[str, object]) -> str:
     return f"fallback:{token_id}:{side}:{size}:{price}:{action_ms}"
 
 
-def _action_ms(action: Dict[str, object]) -> int:
-    ts = action.get("timestamp")
-    if isinstance(ts, datetime):
-        return int(ts.timestamp() * 1000)
-    return int(action.get("timestamp_ms") or action.get("ts") or 0)
-
-
 def _extract_token_id_from_raw(raw: object) -> Optional[str]:
-    """Extract token_id from position/raw/action payload without network calls."""
+    """从 position/raw/action.raw 中提取 token_id（只读字段，不做网络请求）。支持嵌套结构。"""
     if raw is None:
         return None
 
@@ -2074,7 +862,6 @@ def _extract_token_id_from_raw(raw: object) -> Optional[str]:
         "token_id",
         "clobTokenId",
         "clob_token_id",
-        "asset",
         "assetId",
         "asset_id",
         "outcomeTokenId",
@@ -2208,195 +995,28 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _state_path_for_account(base_dir: Path, target_address: str, my_address: str) -> Path:
-    """Generate state file path for a specific account."""
-    target_short = target_address.strip().lower()
-    if target_short.startswith("0x") and len(target_short) >= 10:
-        target_part = f"{target_short[2:6]}_{target_short[-4:]}"
-    else:
-        target_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", target_short)[:16] or "unknown"
-
-    my_short = my_address.strip().lower()
-    if my_short.startswith("0x") and len(my_short) >= 10:
-        my_part = f"{my_short[2:6]}_{my_short[-4:]}"
-    else:
-        my_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", my_short)[:16] or "unknown"
-
-    return base_dir / f"state_{target_part}_{my_part}.json"
-
-
-def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> List[Dict[str, Any]]:
-    """Load accounts from external accounts.json file."""
-    if not accounts_file.exists():
-        raise FileNotFoundError(f"Accounts file not found: {accounts_file}")
-
-    try:
-        content = accounts_file.read_text(encoding="utf-8")
-        data = json.loads(content)
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Invalid JSON in accounts file: {e}")
-
-    accounts = data.get("accounts", [])
-    if not accounts:
-        raise ValueError(f"No accounts found in {accounts_file}")
-
-    logger.info("[MULTI] Loaded %d account(s) from %s", len(accounts), accounts_file.name)
-    return accounts
-
-
-def _init_account_contexts(
-    cfg: Dict[str, Any],
-    base_dir: Path,
-    logger: logging.Logger,
-) -> List[AccountContext]:
-    """Initialize AccountContext for each enabled account in accounts.json."""
-
-    # Load accounts from external file
-    accounts_file_name = cfg.get("accounts_file", "accounts.json")
-    accounts_file = base_dir / accounts_file_name
-    accounts_cfg = _load_accounts_from_file(accounts_file, logger)
-
-    target_address = cfg["target_address"]
-    contexts: List[AccountContext] = []
-
-    for idx, acct_cfg in enumerate(accounts_cfg):
-        if not acct_cfg.get("enabled", True):
-            logger.info("[MULTI] Account #%d disabled, skipping", idx)
-            continue
-
-        acct_name = acct_cfg.get("name", f"Account_{idx}")
-        my_address = acct_cfg.get("my_address")
-        private_key = acct_cfg.get("private_key")
-
-        if not my_address or _is_placeholder_addr(my_address):
-            logger.warning("[MULTI] Account '%s' has no valid my_address, skipping", acct_name)
-            continue
-
-        if not _is_evm_address(my_address):
-            logger.warning("[MULTI] Account '%s' address invalid: %s, skipping", acct_name, my_address)
-            continue
-
-        if not private_key or private_key.startswith("YOUR_PRIVATE_KEY"):
-            logger.warning("[MULTI] Account '%s' has no valid private_key, skipping", acct_name)
-            continue
-
-        # follow_ratio is per-account, defined in accounts.json (default: 0.05)
-        follow_ratio = float(acct_cfg.get("follow_ratio") or 0.05)
-
-        # Initialize CLOB client for this account using private_key from config
-        try:
-            clob_client = init_clob_client(
-                private_key=private_key,
-                funder_address=my_address,
-                cfg=cfg,
-            )
-        except Exception as exc:
-            logger.error("[MULTI] Account '%s' (%s) CLOB init failed: %s", acct_name, my_address, exc)
-            continue
-
-        # Create per-account state file path
-        state_path = _state_path_for_account(base_dir, target_address, my_address)
-
-        # Load state for this account
-        state = load_state(str(state_path))
-
-        # Safety: if state was for a different target, reset bootstrap fields
-        prev_target = str(state.get("target") or "").lower().strip()
-        cur_target = str(target_address or "").lower().strip()
-        if prev_target and cur_target and prev_target != cur_target:
-            logger.warning(
-                "[MULTI] Account '%s' state target mismatch, resetting bootstrap",
-                acct_name,
-            )
-            state["bootstrapped"] = False
-            state["boot_token_ids"] = []
-            state["boot_token_keys"] = []
-            state["target_last_shares_by_token_key"] = {}
-            state["target_last_shares"] = {}
-            state["target_last_seen_ts"] = {}
-            state["target_missing_streak"] = {}
-            state["last_target_sell_action_ts_by_token"] = {}
-            state["topic_state"] = {}
-            state["open_orders"] = {}
-            state["open_orders_all"] = []
-            state["must_exit_tokens"] = {}
-            state["last_nonzero_my_shares"] = {}
-            if boot_sync_mode == "baseline_only" or fresh_boot:
-                state["seen_action_ids"] = []
-            state["target_actions_cursor_ms"] = 0
-            state["target_trades_cursor_ms"] = 0
-
-        # Initialize all required state fields for this account
-        state.setdefault("open_orders", {})
-        state.setdefault("open_orders_all", {})
-        state.setdefault("seen_my_trade_ids", [])
-        state.setdefault("my_trades_cursor_ms", 0)
-        state.setdefault("managed_order_ids", [])
-        state.setdefault("intent_keys", {})
-        state.setdefault("token_map", {})
-        state.setdefault("bootstrapped", False)
-        state.setdefault("boot_token_ids", [])
-        state.setdefault("boot_token_keys", [])
-        state.setdefault("target_last_shares_by_token_key", {})
-        state.setdefault("target_last_shares", {})
-        state.setdefault("target_last_seen_ts", {})
-        state.setdefault("target_missing_streak", {})
-        state.setdefault("last_target_sell_action_ts_by_token", {})
-        state.setdefault("cooldown_until", {})
-        state.setdefault("topic_state", {})
-        state.setdefault("target_actions_cursor_ms", 0)
-        state.setdefault("ignored_tokens", {})
-        state.setdefault("topic_unfilled_attempts", {})
-        state.setdefault("probed_token_ids", [])
-        state.setdefault("market_status_cache", {})
-        state.setdefault("last_mid_price_by_token_id", {})
-        state.setdefault("orderbook_empty_streak", {})
-        state.setdefault("order_ts_by_id", {})
-        state.setdefault("seen_action_ids", [])
-        state.setdefault("last_reprice_ts_by_token", {})
-        state.setdefault("place_fail_until", {})
-        state.setdefault("sell_reconcile_lock_until", {})
-        state.setdefault("missing_data_freeze", {})
-        state.setdefault("resolver_fail_cache", {})
-        state.setdefault("closed_token_keys", {})
-        state.setdefault("must_exit_tokens", {})
-        state.setdefault("last_nonzero_my_shares", {})
-
-        ctx = AccountContext(
-            name=acct_name,
-            my_address=my_address.strip(),
-            private_key=private_key,
-            follow_ratio=follow_ratio,
-            clob_client=clob_client,
-            state=state,
-            state_path=state_path,
-            enabled=True,
-            max_notional_per_token=acct_cfg.get("max_notional_per_token"),
-            max_notional_total=acct_cfg.get("max_notional_total"),
-        )
-        contexts.append(ctx)
-
-        logger.info(
-            "[MULTI] Account '%s' initialized: addr=%s ratio=%.4f state=%s",
-            acct_name,
-            _shorten_address(my_address),
-            follow_ratio,
-            state_path.name,
-        )
-
-    if not contexts:
-        raise ValueError("No valid accounts configured or all accounts failed initialization")
-
-    logger.info("[MULTI] Total %d account(s) initialized successfully", len(contexts))
-    return contexts
-
-
 def main() -> None:
     args = _parse_args()
     cfg = _load_config(Path(args.config))
+    replay_override: Dict[str, Any] = {}
+    replay_hours = float(cfg.get("replay_on_boot_hours") or 0)
+    if replay_hours > 0:
+        replay_window_sec = int(replay_hours * 3600)
+        current_window_sec = int(cfg.get("actions_replay_window_sec") or 0)
+        if current_window_sec < replay_window_sec:
+            cfg["actions_replay_window_sec"] = replay_window_sec
+            replay_override["actions_replay_window_sec"] = (
+                current_window_sec,
+                replay_window_sec,
+            )
+        boot_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
+        if boot_mode == "baseline_only":
+            cfg["boot_sync_mode"] = "replay"
+            replay_override["boot_sync_mode"] = boot_mode
     arg_overrides: Dict[str, Any] = {}
     for key in (
         "target_address",
+        "my_address",
         "follow_ratio",
         "poll_interval_sec",
         "poll_interval_sec_exiting",
@@ -2407,96 +1027,46 @@ def main() -> None:
             cfg[key] = arg_val
             arg_overrides[key] = arg_val
 
-    # ============================================================
-    # RESOLVE TARGET ADDRESSES (before logging setup)
-    # Priority: target_addresses array > target_address > env vars
-    # ============================================================
-    base_dir = Path(args.config).parent
+    cfg["my_address"] = _resolve_addr(
+        "my_address",
+        cfg.get("my_address"),
+        env_keys=[
+            "POLY_FUNDER",
+            "POLY_MY_ADDRESS",
+            "MY_ADDRESS",
+        ],
+    )
+    cfg["target_address"] = _resolve_addr(
+        "target_address",
+        cfg.get("target_address"),
+        env_keys=[
+            "COPYTRADE_TARGET",
+            "CT_TARGET",
+            "POLY_TARGET_ADDRESS",
+            "TARGET_ADDRESS",
+        ],
+    )
 
-    # First try to get targets from target_addresses array
-    target_addresses: List[str] = []
-    target_ratios: Dict[str, float] = {}
-    target_blacklists: Dict[str, List[str]] = {}
-    target_list = cfg.get("target_addresses")
-    if isinstance(target_list, list) and target_list:
-        for item in target_list:
-            if isinstance(item, str):
-                addr_str = str(item).strip()
-                if _is_evm_address(addr_str) and not _is_placeholder_addr(addr_str):
-                    target_addresses.append(addr_str)
-                    target_ratios[addr_str.lower()] = 1.0
-                    target_blacklists[addr_str.lower()] = cfg.get("blacklist_token_keys") or []
-                else:
-                    pass  # silently skip invalid address before logger init
-            elif isinstance(item, dict):
-                addr_str = str(item.get("address") or "").strip()
-                if _is_evm_address(addr_str) and not _is_placeholder_addr(addr_str):
-                    ratio = float(item.get("ratio", 1.0))
-                    ratio = max(0.0, ratio)
-                    target_addresses.append(addr_str)
-                    target_ratios[addr_str.lower()] = ratio
-                    per_target_bl = item.get("blacklist_token_keys")
-                    if isinstance(per_target_bl, list):
-                        target_blacklists[addr_str.lower()] = per_target_bl
-                    else:
-                        target_blacklists[addr_str.lower()] = cfg.get("blacklist_token_keys") or []
-                else:
-                    pass  # silently skip invalid address before logger init
-            else:
-                pass  # silently skip invalid entry before logger init
+    # Per-target state file: if user didn't specify a custom --state, derive one from target address.
+    orig_state_path = args.state
+    try:
+        sp = Path(args.state)
+        if sp.name == "state.json":
+            args.state = str(_state_path_for_target(sp, cfg["target_address"]))
+    except Exception:
+        args.state = orig_state_path
 
-    # Fall back to target_address or env vars if no valid targets from array
-    if not target_addresses:
-        single_target = cfg.get("target_address")
-        if not single_target or _is_placeholder_addr(single_target):
-            # Try environment variables
-            single_target = _get_env_first([
-                "COPYTRADE_TARGET",
-                "CT_TARGET",
-                "POLY_TARGET_ADDRESS",
-                "TARGET_ADDRESS",
-            ])
-        if single_target and _is_evm_address(single_target) and not _is_placeholder_addr(single_target):
-            target_addresses.append(str(single_target).strip())
-            target_ratios[str(single_target).strip().lower()] = 1.0
-            target_blacklists[str(single_target).strip().lower()] = cfg.get("blacklist_token_keys") or []
-
-    if not target_addresses:
-        raise ValueError(
-            "No valid target addresses configured. "
-            "Set target_addresses array in config, or target_address, or env vars."
+    logger = _setup_logging(cfg, cfg["target_address"], Path(args.config).parent)
+    if replay_override:
+        logger.info(
+            "[CFG] replay_on_boot_hours=%s overrides=%s",
+            replay_hours,
+            replay_override,
         )
+    if args.state != orig_state_path:
+        logger.info("[STATE] per-target state: %s -> %s", orig_state_path, args.state)
 
-    # Set cfg["target_address"] to first target for backward compatibility
-    cfg["target_address"] = target_addresses[0]
-
-    # Setup logging using first target address
-    logger = _setup_logging(cfg, cfg["target_address"], base_dir)
-
-    # Log resolved targets
-    logger.info(
-        "[MULTI-TARGET] Resolved %d target address(es): %s",
-        len(target_addresses),
-        ", ".join(_shorten_address(a) for a in target_addresses),
-    )
-
-    # ============================================================
-    # MULTI-ACCOUNT INITIALIZATION
-    # ============================================================
-    account_contexts = _init_account_contexts(cfg, base_dir, logger)
-    current_account_idx = 0  # Used for round-robin account selection
-
-    logger.info(
-        "[MULTI] Initialized %d follower account(s) for %d target(s)",
-        len(account_contexts),
-        len(target_addresses),
-    )
-
-    # For backward compatibility, use first account's settings as default
-    cfg["my_address"] = account_contexts[0].my_address
-    cfg["follow_ratio"] = account_contexts[0].follow_ratio
-    args.state = str(account_contexts[0].state_path)
-    state = account_contexts[0].state
+    state = load_state(args.state)
     # Safety: if user accidentally reuses a state file across targets, reset bootstrap-related fields.
     prev_target = str(state.get("target") or "").lower().strip()
     cur_target = str(cfg.get("target_address") or "").lower().strip()
@@ -2513,15 +1083,11 @@ def main() -> None:
         state["target_last_shares"] = {}
         state["target_last_seen_ts"] = {}
         state["target_missing_streak"] = {}
-        state["last_target_sell_action_ts_by_token"] = {}
         state["topic_state"] = {}
         state["open_orders"] = {}
         state["open_orders_all"] = []
-        state["must_exit_tokens"] = {}
-        state["last_nonzero_my_shares"] = {}
         state["seen_action_ids"] = []
         state["target_actions_cursor_ms"] = 0
-        state["target_trades_cursor_ms"] = 0
     state.pop("cumulative_buy_usd_total", None)
     state.pop("cumulative_buy_usd_by_token", None)
     run_start_ms = int(time.time() * 1000)
@@ -2530,13 +1096,12 @@ def main() -> None:
     state.setdefault("sizing", {})
     state["sizing"].setdefault("ema_delta_usd", None)
     logger.info(
-        "[CFG] targets=%s my=%s ratio=%s",
-        [_shorten_address(a) for a in target_addresses],
+        "[CFG] target=%s my=%s ratio=%s",
+        cfg["target_address"],
         cfg["my_address"],
         cfg.get("follow_ratio"),
     )
-    state["target"] = cfg.get("target_address")  # Keep primary target for backward compatibility
-    state["target_addresses"] = target_addresses  # Store all targets
+    state["target"] = cfg.get("target_address")
     state["my_address"] = cfg.get("my_address")
     state["follow_ratio"] = cfg.get("follow_ratio")
     state.setdefault("open_orders", {})
@@ -2554,16 +1119,15 @@ def main() -> None:
     state.setdefault("boot_run_start_ms", 0)
     state.setdefault("probed_token_ids", [])
     state.setdefault("ignored_tokens", {})
-    state.setdefault("topic_unfilled_attempts", {})
     state.setdefault("market_status_cache", {})
     state.setdefault("target_last_shares", {})
     state.setdefault("target_last_seen_ts", {})
     state.setdefault("target_missing_streak", {})
-    state.setdefault("last_target_sell_action_ts_by_token", {})
     state.setdefault("cooldown_until", {})
     state.setdefault("target_last_event_ts", {})
     state.setdefault("topic_state", {})
     state.setdefault("target_actions_cursor_ms", 0)
+    state.setdefault("target_trades_cursor_ms", 0)
     state.setdefault("last_mid_price_by_token_id", {})
     state.setdefault("last_mid_price_update_ts", 0)
     state.setdefault("orderbook_empty_streak", {})
@@ -2572,13 +1136,10 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
-    state.setdefault("sell_reconcile_lock_until", {})
     state.setdefault("missing_data_freeze", {})
     state.setdefault("resolver_fail_cache", {})
     state.setdefault("target_positions_nonce_last_ts", 0)
     state.setdefault("target_positions_nonce_actions", 0)
-    state.setdefault("must_exit_tokens", {})
-    state.setdefault("last_nonzero_my_shares", {})
     if not isinstance(state.get("open_orders"), dict):
         state["open_orders"] = {}
     if not isinstance(state.get("open_orders_all"), dict):
@@ -2611,8 +1172,6 @@ def main() -> None:
         state["target_last_seen_ts"] = {}
     if not isinstance(state.get("target_missing_streak"), dict):
         state["target_missing_streak"] = {}
-    if not isinstance(state.get("last_target_sell_action_ts_by_token"), dict):
-        state["last_target_sell_action_ts_by_token"] = {}
     if not isinstance(state.get("cooldown_until"), dict):
         state["cooldown_until"] = {}
     if not isinstance(state.get("target_last_event_ts"), dict):
@@ -2621,6 +1180,8 @@ def main() -> None:
         state["topic_state"] = {}
     if not isinstance(state.get("target_actions_cursor_ms"), (int, float)):
         state["target_actions_cursor_ms"] = 0
+    if not isinstance(state.get("target_trades_cursor_ms"), (int, float)):
+        state["target_trades_cursor_ms"] = 0
     if not isinstance(state.get("last_mid_price_by_token_id"), dict):
         state["last_mid_price_by_token_id"] = {}
     if not isinstance(state.get("last_mid_price_update_ts"), (int, float)):
@@ -2637,26 +1198,33 @@ def main() -> None:
         state["adopted_existing_orders"] = False
     if not isinstance(state.get("place_fail_until"), dict):
         state["place_fail_until"] = {}
-    if not isinstance(state.get("sell_reconcile_lock_until"), dict):
-        state["sell_reconcile_lock_until"] = {}
     if not isinstance(state.get("target_positions_nonce_last_ts"), (int, float)):
         state["target_positions_nonce_last_ts"] = 0
     if not isinstance(state.get("target_positions_nonce_actions"), (int, float)):
         state["target_positions_nonce_actions"] = 0
+
+    replay_hours = float(cfg.get("replay_on_boot_hours") or 24)
+    if replay_hours > 0:
+        now_ms = int(time.time() * 1000)
+        replay_from_ms = int(now_ms - replay_hours * 3600 * 1000)
+        state["actions_replay_from_ms"] = replay_from_ms
+        if int(state.get("run_start_ms") or 0) > replay_from_ms:
+            state["run_start_ms"] = replay_from_ms
+        if int(state.get("target_actions_cursor_ms") or 0) > replay_from_ms:
+            state["target_actions_cursor_ms"] = replay_from_ms
+        if int(state.get("target_trades_cursor_ms") or 0) > replay_from_ms:
+            state["target_trades_cursor_ms"] = replay_from_ms
+        if int(state.get("my_trades_cursor_ms") or 0) > replay_from_ms:
+            state["my_trades_cursor_ms"] = replay_from_ms
     if not isinstance(state.get("missing_data_freeze"), dict):
         state["missing_data_freeze"] = {}
     if not isinstance(state.get("resolver_fail_cache"), dict):
         state["resolver_fail_cache"] = {}
     if not isinstance(state.get("closed_token_keys"), dict):
         state["closed_token_keys"] = {}
-    if not isinstance(state.get("must_exit_tokens"), dict):
-        state["must_exit_tokens"] = {}
-    if not isinstance(state.get("last_nonzero_my_shares"), dict):
-        state["last_nonzero_my_shares"] = {}
 
     data_client = DataApiClient()
-    # Note: clob_client is now per-account in account_contexts[i].clob_client
-    clob_client = account_contexts[0].clob_client
+    clob_client = init_clob_client()
 
     poll_interval = 20
     poll_interval_exiting = 20
@@ -2685,7 +1253,6 @@ def main() -> None:
     last_config_mtime: Optional[float] = None
     resolved_target_address = cfg["target_address"]
     resolved_my_address = cfg["my_address"]
-    risk_summary_interval_sec = 60
 
     def _apply_overrides(payload: Dict[str, Any]) -> None:
         for key, value in arg_overrides.items():
@@ -2709,7 +1276,6 @@ def main() -> None:
         nonlocal heartbeat_interval_sec
         nonlocal config_reload_sec
         nonlocal max_resolve_target_positions_per_loop
-        nonlocal risk_summary_interval_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -2730,16 +1296,13 @@ def main() -> None:
         my_positions_force_http = bool(cfg.get("my_positions_force_http", False))
         actions_page_size = int(cfg.get("actions_page_size") or 300)
         actions_max_offset = int(cfg.get("actions_max_offset") or 10000)
-        if actions_max_offset > 3000:
-            actions_max_offset = 3000
         heartbeat_interval_sec = int(cfg.get("heartbeat_interval_sec") or 600)
         config_reload_sec = int(cfg.get("config_reload_sec") or 600)
         max_resolve_target_positions_per_loop = int(
             cfg.get("max_resolve_target_positions_per_loop") or 20
         )
-        risk_summary_interval_sec = int(cfg.get("risk_summary_interval_sec") or 120)
         # Log deduplication: suppress repetitive logs within this window (0 = disabled)
-        log_dedup_window = float(cfg.get("log_dedup_window_sec") or 300.0)
+        log_dedup_window = float(cfg.get("log_dedup_window_sec") or 60.0)
         _log_dedup.set_window(log_dedup_window)
 
     def _refresh_log_level() -> None:
@@ -2763,20 +1326,16 @@ def main() -> None:
         _apply_overrides(new_cfg)
         new_target = new_cfg.get("target_address")
         new_my = new_cfg.get("my_address")
-        if not str(new_target or "").strip():
-            new_cfg["target_address"] = resolved_target_address
-        elif str(new_target).strip() != str(resolved_target_address).strip():
+        if new_target and str(new_target).strip() != str(resolved_target_address).strip():
             logger.warning(
-                "[CFG] target_address 鍙樻洿灏嗚蹇界暐锛岄渶瑕侀噸鍚? %s -> %s",
+                "[CFG] target_address 变更将被忽略，需要重启: %s -> %s",
                 resolved_target_address,
                 new_target,
             )
             new_cfg["target_address"] = resolved_target_address
-        if not str(new_my or "").strip():
-            new_cfg["my_address"] = resolved_my_address
-        elif str(new_my).strip() != str(resolved_my_address).strip():
+        if new_my and str(new_my).strip() != str(resolved_my_address).strip():
             logger.warning(
-                "[CFG] my_address 鍙樻洿灏嗚蹇界暐锛岄渶瑕侀噸鍚? %s -> %s",
+                "[CFG] my_address 变更将被忽略，需要重启: %s -> %s",
                 resolved_my_address,
                 new_my,
             )
@@ -2799,22 +1358,22 @@ def main() -> None:
     except Exception:
         last_config_mtime = None
     last_heartbeat_ts = 0
-    last_risk_summary_ts = 0
 
-    replay_floor_ms = _get_replay_floor_ms(cfg, state)
+    replay_floor_ms = int(state.get("actions_replay_from_ms") or 0)
+    if replay_floor_ms <= 0:
+        replay_floor_ms = int(state.get("run_start_ms") or time.time() * 1000)
     if int(state.get("target_actions_cursor_ms") or 0) <= 0:
         state["target_actions_cursor_ms"] = replay_floor_ms
     if int(state.get("target_actions_cursor_ms") or 0) < replay_floor_ms:
         state["target_actions_cursor_ms"] = replay_floor_ms
-    # Also enforce floor on target_trades_cursor_ms (used when actions_source="trades")
     if int(state.get("target_trades_cursor_ms") or 0) <= 0:
         state["target_trades_cursor_ms"] = replay_floor_ms
     if int(state.get("target_trades_cursor_ms") or 0) < replay_floor_ms:
         state["target_trades_cursor_ms"] = replay_floor_ms
     if int(state.get("my_trades_cursor_ms") or 0) <= 0:
-        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or time.time() * 1000)
-    if int(state.get("my_trades_cursor_ms") or 0) < int(state.get("run_start_ms") or 0):
-        state["my_trades_cursor_ms"] = int(state.get("run_start_ms") or 0)
+        state["my_trades_cursor_ms"] = replay_floor_ms
+    if int(state.get("my_trades_cursor_ms") or 0) < replay_floor_ms:
+        state["my_trades_cursor_ms"] = replay_floor_ms
     if int(state.get("my_trades_unreliable_until") or 0) < 0:
         state["my_trades_unreliable_until"] = 0
 
@@ -2828,7 +1387,6 @@ def main() -> None:
     _log_retention_days = int(cfg.get("log_retention_days") or 7)
     _log_cleanup_hour = int(cfg.get("log_cleanup_hour") or 12)
     _last_log_cleanup_date: str = ""
-    last_http_timeout: Optional[float] = None
 
     def _get_poll_interval() -> int:
         topic_state = state.get("topic_state", {})
@@ -2838,192 +1396,9 @@ def main() -> None:
                     return poll_interval_exiting
         return poll_interval
 
-    def _get_api_timeout_sec() -> Optional[float]:
-        try:
-            timeout = float(cfg.get("api_timeout_sec") or 15.0)
-        except Exception:
-            timeout = 15.0
-        if timeout <= 0:
-            return None
-        return timeout
-
-    def _configure_clob_http_timeout(timeout_sec: Optional[float]) -> None:
-        nonlocal last_http_timeout
-        if timeout_sec == last_http_timeout:
-            return
-        try:
-            import httpx
-            from py_clob_client.http_helpers import helpers as clob_http_helpers
-
-            clob_http_helpers._http_client = httpx.Client(http2=True, timeout=timeout_sec)
-            last_http_timeout = timeout_sec
-            logger.info("[HTTP_TIMEOUT] clob_client httpx timeout=%s", timeout_sec)
-        except Exception as exc:
-            logger.warning("[HTTP_TIMEOUT] failed to set timeout=%s: %s", timeout_sec, exc)
-
-    # Optional startup recovery:
-    # replay target SELL actions within a lookback window and force-sell matching holdings
-    # before entering the normal copy-trading loop.
-    _run_hemostasis_recovery_startup(
-        cfg=cfg,
-        data_client=data_client,
-        account_contexts=account_contexts,
-        target_addresses=target_addresses,
-        logger=logger,
-        dry_run=bool(args.dry_run),
-    )
-
-    logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
-
-    # Shared cross-account cache for target data
-    shared_target_cache: Dict[str, Any] = {}
-    _current_log_date = datetime.now().date()
-
     while True:
-        # Daily log file rotation without restarting process
-        if datetime.now().date() != _current_log_date:
-            _current_log_date = datetime.now().date()
-            logger = _setup_logging(cfg, cfg["target_address"], base_dir)
-            logger.info("[LOG] Date changed -> reopened daily log file")
-
         now_ts = int(time.time())
         now_wall = time.time()
-
-        # ============================================================
-        # SHARED TARGET DATA CACHE (cross-account)
-        # ============================================================
-        cache_ttl_sec = max(5, int(cfg.get("shared_target_cache_ttl_sec") or target_positions_refresh_sec))
-        cache_key = (
-            tuple(target_addresses),
-            tuple(sorted((k, round(v, 6)) for k, v in target_ratios.items())),
-            tuple(
-                sorted(
-                    (k, tuple(sorted(v)))
-                    for k, v in target_blacklists.items()
-                )
-            ),
-            positions_limit,
-            positions_max_pages,
-            round(size_threshold, 9),
-            target_positions_refresh_sec,
-            target_cache_bust_mode,
-            tuple(header_keys),
-            actions_page_size,
-            actions_max_offset,
-            bool(cfg.get("actions_taker_only", False)),
-        )
-        if (
-            shared_target_cache.get("cache_key") != cache_key
-            or (now_ts - shared_target_cache.get("cached_at", 0)) >= cache_ttl_sec
-        ):
-            try:
-                fresh_target_pos, fresh_target_info, fresh_position_source = _fetch_all_target_positions(
-                    data_client,
-                    target_addresses,
-                    target_ratios,
-                    target_blacklists,
-                    size_threshold,
-                    positions_limit=positions_limit,
-                    positions_max_pages=positions_max_pages,
-                    refresh_sec=target_positions_refresh_sec,
-                    cache_bust_mode=target_cache_bust_mode,
-                    header_keys=header_keys,
-                    logger=logger,
-                )
-            except Exception as exc:
-                logger.warning("[SHARED_CACHE] fetch target positions failed: %s", exc)
-                fresh_target_pos, fresh_target_info, fresh_position_source = [], {"ok": False, "incomplete": True}, {}
-
-            actions_source_cfg = str(cfg.get("actions_source") or "trades").lower()
-            use_trades_api_cache = actions_source_cfg in ("trade", "trades")
-            actions_cursor_key_cache = (
-                "target_trades_cursor_ms" if use_trades_api_cache else "target_actions_cursor_ms"
-            )
-            min_cursor_ms = min(
-                (int(acct.state.get(actions_cursor_key_cache) or 0) for acct in account_contexts),
-                default=0,
-            )
-            replay_floor_ms_cache = _get_replay_floor_ms(cfg, account_contexts[0].state)
-            min_cursor_ms = max(min_cursor_ms, replay_floor_ms_cache)
-            try:
-                fresh_actions_list, fresh_actions_info = _fetch_all_target_actions(
-                    data_client,
-                    target_addresses,
-                    min_cursor_ms,
-                    use_trades_api=use_trades_api_cache,
-                    page_size=actions_page_size,
-                    max_offset=actions_max_offset,
-                    taker_only=bool(cfg.get("actions_taker_only", False)),
-                    logger=logger,
-                    target_blacklists=target_blacklists,
-                )
-            except Exception as exc:
-                logger.warning("[SHARED_CACHE] fetch target actions failed: %s", exc)
-                fresh_actions_list, fresh_actions_info = [], {"ok": False, "incomplete": True}
-
-            shared_target_cache = {
-                "cache_key": cache_key,
-                "cached_at": now_ts,
-                "positions": (fresh_target_pos, fresh_target_info, fresh_position_source),
-                "actions": (fresh_actions_list, fresh_actions_info),
-                "actions_cursor_key": actions_cursor_key_cache,
-            }
-            logger.debug(
-                "[SHARED_CACHE] refreshed positions=%s actions=%s ttl=%s",
-                len(fresh_target_pos),
-                len(fresh_actions_list),
-                cache_ttl_sec,
-            )
-        else:
-            logger.debug(
-                "[SHARED_CACHE] hit positions=%s actions=%s age=%s",
-                len(shared_target_cache["positions"][0]),
-                len(shared_target_cache["actions"][0]),
-                now_ts - shared_target_cache["cached_at"],
-            )
-
-        cached_positions, cached_target_info, cached_position_source = shared_target_cache["positions"]
-        cached_actions, cached_actions_info = shared_target_cache["actions"]
-        cached_actions_cursor_key = shared_target_cache["actions_cursor_key"]
-
-        # ============================================================
-        # MULTI-ACCOUNT: Select current account (round-robin)
-        # ============================================================
-        acct_ctx = account_contexts[current_account_idx]
-        state = acct_ctx.state
-        clob_client = acct_ctx.clob_client
-        current_my_address = acct_ctx.my_address
-        cfg["my_address"] = current_my_address
-        cfg["follow_ratio"] = acct_ctx.follow_ratio
-        args.state = str(acct_ctx.state_path)
-
-        # Ensure per-account state has run_start_ms and cursors initialized.
-        if int(state.get("run_start_ms") or 0) <= 0:
-            state["run_start_ms"] = run_start_ms
-        replay_floor_ms = _get_replay_floor_ms(cfg, state)
-        if int(state.get("target_actions_cursor_ms") or 0) <= 0:
-            state["target_actions_cursor_ms"] = replay_floor_ms
-        if int(state.get("target_actions_cursor_ms") or 0) < replay_floor_ms:
-            state["target_actions_cursor_ms"] = replay_floor_ms
-        if int(state.get("target_trades_cursor_ms") or 0) <= 0:
-            state["target_trades_cursor_ms"] = replay_floor_ms
-        if int(state.get("target_trades_cursor_ms") or 0) < replay_floor_ms:
-            state["target_trades_cursor_ms"] = replay_floor_ms
-
-        # Apply per-account config overrides
-        if acct_ctx.max_notional_per_token is not None:
-            cfg["max_notional_per_token"] = acct_ctx.max_notional_per_token
-        if acct_ctx.max_notional_total is not None:
-            cfg["max_notional_total"] = acct_ctx.max_notional_total
-
-        if len(account_contexts) > 1:
-            logger.info(
-                "[MULTI] === Processing account %d/%d: %s ratio=%.4f ===",
-                current_account_idx + 1,
-                len(account_contexts),
-                _shorten_address(acct_ctx.my_address),
-                acct_ctx.follow_ratio,
-            )
 
         # --- Daily log cleanup: run once per day at the configured hour ---
         _now_dt = datetime.fromtimestamp(now_ts, tz=timezone.utc)
@@ -3042,14 +1417,6 @@ def main() -> None:
         if not isinstance(resolver_fail_cache, dict):
             resolver_fail_cache = {}
             state["resolver_fail_cache"] = resolver_fail_cache
-        must_exit_tokens = state.setdefault("must_exit_tokens", {})
-        if not isinstance(must_exit_tokens, dict):
-            must_exit_tokens = {}
-            state["must_exit_tokens"] = must_exit_tokens
-        last_nonzero_my_shares = state.setdefault("last_nonzero_my_shares", {})
-        if not isinstance(last_nonzero_my_shares, dict):
-            last_nonzero_my_shares = {}
-            state["last_nonzero_my_shares"] = last_nonzero_my_shares
         if resolver_fail_cooldown_sec > 0:
             expired_keys = [
                 token_key
@@ -3069,14 +1436,9 @@ def main() -> None:
             except Exception:
                 reason = "interval"
             _reload_config(reason)
-            # MULTI-ACCOUNT: ensure per-account identity survives config reload.
-            cfg["my_address"] = acct_ctx.my_address
-            cfg["follow_ratio"] = acct_ctx.follow_ratio
-        api_timeout_sec = _get_api_timeout_sec()
-        _configure_clob_http_timeout(api_timeout_sec)
         managed_ids = {str(order_id) for order_id in (state.get("managed_order_ids") or [])}
         try:
-            remote_orders, ok, err = fetch_open_orders_norm(clob_client, api_timeout_sec)
+            remote_orders, ok, err = fetch_open_orders_norm(clob_client)
             if ok:
                 remote_by_token: Dict[str, list[dict]] = {}
                 order_ts_by_id = state.setdefault("order_ts_by_id", {})
@@ -3217,18 +1579,9 @@ def main() -> None:
             "target_trades_cursor_ms" if actions_source in ("trade", "trades") else "target_actions_cursor_ms"
         )
         actions_cursor_ms = int(state.get(actions_cursor_key) or 0)
-        replay_floor_ms = _get_replay_floor_ms(cfg, state)
-        actions_cursor_ms = max(actions_cursor_ms, replay_floor_ms)
-        is_replay_mode = _is_replay_mode(cfg)
-        actions_replay_window_sec = _get_actions_replay_window_sec(cfg, is_replay_mode)
-        _cfg_lag_threshold = int(cfg.get("actions_lag_threshold_sec") or 180)
-        # Scale lag threshold by account count: with N accounts in round-robin,
-        # each account polls every ~N*poll_interval, so the effective lag floor
-        # is much higher than in single-account V2.  Ensure the threshold is
-        # at least N * poll_interval to avoid perpetual false-positive lag_high.
-        _n_accounts = len(account_contexts)
-        _poll_sec = int(cfg.get("poll_interval_sec") or 20)
-        actions_lag_threshold_sec = max(_cfg_lag_threshold, _n_accounts * _poll_sec + _poll_sec)
+        actions_cursor_ms = max(actions_cursor_ms, int(state.get("run_start_ms") or 0))
+        actions_replay_window_sec = int(cfg.get("actions_replay_window_sec") or 600)
+        actions_lag_threshold_sec = int(cfg.get("actions_lag_threshold_sec") or 180)
         actions_unreliable_hold_sec = int(cfg.get("actions_unreliable_hold_sec") or 120)
         sell_confirm_max = int(cfg.get("sell_confirm_max") or 5)
         sell_confirm_window_sec = int(cfg.get("sell_confirm_window_sec") or 300)
@@ -3249,12 +1602,7 @@ def main() -> None:
         seen_actions_key = (
             "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
         )
-        sell_health_round = {"signals": 0, "actions": 0}
-        last_target_sell_action_ts_by_token = state.setdefault(
-            "last_target_sell_action_ts_by_token", {}
-        )
-
-        def _record_action(token_id: str, side: str, size: float, action_ms: int = 0) -> None:
+        def _record_action(token_id: str, side: str, size: float) -> None:
             if not token_id or size <= 0:
                 return
             if side == "BUY":
@@ -3263,153 +1611,137 @@ def main() -> None:
             elif side == "SELL":
                 has_sell_by_token[token_id] = True
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
-                sell_health_round["signals"] = int(sell_health_round.get("signals") or 0) + 1
-                if action_ms > 0:
-                    prev_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
-                    if action_ms > prev_ms:
-                        last_target_sell_action_ts_by_token[token_id] = int(action_ms)
-                _mark_must_exit_token(
-                    state,
-                    token_id,
-                    now_ts,
-                    source="target_sell_action",
-                    target_sell_ms=action_ms,
-                )
 
-        # Use shared cached target actions (filtered by per-account cursor)
-        actions_list = [dict(a) for a in cached_actions]
-        actions_info = dict(cached_actions_info)
-        if cached_actions_cursor_key == actions_cursor_key and actions_cursor_ms > 0:
-            pre_filter_len = len(actions_list)
-            actions_list = [a for a in actions_list if _action_ms(a) > actions_cursor_ms]
-            if pre_filter_len != len(actions_list):
-                logger.debug(
-                    "[SHARED_CACHE] filtered actions for account %s: %s -> %s",
-                    _shorten_address(acct_ctx.my_address),
-                    pre_filter_len,
+        try:
+            actions_list = []
+            actions_info: Dict[str, object] = {}
+            retry_sleep_sec = 1.0
+            for attempt in range(2):
+                try:
+                    if actions_source in ("trade", "trades"):
+                        actions_list, actions_info = fetch_target_trades_since(
+                            data_client,
+                            cfg["target_address"],
+                            actions_cursor_ms,
+                            page_size=actions_page_size,
+                            max_offset=actions_max_offset,
+                            taker_only=bool(cfg.get("actions_taker_only", False)),
+                        )
+                    else:
+                        actions_list, actions_info = fetch_target_actions_since(
+                            data_client,
+                            cfg["target_address"],
+                            actions_cursor_ms,
+                            page_size=actions_page_size,
+                            max_offset=actions_max_offset,
+                        )
+                except Exception as exc:
+                    if attempt == 0:
+                        logger.warning(
+                            "[ACTIONS] fetch failed, retry once after %.1fs: %s",
+                            retry_sleep_sec,
+                            exc,
+                        )
+                        time.sleep(retry_sleep_sec)
+                        continue
+                    raise
+                actions_ok = bool(actions_info.get("ok"))
+                actions_incomplete = bool(actions_info.get("incomplete"))
+                if (not actions_ok) or actions_incomplete:
+                    if attempt == 0:
+                        logger.warning(
+                            "[ACTIONS] unreliable fetch ok=%s incomplete=%s retry once after %.1fs",
+                            actions_ok,
+                            actions_incomplete,
+                            retry_sleep_sec,
+                        )
+                        time.sleep(retry_sleep_sec)
+                        continue
+                break
+            seen_action_ids = state.setdefault(seen_actions_key, [])
+            seen_action_set = {str(item) for item in seen_action_ids}
+            filtered_actions: list[Dict[str, object]] = []
+            for action in actions_list:
+                action_id = _action_identity(action)
+                if action_id in seen_action_set:
+                    continue
+                filtered_actions.append(action)
+                seen_action_ids.append(action_id)
+                seen_action_set.add(action_id)
+            max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
+            if len(seen_action_ids) > max_seen:
+                del seen_action_ids[:-max_seen]
+            actions_list = filtered_actions
+
+            miss_token = 0
+            miss_samples: list[list[str]] = []
+            for action in actions_list:
+                side = str(action.get("side") or "").upper()
+                size = float(action.get("size") or 0.0)
+
+                token_id = action.get("token_id") or _extract_token_id_from_raw(
+                    action.get("raw") or {}
+                )
+                if token_id:
+                    tid = str(token_id)
+                    action["token_id"] = tid
+                    _record_action(tid, side, size)
+                else:
+                    miss_token += 1
+                    if len(miss_samples) < 3:
+                        raw = action.get("raw") or {}
+                        if isinstance(raw, dict):
+                            miss_samples.append(sorted(list(raw.keys()))[:25])
+
+            if actions_list:
+                actions_missing_ratio = miss_token / len(actions_list)
+            if miss_token:
+                logger.warning(
+                    "[ACT] actions_total=%s token_mapped=%s missing=%s sample_raw_keys=%s",
                     len(actions_list),
+                    len(actions_list) - miss_token,
+                    miss_token,
+                    miss_samples,
                 )
-        use_trades_api = actions_source in ("trade", "trades")
-        seen_action_ids = state.setdefault(seen_actions_key, [])
-        # Replay mode: keep seen ids stable across moving replay windows.
-        # Clearing seen ids here will re-consume historical actions and can amplify positions.
-        if replay_from_ms > 0:
-            replay_reset_key = f"{seen_actions_key}_replay_reset_ms"
-            if int(state.get(replay_reset_key) or 0) != replay_from_ms:
-                logger.info(
-                    "[ACTIONS] replay window moved key=%s keep_seen_ids=%s replay_from_ms=%s",
-                    seen_actions_key,
-                    len(seen_action_ids),
-                    replay_from_ms,
+                logger.warning(
+                    "[ACT] token_missing_ratio=%.3f",
+                    actions_missing_ratio,
                 )
-                state[replay_reset_key] = replay_from_ms
-        seen_action_set = {str(item) for item in seen_action_ids}
-        filtered_actions: list[Dict[str, object]] = []
-        for action in actions_list:
-            action_id = _action_identity(action)
-            if action_id in seen_action_set:
-                continue
-            filtered_actions.append(action)
-            seen_action_ids.append(action_id)
-            seen_action_set.add(action_id)
-        max_seen = int(cfg.get("seen_action_ids_cap") or 5000)
-        if replay_from_ms > 0:
-            # Replay mode needs a larger dedupe window to avoid evicting still-replayable ids.
-            max_seen = max(max_seen, int(cfg.get("seen_action_ids_cap_replay") or 50000))
-        if len(seen_action_ids) > max_seen:
-            del seen_action_ids[:-max_seen]
-        actions_list = filtered_actions
-
-        miss_token = 0
-        miss_samples: list[list[str]] = []
-        for action in actions_list:
-            side = str(action.get("side") or "").upper()
-            size = float(action.get("size") or 0.0)
-            action_ms = _action_ms(action)
-
-            token_id = action.get("token_id") or _extract_token_id_from_raw(
-                action.get("raw") or {}
-            )
-            if token_id:
-                tid = str(token_id)
-                action["token_id"] = tid
-                _record_action(tid, side, size, action_ms)
+            latest_action_ms = int(actions_info.get("latest_ms") or 0)
+            actions_ok = bool(actions_info.get("ok"))
+            actions_incomplete = bool(actions_info.get("incomplete"))
+            actions_unreliable = (not actions_ok) or actions_incomplete
+            if actions_unreliable:
+                state["actions_unreliable_until"] = now_ts + actions_unreliable_hold_sec
+                state["actions_replay_from_ms"] = max(
+                    0, now_ms - actions_replay_window_sec * 1000
+                )
+                logger.warning(
+                    "[ACTIONS] unreliable ok=%s incomplete=%s keep_cursor_ms=%s replay_from_ms=%s",
+                    actions_ok,
+                    actions_incomplete,
+                    actions_cursor_ms,
+                    state["actions_replay_from_ms"],
+                )
             else:
-                miss_token += 1
-                if len(miss_samples) < 3:
-                    raw = action.get("raw") or {}
-                    if isinstance(raw, dict):
-                        miss_samples.append(sorted(list(raw.keys()))[:25])
-
-        if actions_list:
-            actions_missing_ratio = miss_token / len(actions_list)
-        if miss_token:
-            logger.warning(
-                "[ACT] actions_total=%s token_mapped=%s missing=%s sample_raw_keys=%s",
-                len(actions_list),
-                len(actions_list) - miss_token,
-                miss_token,
-                miss_samples,
-            )
-            logger.warning(
-                "[ACT] token_missing_ratio=%.3f",
-                actions_missing_ratio,
-            )
-        latest_action_ms = int(actions_info.get("latest_ms") or 0)
-        actions_ok = bool(actions_info.get("ok"))
-        actions_incomplete = bool(actions_info.get("incomplete"))
-        actions_unreliable = (not actions_ok) or actions_incomplete
-        if actions_unreliable:
-            state["actions_unreliable_until"] = now_ts + actions_unreliable_hold_sec
-            state["actions_replay_from_ms"] = max(
-                0, now_ms - actions_replay_window_sec * 1000
-            )
-            logger.warning(
-                "[ACTIONS] unreliable ok=%s incomplete=%s keep_cursor_ms=%s replay_from_ms=%s",
-                actions_ok,
-                actions_incomplete,
-                actions_cursor_ms,
-                state["actions_replay_from_ms"],
-            )
-        else:
-            state.pop("actions_unreliable_until", None)
-            if latest_action_ms > actions_cursor_ms:
-                state[actions_cursor_key] = latest_action_ms
-            if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
-                state.pop("actions_replay_from_ms", None)
-            # When target is idle (no actions returned, latest=0),
-            # clear stale replay_from_ms to stop the perpetual
-            # replay loop that wastes API calls every cycle.
-            if replay_from_ms > 0 and latest_action_ms == 0 and not actions_list:
-                state.pop("actions_replay_from_ms", None)
-            lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
-            if lag_ms > actions_lag_threshold_sec * 1000:
-                lag_replay_window_sec = int(
-                    cfg.get("lag_replay_window_sec")
-                    or (actions_replay_window_sec if is_replay_mode else min(actions_replay_window_sec, 120))
-                )
-                lag_replay_cooldown_sec = int(cfg.get("lag_replay_cooldown_sec") or 120)
-                last_lag_replay_ts = int(state.get("last_lag_replay_ts") or 0)
-                if now_ts - last_lag_replay_ts >= max(0, lag_replay_cooldown_sec):
+                state.pop("actions_unreliable_until", None)
+                if latest_action_ms > actions_cursor_ms:
+                    state[actions_cursor_key] = latest_action_ms
+                if replay_from_ms > 0 and latest_action_ms >= actions_cursor_ms:
+                    state.pop("actions_replay_from_ms", None)
+                lag_ms = now_ms - latest_action_ms if latest_action_ms > 0 else 0
+                if lag_ms > actions_lag_threshold_sec * 1000:
                     state["actions_replay_from_ms"] = max(
-                        0, now_ms - max(1, lag_replay_window_sec) * 1000
+                        0, now_ms - actions_replay_window_sec * 1000
                     )
-                    state["last_lag_replay_ts"] = now_ts
                     logger.warning(
-                        "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s win_sec=%s cooldown_sec=%s",
+                        "[ACTIONS] lag_ms=%s replay_from_ms=%s latest_ms=%s",
                         lag_ms,
                         state["actions_replay_from_ms"],
                         latest_action_ms,
-                        lag_replay_window_sec,
-                        lag_replay_cooldown_sec,
                     )
-                else:
-                    logger.info(
-                        "[ACTIONS] lag_ms=%s replay_suppressed latest_ms=%s cooldown_remain=%s",
-                        lag_ms,
-                        latest_action_ms,
-                        max(0, lag_replay_cooldown_sec - (now_ts - last_lag_replay_ts)),
-                    )
+        except Exception as exc:
+            logger.exception("[ERR] fetch target actions failed: %s", exc)
 
         my_trades_unreliable_hold_sec = int(cfg.get("my_trades_unreliable_hold_sec") or 0)
         if my_trades_unreliable_hold_sec <= 0:
@@ -3418,7 +1750,7 @@ def main() -> None:
             my_trades_cursor_ms = int(state.get("my_trades_cursor_ms") or 0)
             my_trades, my_trades_info = fetch_target_trades_since(
                 data_client,
-                current_my_address,
+                cfg["my_address"],
                 my_trades_cursor_ms,
                 page_size=actions_page_size,
                 max_offset=actions_max_offset,
@@ -3516,18 +1848,25 @@ def main() -> None:
         else:
             target_cache_mode = target_cache_bust_mode
 
-        # Use shared cached target positions
-        target_pos = [dict(p) for p in cached_positions]
-        target_info = dict(cached_target_info)
-        position_source = dict(cached_position_source)
+        target_pos, target_info = fetch_positions_norm(
+            data_client,
+            cfg["target_address"],
+            size_threshold,
+            positions_limit=positions_limit,
+            positions_max_pages=positions_max_pages,
+            refresh_sec=target_positions_refresh_sec,
+            force_http=True,
+            cache_bust_mode=target_cache_mode,
+            header_keys=header_keys,
+        )
         hard_cap = positions_limit * positions_max_pages
         if len(target_pos) >= hard_cap:
             target_info["incomplete"] = True
-            logger.info("[SAFE] target positions 鍙兘鎴柇(len>=hard_cap=%s), 璺宠繃鏈疆", hard_cap)
+            logger.info("[SAFE] target positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
         my_pos, my_info = fetch_positions_norm(
             data_client,
-            current_my_address,
+            cfg["my_address"],
             0.0,
             positions_limit=positions_limit,
             positions_max_pages=positions_max_pages,
@@ -3536,28 +1875,9 @@ def main() -> None:
             cache_bust_mode=target_cache_bust_mode,
             header_keys=header_keys,
         )
-        # Verify positions belong to the expected profile/proxy wallet.
-        proxy_wallets = set()
-        for pos in my_pos:
-            raw = pos.get("raw") or {}
-            if isinstance(raw, dict):
-                proxy_wallet = raw.get("proxyWallet") or raw.get("proxy_wallet")
-                if proxy_wallet:
-                    proxy_wallets.add(str(proxy_wallet).lower())
-        if proxy_wallets:
-            my_addr_l = str(current_my_address or "").lower()
-            if my_addr_l and my_addr_l not in proxy_wallets:
-                my_info["proxy_mismatch"] = True
-                my_info["proxy_wallets"] = sorted(proxy_wallets)
-                logger.warning(
-                    "[WARN] my_positions proxy_wallet mismatch my=%s proxy_wallets=%s -> ignore positions",
-                    current_my_address,
-                    my_info["proxy_wallets"],
-                )
-                my_pos = []
         if len(my_pos) >= hard_cap:
             my_info["incomplete"] = True
-            logger.info("[SAFE] my positions 鍙兘鎴柇(len>=hard_cap=%s), 璺宠繃鏈疆", hard_cap)
+            logger.info("[SAFE] my positions 可能截断(len>=hard_cap=%s), 跳过本轮", hard_cap)
 
         closed_token_keys = state.get("closed_token_keys")
         if not isinstance(closed_token_keys, dict):
@@ -3585,17 +1905,19 @@ def main() -> None:
         if new_closed:
             logger.info("[SKIP] closed_token_keys added count=%s", new_closed)
 
-        # Always keep an unfiltered snapshot of my positions for position/risk recognition.
-        # Trading-side filtering must not rewrite the account's actual holdings.
-        my_pos_for_risk_snapshot = list(my_pos)
+        # CRITICAL FIX: Save unfiltered my_pos for risk calculation
+        # This prevents skip_closed_markets from weakening risk baseline
+        # and causing position limit breaches after balance top-ups
+        my_pos_for_risk = list(my_pos)  # Deep copy for risk baseline
 
         if closed_token_keys:
             target_pos, removed_target = _filter_closed_positions(target_pos, closed_token_keys)
-            if removed_target:
+            my_pos, removed_my = _filter_closed_positions(my_pos, closed_token_keys)
+            if removed_target or removed_my:
                 logger.info(
-                    "[SKIP] closed_positions filtered target=%s my=%s (my positions kept unfiltered for risk/holdings)",
+                    "[SKIP] closed_positions filtered target=%s my=%s (trading only, risk still uses unfiltered)",
                     removed_target,
-                    0,
+                    removed_my,
                 )
 
         should_log_heartbeat = has_new_actions or (
@@ -3635,89 +1957,28 @@ def main() -> None:
             last_heartbeat_ts = now_ts
 
         if not target_info.get("ok") or target_info.get("incomplete"):
-            logger.warning("[SAFE] target positions 涓嶅畬鏁达紝璺宠繃鏈疆鎵ц")
+            logger.warning("[SAFE] target positions 不完整，跳过本轮执行")
             save_state(args.state, state)
-            current_account_idx = (current_account_idx + 1) % len(account_contexts)
             time.sleep(_get_poll_interval())
             continue
 
         if not my_info.get("ok") or my_info.get("incomplete"):
-            logger.warning("[SAFE] my positions 涓嶅畬鏁达紝璺宠繃鏈疆鎵ц")
+            logger.warning("[SAFE] my positions 不完整，跳过本轮执行")
             save_state(args.state, state)
-            current_account_idx = (current_account_idx + 1) % len(account_contexts)
             time.sleep(_get_poll_interval())
             continue
 
         boot_sync_mode = str(cfg.get("boot_sync_mode") or "baseline_only").lower()
         fresh_boot = bool(cfg.get("fresh_boot_on_start", False))
-        boot_run_start_ms = int(state.get("boot_run_start_ms") or 0)
-        run_start_ms = int(state.get("run_start_ms") or 0)
-        boot_needed = boot_sync_mode in (
-            "baseline_only",
-            "baseline_replay",
-            "replay_24h",
-            "replay_actions",
-            "replay",
-        ) and (
+        boot_needed = boot_sync_mode == "baseline_only" and (
             (not state.get("bootstrapped"))
             or (
                 fresh_boot
-                and boot_run_start_ms != run_start_ms
-            )
-            or (
-                boot_sync_mode in _REPLAY_BOOT_MODES
-                and boot_run_start_ms != run_start_ms
+                and int(state.get("boot_run_start_ms") or 0)
+                != int(state.get("run_start_ms") or 0)
             )
         )
         if boot_needed:
-            # In multi-account mode, seed late-joining account with baseline tracking
-            # state from an already-bootstrapped peer so it doesn't miss active tokens.
-            for peer_ctx in account_contexts:
-                peer_state = peer_ctx.state
-                if peer_state is state:
-                    continue
-                if peer_state.get("bootstrapped"):
-                    peer_token_map = peer_state.get("token_map")
-                    if isinstance(peer_token_map, dict):
-                        token_map = state.get("token_map", {})
-                        if not isinstance(token_map, dict):
-                            token_map = {}
-                        for tk, tid in peer_token_map.items():
-                            if tk and tid and tk not in token_map:
-                                token_map[tk] = str(tid)
-                        state["token_map"] = token_map
-                    for key in (
-                        "target_last_shares",
-                        "target_last_seen_ts",
-                        "target_missing_streak",
-                        "last_target_sell_action_ts_by_token",
-                    ):
-                        peer_val = peer_state.get(key)
-                        if isinstance(peer_val, dict):
-                            local_val = state.setdefault(key, {})
-                            for tid, v in peer_val.items():
-                                if tid not in local_val:
-                                    local_val[tid] = v
-                    peer_boot_by_key = peer_state.get("target_last_shares_by_token_key")
-                    if isinstance(peer_boot_by_key, dict):
-                        local_boot_by_key = state.setdefault("target_last_shares_by_token_key", {})
-                        for tk, v in peer_boot_by_key.items():
-                            if tk not in local_boot_by_key:
-                                local_boot_by_key[tk] = v
-                    peer_closed = peer_state.get("closed_token_keys")
-                    if isinstance(peer_closed, dict):
-                        local_closed = state.setdefault("closed_token_keys", {})
-                        for tk, v in peer_closed.items():
-                            if tk not in local_closed:
-                                local_closed[tk] = v
-                    logger.info(
-                        "[BOOT] account seeded from peer=%s token_map=%s last_shares=%s",
-                        peer_ctx.name,
-                        len(state.get("token_map", {})),
-                        len(state.get("target_last_shares", {})),
-                    )
-                    break
-
             boot_by_key: Dict[str, float] = {}
             boot_keys: list[str] = []
             token_map = (
@@ -3728,10 +1989,7 @@ def main() -> None:
                 token_key = str(pos.get("token_key") or "").strip()
                 if not token_key:
                     continue
-                raw_id = (
-                    str(pos.get("token_id") or "").strip()
-                    or _extract_token_id_from_raw(pos.get("raw") or {})
-                )
+                raw_id = _extract_token_id_from_raw(pos.get("raw") or {})
                 if raw_id:
                     token_map.setdefault(token_key, str(raw_id))
                 size = float(pos.get("size") or 0.0)
@@ -3753,41 +2011,19 @@ def main() -> None:
                     state.setdefault("target_missing_streak", {})[token_id] = 0
             state["boot_token_ids"] = sorted(set(boot_token_ids))
 
-            run_start_ms = int(state.get("run_start_ms") or 0)
-            if boot_sync_mode == "baseline_only":
-                state["target_actions_cursor_ms"] = run_start_ms
-                state["target_trades_cursor_ms"] = run_start_ms
-            else:
-                replay_window_sec = _get_actions_replay_window_sec(cfg, True)
-                replay_from_ms = max(0, run_start_ms - replay_window_sec * 1000)
-                state["actions_replay_from_ms"] = replay_from_ms
-                state["target_actions_cursor_ms"] = replay_from_ms
-                state["target_trades_cursor_ms"] = replay_from_ms
+            state["target_actions_cursor_ms"] = int(state.get("run_start_ms") or 0)
             state["seen_action_ids"] = []
             state["topic_state"] = {}
             state["probed_token_ids"] = []
             state["boot_run_start_ms"] = int(state.get("run_start_ms") or 0)
-            # 娓呯悊鏃犲疄闄呮寔浠撶殑 accumulator 姝讳粨
-            acc = state.get("buy_notional_accumulator")
-            if acc:
-                my_ids = {
-                    str(p.get("token_id") or p.get("asset_id") or "").strip()
-                    for p in my_pos
-                }
-                for tid in list(acc.keys()):
-                    if tid not in my_ids:
-                        acc.pop(tid, None)
             state["bootstrapped"] = True
             logger.info(
-                "[BOOT] %s: baseline_keys=%s baseline_ids=%s cursor_ms=%s replay_from_ms=%s",
-                boot_sync_mode,
+                "[BOOT] baseline_only: baseline_keys=%s baseline_ids=%s cursor_ms=%s",
                 len(boot_keys),
                 len(state["boot_token_ids"]),
                 state["target_actions_cursor_ms"],
-                state.get("actions_replay_from_ms", 0),
             )
             save_state(args.state, state)
-            current_account_idx = (current_account_idx + 1) % len(account_contexts)
             time.sleep(_get_poll_interval())
             continue
 
@@ -3839,7 +2075,7 @@ def main() -> None:
                         token_id = resolve_token_id(token_key, pos, token_map)
                     except Exception as exc:
                         resolver_fail += 1
-                        logger.warning("[WARN] resolver 澶辫触(target): %s -> %s", token_key, exc)
+                        logger.warning("[WARN] resolver 失败(target): %s -> %s", token_key, exc)
                         resolver_fail_cache[token_key] = now_ts
                         unresolved_target += 1
                         continue
@@ -3867,9 +2103,9 @@ def main() -> None:
                 len(target_pos),
             )
 
-        # Build holdings map from unfiltered snapshot so my_shares reflects real positions.
+        # My positions are usually small; still prefer fast-path and fall back to resolver if needed.
         my_by_token_id: Dict[str, float] = {}
-        for pos in my_pos_for_risk_snapshot:
+        for pos in my_pos:
             token_key = str(pos.get("token_key") or "")
             size = float(pos.get("size") or 0.0)
 
@@ -3888,7 +2124,7 @@ def main() -> None:
                 try:
                     token_id = resolve_token_id(token_key, pos, token_map)
                 except Exception as exc:
-                    logger.warning("[WARN] resolver 澶辫触(鑷韩): %s -> %s", token_key, exc)
+                    logger.warning("[WARN] resolver 失败(自身): %s -> %s", token_key, exc)
                     resolver_fail_cache[token_key] = now_ts
                     continue
             if not token_id:
@@ -3903,8 +2139,49 @@ def main() -> None:
                 state.setdefault("last_mid_price_by_token_id", {})[tid] = cur_price
                 state["last_mid_price_update_ts"] = now_ts
             my_by_token_id[tid] = size
-            if size > 0:
-                last_nonzero_my_shares[tid] = {"shares": float(size), "ts": int(now_ts)}
+
+        # CRITICAL FIX: Build unfiltered position dict for risk calculation
+        # This ensures risk baseline includes positions from closed markets that may still be tradeable
+        my_by_token_id_for_risk: Dict[str, float] = {}
+        for pos in my_pos_for_risk:
+            token_key = str(pos.get("token_key") or "")
+            size = float(pos.get("size") or 0.0)
+            token_id = pos.get("token_id") or None
+            if token_key:
+                token_id = token_id or token_map.get(token_key)
+            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+
+            # CRITICAL FIX: Add resolver fallback for risk baseline (same as my_by_token_id)
+            # This prevents position limit breaches when API returns positions without token_id
+            if not token_id and token_key:
+                fail_ts = resolver_fail_cache.get(token_key)
+                if (
+                    fail_ts
+                    and resolver_fail_cooldown_sec > 0
+                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
+                ):
+                    logger.warning(
+                        "[RISK] skip position due to recent resolver fail: %s (cooldown)",
+                        token_key,
+                    )
+                    continue
+                try:
+                    token_id = resolve_token_id(token_key, pos, token_map)
+                    logger.debug("[RISK] resolved token_id via resolver: %s -> %s", token_key, token_id)
+                except Exception as exc:
+                    logger.warning("[RISK] resolver fail for position: %s -> %s", token_key, exc)
+                    resolver_fail_cache[token_key] = now_ts
+                    continue
+
+            if not token_id:
+                logger.warning(
+                    "[RISK] skip position: missing token_id token_key=%s size=%.2f",
+                    token_key,
+                    size,
+                )
+                continue
+            tid = str(token_id)
+            my_by_token_id_for_risk[tid] = size
 
         resolve_budget = int(cfg.get("max_resolve_actions_per_loop") or 20)
         missing_ratio_threshold = float(cfg.get("resolve_actions_missing_ratio") or 0.3)
@@ -3958,7 +2235,7 @@ def main() -> None:
                     token_map,
                 )
             except Exception as exc:
-                logger.warning("[WARN] resolver 澶辫触(actions): %s -> %s", token_key, exc)
+                logger.warning("[WARN] resolver 失败(actions): %s -> %s", token_key, exc)
                 resolver_fail_cache[str(token_key)] = now_ts
                 continue
             side = str(action.get("side") or "").upper()
@@ -3994,7 +2271,7 @@ def main() -> None:
                 try:
                     token_id = resolve_token_id(token_key, trade, token_map)
                 except Exception as exc:
-                    logger.warning("[WARN] resolver 澶辫触(trades): %s -> %s", token_key, exc)
+                    logger.warning("[WARN] resolver 失败(trades): %s -> %s", token_key, exc)
                     resolver_fail_cache[token_key] = now_ts
                     continue
                 tid = str(token_id)
@@ -4007,49 +2284,38 @@ def main() -> None:
         reconcile_set.update(state.get("open_orders", {}).keys())
         reconcile_set.update(set(has_buy_by_token.keys()) | set(has_sell_by_token.keys()))
         reconcile_set.update(state.get("topic_state", {}).keys())
-        reconcile_set.update(str(tid) for tid in must_exit_tokens.keys())
         lag_high = lag_ms > actions_lag_threshold_sec * 1000
         actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
         actions_unreliable = actions_unreliable_until > now_ts
         reduce_reconcile = ((not actions_list) and (not actions_unreliable)) or lag_high
         if reduce_reconcile:
+            recent_event_sec = int(cfg.get("reconcile_recent_event_sec") or 600)
+            cutoff_ts = now_ts - max(recent_event_sec, 0)
+            reduced_set: Set[str] = set(state.get("open_orders", {}).keys())
+            reduced_set.update(my_by_token_id)
+            reduced_set.update(has_buy_by_token.keys())
+            reduced_set.update(has_sell_by_token.keys())
+            for token_id, ts in state.get("target_last_event_ts", {}).items():
+                try:
+                    if int(ts or 0) >= cutoff_ts:
+                        reduced_set.add(str(token_id))
+                except Exception:
+                    continue
+            for action in actions_list:
+                token_id = action.get("token_id")
+                if token_id:
+                    reduced_set.add(str(token_id))
+            reconcile_set = reduced_set
             reason = "lag_high" if lag_high else "actions_empty"
-            # When no new actions, only reconcile tokens with meaningful state differences
-            reduced_set: Set[str] = set()
-            for tid in reconcile_set:
-                my_shares_t = my_by_token_id.get(tid, 0.0)
-                target_shares_t = target_shares_now_by_token_id.get(tid, 0.0)
-                has_orders = bool(state.get("open_orders", {}).get(tid))
-                in_topic = tid in state.get("topic_state", {})
-                has_buy = tid in has_buy_by_token
-                has_sell = tid in has_sell_by_token
-                must_exit = tid in must_exit_tokens
-                if (
-                    has_orders
-                    or in_topic
-                    or my_shares_t > 0
-                    or abs(my_shares_t - target_shares_t) > 0.01
-                    or has_buy
-                    or has_sell
-                    or must_exit
-                ):
-                    reduced_set.add(tid)
-            if len(reduced_set) < len(reconcile_set):
-                logger.info(
-                    "[SAFE] %s reduce_reconcile: %s -> %s tokens",
-                    reason,
-                    len(reconcile_set),
-                    len(reduced_set),
-                )
-                reconcile_set = reduced_set
-            else:
-                logger.info(
-                    "[SAFE] %s reduce_reconcile disabled: keep full token set (actions=%s actions_unreliable=%s lag_ms=%s)",
-                    reason,
-                    len(actions_list),
-                    actions_unreliable,
-                    lag_ms,
-                )
+            logger.info(
+                "[SAFE] %s reduce_reconcile_set size=%s recent_sec=%s lag_ms=%s actions=%s actions_unreliable=%s",
+                reason,
+                len(reconcile_set),
+                recent_event_sec,
+                lag_ms,
+                len(actions_list),
+                actions_unreliable,
+            )
 
         ignored = state["ignored_tokens"]
         expired_ignored = [
@@ -4061,17 +2327,13 @@ def main() -> None:
         ]
         for token_id in expired_ignored:
             ignored.pop(token_id, None)
-
-        def _collect_active_ignored() -> Set[str]:
-            return {
-                token_id
-                for token_id, meta in ignored.items()
-                if isinstance(meta, dict)
-                and meta.get("expires_at")
-                and now_ts < int(meta.get("expires_at") or 0)
-            }
-
-        active_ignored = _collect_active_ignored()
+        active_ignored = {
+            token_id
+            for token_id, meta in ignored.items()
+            if isinstance(meta, dict)
+            and meta.get("expires_at")
+            and now_ts < int(meta.get("expires_at") or 0)
+        }
         if active_ignored:
             for token_id in sorted(active_ignored):
                 meta = ignored.get(token_id)
@@ -4085,28 +2347,15 @@ def main() -> None:
                     int(meta.get("expires_at") or 0),
                 )
                 meta["active_logged"] = True
-            reconcile_set = {
-                token_id
-                for token_id in reconcile_set
-                if token_id not in active_ignored or token_id in must_exit_tokens
-            }
+            reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
         status_cache = state["market_status_cache"]
         if skip_closed:
             def _ensure_long_ignore(token_id: str, meta: Optional[Dict[str, Any]]) -> None:
                 end_date = None
                 if isinstance(meta, dict):
                     end_date = meta.get("end_date") or meta.get("endDate")
-                end_ts = _parse_market_end_ts(meta)
-                min_ttl_sec = int(cfg.get("closed_ignore_min_ttl_sec") or 24 * 3600)
-                if min_ttl_sec < 300:
-                    min_ttl_sec = 300
-                expires_at = now_ts + min_ttl_sec
-                if end_ts is not None:
-                    expires_at = max(expires_at, int(end_ts))
+                expires_at = _parse_market_end_ts(meta) or now_ts + 24 * 3600
                 existing = ignored.get(token_id) if isinstance(ignored.get(token_id), dict) else {}
-                existing_expires = int(existing.get("expires_at") or 0)
-                if existing_expires > expires_at:
-                    expires_at = existing_expires
                 should_log = not existing or not existing.get("logged")
                 ignored[token_id] = {
                     "ts": now_ts,
@@ -4146,58 +2395,82 @@ def main() -> None:
                 if cached.get("tradeable") is False:
                     _ensure_long_ignore(token_id, cached.get("meta"))
 
-            # Recompute active ignored after new long_ignore entries were added in this loop.
-            # This prevents closed tokens from leaking into the current risk baseline.
-            active_ignored = _collect_active_ignored()
-            if active_ignored:
-                reconcile_set = {token_id for token_id in reconcile_set if token_id not in active_ignored}
+            def _ensure_tradeable(token_id: str) -> bool:
+                cached = status_cache.get(token_id)
+                if cached:
+                    cached_ts = int(cached.get("ts") or 0)
+                    if cached_ts and (now_ts - cached_ts) < refresh_sec and cached.get("tradeable") is True:
+                        return True
+                meta_map = gamma_fetch_markets_by_clob_token_ids([token_id])
+                meta = meta_map.get(token_id)
+                tradeable = market_tradeable_state(meta)
+                status_cache[token_id] = {"ts": now_ts, "tradeable": tradeable, "meta": meta}
+                if tradeable is False:
+                    _ensure_long_ignore(token_id, meta)
+                    return False
+                return True
 
-        # Build risk baseline from unfiltered holdings snapshot.
-        # Exclude tokens that are known inactive/closed to avoid inflated risk baseline.
-        my_pos_for_risk = my_pos_for_risk_snapshot
-        inactive_for_risk = set(active_ignored) if skip_closed else set()
-        my_by_token_id_for_risk: Dict[str, float] = {}
-        for pos in my_pos_for_risk:
-            token_key = str(pos.get("token_key") or "")
-            size = float(pos.get("size") or 0.0)
-            token_id = pos.get("token_id") or None
-            if token_key:
-                token_id = token_id or token_map.get(token_key)
-            token_id = token_id or _extract_token_id_from_raw(pos.get("raw") or {})
+            def _is_valid_book(ob: Dict[str, Optional[float]]) -> bool:
+                bid = ob.get("best_bid")
+                ask = ob.get("best_ask")
+                if bid is None or ask is None:
+                    return False
+                if bid <= 0 or ask <= 0:
+                    return False
+                if bid >= 1.0 or ask >= 1.0:
+                    return False
+                if bid > ask:
+                    return False
+                return True
 
-            # CRITICAL FIX: Add resolver fallback for risk baseline (same as my_by_token_id)
-            # This prevents position limit breaches when API returns positions without token_id
-            if not token_id and token_key:
-                fail_ts = resolver_fail_cache.get(token_key)
-                if (
-                    fail_ts
-                    and resolver_fail_cooldown_sec > 0
-                    and now_ts - int(fail_ts or 0) < resolver_fail_cooldown_sec
-                ):
+            def _get_orderbook_checked(token_id: str) -> Optional[Dict[str, Optional[float]]]:
+                if not _ensure_tradeable(token_id):
+                    logger.info("[SKIP] not_tradeable token_id=%s", token_id)
+                    return None
+                last_ob: Optional[Dict[str, Optional[float]]] = None
+                for attempt in range(3):
+                    ob = get_orderbook(clob_client, token_id)
+                    last_ob = ob
+                    if _is_valid_book(ob):
+                        return ob
+                    if attempt < 2:
+                        time.sleep(0.2)
+                if last_ob is not None:
                     logger.warning(
-                        "[RISK] skip position due to recent resolver fail: %s (cooldown)",
-                        token_key,
+                        "[SKIP_BAD_BOOK] token_id=%s best_bid=%s best_ask=%s",
+                        token_id,
+                        last_ob.get("best_bid"),
+                        last_ob.get("best_ask"),
                     )
-                    continue
-                try:
-                    token_id = resolve_token_id(token_key, pos, token_map)
-                    logger.debug("[RISK] resolved token_id via resolver: %s -> %s", token_key, token_id)
-                except Exception as exc:
-                    logger.warning("[RISK] resolver fail for position: %s -> %s", token_key, exc)
-                    resolver_fail_cache[token_key] = now_ts
-                    continue
-
-            if not token_id:
-                logger.warning(
-                    "[RISK] skip position: missing token_id token_key=%s size=%.2f",
-                    token_key,
-                    size,
-                )
-                continue
-            tid = str(token_id)
-            if tid in inactive_for_risk:
-                continue
-            my_by_token_id_for_risk[tid] = size
+                return None
+        else:
+            def _get_orderbook_checked(token_id: str) -> Optional[Dict[str, Optional[float]]]:
+                last_ob: Optional[Dict[str, Optional[float]]] = None
+                for attempt in range(3):
+                    ob = get_orderbook(clob_client, token_id)
+                    last_ob = ob
+                    bid = ob.get("best_bid")
+                    ask = ob.get("best_ask")
+                    if (
+                        bid is not None
+                        and ask is not None
+                        and bid > 0
+                        and ask > 0
+                        and bid < 1.0
+                        and ask < 1.0
+                        and bid <= ask
+                    ):
+                        return ob
+                    if attempt < 2:
+                        time.sleep(0.2)
+                if last_ob is not None:
+                    logger.warning(
+                        "[SKIP_BAD_BOOK] token_id=%s best_bid=%s best_ask=%s",
+                        token_id,
+                        last_ob.get("best_bid"),
+                        last_ob.get("best_ask"),
+                    )
+                return None
 
         orderbooks: Dict[str, Dict[str, Optional[float]]] = {}
 
@@ -4212,12 +2485,6 @@ def main() -> None:
         buy_window_max_usd_per_token = float(cfg.get("buy_window_max_usd_per_token") or 0.0)
         buy_window_max_usd_total = float(cfg.get("buy_window_max_usd_total") or 0.0)
         fallback_mid_price = float(cfg.get("missing_mid_fallback_price") or 1.0)
-        missing_meaningful_min_usd = float(
-            cfg.get("missing_meaningful_min_usd")
-            or max(1.0, float(cfg.get("min_order_usd") or 1.0))
-        )
-        if missing_meaningful_min_usd < 0:
-            missing_meaningful_min_usd = 0.0
         cooldown_sec = int(cfg.get("cooldown_sec_per_token") or 0)
         shadow_ttl_sec = int(cfg.get("shadow_buy_ttl_sec") or 120)
         missing_timeout_sec = int(cfg.get("missing_timeout_sec") or 0)
@@ -4229,12 +2496,6 @@ def main() -> None:
                 missing_freeze_max_sec,
                 missing_freeze_min_sec,
             )
-        # Keep renewal deterministic to reduce oscillation noise while preserving freeze semantics.
-        missing_freeze_renew_sec = int(
-            cfg.get("missing_freeze_renew_sec") or max(missing_freeze_min_sec, missing_freeze_max_sec)
-        )
-        if missing_freeze_renew_sec < missing_freeze_min_sec:
-            missing_freeze_renew_sec = missing_freeze_min_sec
         missing_to_zero_rounds = int(cfg.get("missing_to_zero_rounds") or 0)
         orphan_cancel_rounds = int(cfg.get("orphan_cancel_rounds") or 3)
         orphan_ignore_sec = int(cfg.get("orphan_ignore_sec") or 120)
@@ -4242,20 +2503,6 @@ def main() -> None:
         eps = float(cfg.get("delta_eps") or 1e-9)
         topic_mode = bool(cfg.get("topic_cycle_mode", True))
         entry_settle_sec = int(cfg.get("topic_entry_settle_sec", 60))
-        online_sell_recover_window_sec = max(
-            60, int(cfg.get("online_sell_recover_window_sec") or 21600)
-        )
-        online_sell_recover_grace_sec = max(
-            0, int(cfg.get("online_sell_recover_grace_sec") or max(30, _poll_sec))
-        )
-        if isinstance(last_target_sell_action_ts_by_token, dict):
-            _sell_cutoff_ms = now_ms - online_sell_recover_window_sec * 1000
-            for _tid, _ts in list(last_target_sell_action_ts_by_token.items()):
-                try:
-                    if int(_ts or 0) < _sell_cutoff_ms:
-                        last_target_sell_action_ts_by_token.pop(_tid, None)
-                except Exception:
-                    last_target_sell_action_ts_by_token.pop(_tid, None)
 
         ema = state.get("sizing", {}).get("ema_delta_usd")
         if ema is None or ema <= 0:
@@ -4314,51 +2561,16 @@ def main() -> None:
         top_tokens_fmt = [
             f"{token_key_by_token_id.get(token_id, token_id)}={usd:.4f}" for token_id, usd in top_tokens
         ]
-        if risk_summary_interval_sec <= 0 or now_ts - last_risk_summary_ts >= risk_summary_interval_sec:
-            logger.info(
-                "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
-                "recent_buy_usd=%s top_tokens=%s",
-                planned_total_notional,
-                planned_total_notional_shadow,
-                open_buy_orders_usd,
-                shadow_buy_usd,
-                recent_buy_total,
-                top_tokens_fmt,
-            )
-            last_risk_summary_ts = now_ts
-
-        # Self-heal stale accumulator entries:
-        # If a token has no observable position/open BUY orders for a long time,
-        # old accumulator residue can permanently block follow buys for that token.
-        # We only reset entries that are BOTH stale and currently flat by planned notional.
-        accumulator_stale_reset_sec = int(cfg.get("accumulator_stale_reset_sec") or 7200)
-        if accumulator_stale_reset_sec > 0:
-            accumulator = state.get("buy_notional_accumulator")
-            if isinstance(accumulator, dict):
-                to_reset = []
-                for token_id, acc_data in accumulator.items():
-                    if not isinstance(acc_data, dict):
-                        continue
-                    last_ts = int(acc_data.get("last_ts") or 0)
-                    if last_ts <= 0 or now_ts - last_ts < accumulator_stale_reset_sec:
-                        continue
-                    planned_token_usd = float(planned_by_token_usd.get(token_id, 0.0))
-                    open_orders_token = state.get("open_orders", {}).get(token_id, [])
-                    has_open_buy = any(
-                        str(order.get("side") or "").upper() == "BUY"
-                        for order in (open_orders_token if isinstance(open_orders_token, list) else [])
-                    )
-                    if planned_token_usd <= eps and not has_open_buy:
-                        to_reset.append(token_id)
-                for token_id in to_reset:
-                    old_usd = float((accumulator.get(token_id) or {}).get("usd") or 0.0)
-                    accumulator.pop(token_id, None)
-                    logger.warning(
-                        "[ACCUMULATOR_RESET_STALE] token_id=%s old_usd=%s stale_sec=%s reason=flat_and_stale",
-                        token_id,
-                        old_usd,
-                        accumulator_stale_reset_sec,
-                    )
+        logger.info(
+            "[RISK_SUMMARY] used_total=%s used_total_shadow=%s open_buy_orders_usd=%s shadow_buy_usd=%s "
+            "recent_buy_usd=%s top_tokens=%s",
+            planned_total_notional,
+            planned_total_notional_shadow,
+            open_buy_orders_usd,
+            shadow_buy_usd,
+            recent_buy_total,
+            top_tokens_fmt,
+        )
 
         # CRITICAL: Accumulator is maintained ONLY by local BUY/SELL operations
         # DO NOT reconcile with API data to preserve independence from position API sync issues
@@ -4375,100 +2587,9 @@ def main() -> None:
                 my_trades_unreliable_until,
             )
 
-        max_per_condition = float(cfg.get("max_position_usd_per_condition") or 0.0)
-        condition_planned_map: Dict[str, float] = {}
-        if max_per_condition > 0:
-            for tid, usd in planned_by_token_usd_shadow.items():
-                cond = _get_condition_id(state, tid)
-                if cond:
-                    condition_planned_map[cond] = condition_planned_map.get(cond, 0.0) + usd
-
-        max_per_event = float(cfg.get("max_position_usd_per_event") or 0.0)
-        event_planned_map: Dict[str, float] = {}
-        if max_per_event > 0:
-            for tid, usd in planned_by_token_usd_shadow.items():
-                ev = _get_event_id(state, tid)
-                if ev:
-                    event_planned_map[ev] = event_planned_map.get(ev, 0.0) + usd
-
-        # Clean up stale topic_state for tokens with zero position and no open orders
-        topic_state = state.get("topic_state", {})
-        topic_unfilled = state.setdefault("topic_unfilled_attempts", {})
-        quarantine_sec = int(cfg.get("cleanup_quarantine_sec") or 300)
-        if isinstance(topic_state, dict):
-            for tid in list(topic_state.keys()):
-                my_shares_t = my_by_token_id.get(tid, 0.0)
-                orders_t = state.get("open_orders", {}).get(tid, [])
-                st_t = topic_state.get(tid) or {}
-
-                # Cross-check with accumulator before declaring zero
-                acc_usd = float(
-                    (state.get("buy_notional_accumulator") or {}).get(tid, {}).get("usd", 0.0)
-                    or 0.0
-                )
-                if my_shares_t <= eps and acc_usd > 0.5 and not orders_t:
-                    logger.warning(
-                        "[CLEANUP_DELAY] token_id=%s reason=accumulator_mismatch acc_usd=%s my_shares=%s",
-                        tid,
-                        acc_usd,
-                        my_shares_t,
-                    )
-                    continue
-
-                if my_shares_t <= eps and not orders_t:
-                    in_quarantine = st_t.get("phase") == "SUSPECT_ZERO"
-                    quarantine_expired = now_ts - st_t.get("cleanup_ts", now_ts) >= quarantine_sec
-                    if in_quarantine and quarantine_expired:
-                        # Hard confirmed after quarantine
-                        topic_state.pop(tid, None)
-                        state.setdefault("sell_shares_accumulator", {}).pop(tid, None)
-                        logger.info(
-                            "[TOPIC] CLEANUP_CONFIRMED token_id=%s reason=zero_position_no_orders quarantine=%s",
-                            tid,
-                            quarantine_sec,
-                        )
-                        topic_unfilled[tid] = topic_unfilled.get(tid, 0) + 1
-                        max_unfilled = int(cfg.get("topic_unfilled_max_rounds") or 3)
-                        if max_unfilled > 0 and topic_unfilled[tid] >= max_unfilled:
-                            ignore_sec = int(cfg.get("topic_unfilled_ignore_sec") or 1800)
-                            state.setdefault("ignored_tokens", {})[tid] = {
-                                "ts": now_ts,
-                                "reason": "unfilled_timeout",
-                                "expires_at": now_ts + ignore_sec,
-                            }
-                            logger.warning(
-                                "[IGNORE] token_id=%s reason=unfilled_timeout rounds=%s until=%s",
-                                tid,
-                                topic_unfilled[tid],
-                                now_ts + ignore_sec,
-                            )
-                    else:
-                        # First zero sighting: enter quarantine instead of hard delete
-                        st_t["phase"] = "SUSPECT_ZERO"
-                        st_t["cleanup_ts"] = st_t.get("cleanup_ts") or now_ts
-                        st_t["desired_shares"] = 0.0
-                        st_t["desired_side"] = "SELL"
-                        topic_state[tid] = st_t
-                        logger.info(
-                            "[TOPIC] CLEANUP_SUSPICIOUS token_id=%s quarantine_until=%s",
-                            tid,
-                            st_t["cleanup_ts"] + quarantine_sec,
-                        )
-
-        _shadow_total_for_loop, _shadow_by_token_for_loop = _calc_shadow_buy_notional(
-            state, now_ts, shadow_ttl_sec
-        )
-
         for token_id in reconcile_set:
-            must_exit_meta = must_exit_tokens.get(token_id)
-            must_exit_active = isinstance(must_exit_meta, dict)
-            if token_id in active_ignored and (not must_exit_active):
+            if token_id in active_ignored:
                 continue
-            if token_id in active_ignored and must_exit_active:
-                logger.info(
-                    "[MUST_EXIT] token_id=%s bypass=active_ignore",
-                    token_id,
-                )
             open_orders = state.get("open_orders", {}).get(token_id, [])
             cached = status_cache.get(token_id) or {}
             token_meta = cached.get("meta") if isinstance(cached, dict) else None
@@ -4485,12 +2606,6 @@ def main() -> None:
             cooldown_active = cooldown_sec > 0 and now_ts < cooldown_until
             place_fail_until = int(state.get("place_fail_until", {}).get(token_id) or 0)
             place_backoff_active = place_fail_until > 0 and now_ts < place_fail_until
-            sell_reconcile_lock_until = int(
-                state.get("sell_reconcile_lock_until", {}).get(token_id) or 0
-            )
-            sell_reconcile_lock_active = (
-                sell_reconcile_lock_until > 0 and now_ts < sell_reconcile_lock_until
-            )
             if cooldown_active:
                 logger.info(
                     "[COOLDOWN] token_id=%s until=%s",
@@ -4503,120 +2618,43 @@ def main() -> None:
                     token_id,
                     place_fail_until,
                 )
-            if sell_reconcile_lock_active:
-                logger.info(
-                    "[SELL_LOCK] token_id=%s until=%s",
-                    token_id,
-                    sell_reconcile_lock_until,
-                )
 
             missing_freeze = state.setdefault("missing_data_freeze", {})
             freeze_meta = missing_freeze.get(token_id)
             if isinstance(freeze_meta, dict) and freeze_meta.get("expires_at"):
                 expires_at = int(freeze_meta.get("expires_at") or 0)
                 if expires_at > 0 and now_ts >= expires_at:
-                    # If data is still missing, renew the same missing_streak freeze
-                    # instead of UNFREEZE -> FREEZE oscillation every few rounds.
-                    _reason = str(freeze_meta.get("reason") or "")
-                    _my_shares_here = my_by_token_id.get(token_id, 0.0)
-                    _still_missing = token_id not in target_shares_now_by_token_id
-                    _ref_price_here = state.get("last_mid_price_by_token_id", {}).get(
-                        token_id, fallback_mid_price
+                    missing_freeze.pop(token_id, None)
+                    logger.info(
+                        "[UNFREEZE] token_id=%s reason=%s expired_at=%s",
+                        token_id,
+                        freeze_meta.get("reason") or "missing_streak",
+                        expires_at,
                     )
-                    if not _ref_price_here or _ref_price_here <= 0:
-                        _ref_price_here = fallback_mid_price
-                    _my_notional_here = max(0.0, _my_shares_here) * float(_ref_price_here)
-                    _still_meaningful = (
-                        _my_notional_here >= max(0.0, missing_meaningful_min_usd - eps)
-                        or bool(open_orders)
-                    )
-                    if _reason == "missing_streak" and _still_missing and _still_meaningful:
-                        freeze_sec = max(0, int(missing_freeze_renew_sec))
-                        until_ts = now_ts + freeze_sec
-                        freeze_meta["ts"] = now_ts
-                        freeze_meta["expires_at"] = until_ts
-                        freeze_meta["streak"] = int(
-                            max(
-                                int(freeze_meta.get("streak") or 0),
-                                int(state.get("target_missing_streak", {}).get(token_id) or 0),
-                            )
-                        )
-                        missing_freeze[token_id] = freeze_meta
-                        dedup_key = "FREEZE:missing_streak_renew"
-                        should_log, suppressed = _log_dedup.should_log(dedup_key)
-                        if should_log:
-                            if suppressed > 0:
-                                logger.warning(
-                                    "[FREEZE] token_id=%s reason=missing_streak_renew streak=%s until=%s (suppressed %d)",
-                                    token_id,
-                                    freeze_meta.get("streak"),
-                                    until_ts,
-                                    suppressed,
-                                )
-                            else:
-                                logger.warning(
-                                    "[FREEZE] token_id=%s reason=missing_streak_renew streak=%s until=%s",
-                                    token_id,
-                                    freeze_meta.get("streak"),
-                                    until_ts,
-                                )
-                    else:
-                        missing_freeze.pop(token_id, None)
-                        state.setdefault("target_missing_streak", {})[token_id] = 0
-                        logger.info(
-                            "[UNFREEZE] token_id=%s reason=%s expired_at=%s",
-                            token_id,
-                            freeze_meta.get("reason") or "missing_streak",
-                            expires_at,
-                        )
-                        freeze_meta = None
-            # missing_streak freeze should only block NEW BUY entry for tokens
-            # with no position and no open orders. If we have an existing position
-            # or active orders, we must allow SELL / reprice logic to run.
-            my_shares_here = my_by_token_id.get(token_id, 0.0)
+                    freeze_meta = None
             if (
                 isinstance(freeze_meta, dict)
                 and freeze_meta.get("expires_at")
                 and freeze_meta.get("reason") == "missing_streak"
-                and my_shares_here <= eps
+                and token_id not in my_by_token_id
                 and not open_orders
             ):
-                # If positions data recovered during freeze, unfreeze immediately
-                if token_id in target_shares_now_by_token_id:
-                    state.setdefault("target_missing_streak", {})[token_id] = 0
-                    state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
-                    missing_freeze.pop(token_id, None)
-                    logger.info("[UNFREEZE] token_id=%s reason=data_recovered", token_id)
-                    freeze_meta = None
-                else:
-                    logger.info(
-                        "[SKIP] token_id=%s reason=missing_streak_freeze until=%s",
-                        token_id,
-                        freeze_meta.get("expires_at"),
-                    )
-                    continue
+                logger.info(
+                    "[SKIP] token_id=%s reason=missing_streak_freeze until=%s",
+                    token_id,
+                    freeze_meta.get("expires_at"),
+                )
+                continue
 
             if skip_closed:
                 if token_id in ignored:
-                    if must_exit_active:
-                        logger.info(
-                            "[MUST_EXIT] token_id=%s bypass=ignored_token",
-                            token_id,
-                        )
-                    else:
-                        if open_orders:
-                            logger.info(
-                                "[SKIP] ignored token_id=%s open_orders=%s",
-                                token_id,
-                                len(open_orders),
-                            )
-                        continue
                     if open_orders:
                         logger.info(
                             "[SKIP] ignored token_id=%s open_orders=%s",
                             token_id,
                             len(open_orders),
                         )
+                    continue
                 tradeable = cached.get("tradeable")
 
                 if tradeable is False:
@@ -4697,29 +2735,11 @@ def main() -> None:
                     continue
 
                 if tradeable is None:
-                    block_on_unknown = bool(cfg.get("block_on_unknown_market_state", False))
-                    dedup_key = f"WARN:market_unknown:{'block' if block_on_unknown else 'nonblock'}"
-                    should_log, suppressed = _log_dedup.should_log(dedup_key)
-                    if should_log and block_on_unknown:
-                        if suppressed > 0:
-                            logger.warning(
-                                "[WARN] market 状态未知(阻塞模式): token_id=%s (suppressed %d)",
-                                token_id,
-                                suppressed,
-                            )
-                        else:
-                            logger.warning("[WARN] market 状态未知(阻塞模式): token_id=%s", token_id)
-                    elif should_log:
-                        if suppressed > 0:
-                            logger.warning(
-                                "[WARN] market 状态未知(不阻塞交易): token_id=%s (suppressed %d)",
-                                token_id,
-                                suppressed,
-                            )
-                        else:
-                            logger.warning("[WARN] market 状态未知(不阻塞交易): token_id=%s", token_id)
-                    if block_on_unknown:
+                    if bool(cfg.get("block_on_unknown_market_state", False)):
+                        logger.warning("[WARN] market 状态未知(阻塞模式): token_id=%s", token_id)
                         continue
+                    logger.warning("[WARN] market 状态未知(不阻塞交易): token_id=%s", token_id)
+
             t_now_present = token_id in target_shares_now_by_token_id
             t_now = target_shares_now_by_token_id.get(token_id) if t_now_present else None
             token_key = token_key_by_token_id.get(token_id, f"token:{token_id}")
@@ -4730,14 +2750,13 @@ def main() -> None:
                     t_now = float(alt)
             missing_data = t_now is None
             boot_key_set = set(state.get("boot_token_keys", []))
-            boot_id_set = {str(tid) for tid in state.get("boot_token_ids", [])}
-            is_boot_token = (token_key in boot_key_set) or (str(token_id) in boot_id_set)
+            is_boot_token = token_key in boot_key_set
 
             ignore_boot_tokens = bool(cfg.get("ignore_boot_tokens", True))
-            follow_new_topics_only = bool(cfg.get("follow_new_topics_only", False))
             boot_scope = str(cfg.get("ignore_boot_tokens_scope") or "probe_only").lower()
-            # scope 璇存槑锛?            # - "probe_only"锛堥粯璁わ級锛氫粎闃绘 boot token 鐨?probe锛堥槻寮€鏈鸿涔帮級锛屽厑璁稿悗缁閲?BUY 璺熷崟
-            # - "all"锛氭棫琛屼负锛宐oot token 鐨?BUY 涔熼樆姝紙涓嶆帹鑽愶級
+            # scope 说明：
+            # - "probe_only"（默认）：仅阻止 boot token 的 probe（防开机误买），允许后续增量 BUY 跟单
+            # - "all"：旧行为，boot token 的 BUY 也阻止（不推荐）
             probe_blocked_by_boot = (
                 ignore_boot_tokens
                 and is_boot_token
@@ -4746,10 +2765,6 @@ def main() -> None:
             buy_blocked_by_boot = (
                 ignore_boot_tokens and is_boot_token and boot_scope in ("all", "full")
             )
-            # Strong mode: ignore all pre-boot tokens for BUY/probe (SELL still allowed).
-            if follow_new_topics_only and is_boot_token:
-                probe_blocked_by_boot = True
-                buy_blocked_by_boot = True
             t_last = state.get("target_last_shares", {}).get(token_id)
             if t_last is None:
                 boot_by_key = state.get("target_last_shares_by_token_key", {})
@@ -4762,15 +2777,6 @@ def main() -> None:
                         boot_ids.add(token_id)
                         state["boot_token_ids"] = sorted(boot_ids)
             my_shares = my_by_token_id.get(token_id, 0.0)
-            ref_price_for_meaning = state.get("last_mid_price_by_token_id", {}).get(
-                token_id, fallback_mid_price
-            )
-            if not ref_price_for_meaning or ref_price_for_meaning <= 0:
-                ref_price_for_meaning = fallback_mid_price
-            my_notional_est = max(0.0, my_shares) * float(ref_price_for_meaning)
-            if my_shares > eps:
-                state.setdefault("topic_unfilled_attempts", {}).pop(token_id, None)
-                last_nonzero_my_shares[token_id] = {"shares": float(my_shares), "ts": int(now_ts)}
             open_orders_count = len(open_orders)
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
@@ -4782,81 +2788,8 @@ def main() -> None:
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
-            if must_exit_active:
-                _mark_must_exit_token(
-                    state,
-                    token_id,
-                    now_ts,
-                    source="reconcile_loop",
-                    target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
-                )
-                if phase != "EXITING" and (my_shares > eps or open_orders_count > 0):
-                    st = {
-                        "phase": "EXITING",
-                        "first_buy_ts": int(st.get("first_buy_ts") or now_ts),
-                        "first_sell_ts": now_ts,
-                        "entry_sized": bool(st.get("entry_sized")),
-                        "did_probe": bool(st.get("did_probe")),
-                        "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
-                        "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
-                        "desired_shares": 0.0,
-                    }
-                    topic_state[token_id] = st
-                    phase = "EXITING"
-                    logger.info(
-                        "[MUST_EXIT] token_id=%s promote_to=EXITING my_shares=%s open_orders=%s",
-                        token_id,
-                        my_shares,
-                        open_orders_count,
-                    )
-                if (
-                    my_shares <= eps
-                    and open_orders_count == 0
-                    and (not action_seen)
-                    and _should_clear_must_exit_without_inventory(state, token_id, now_ts, eps, cfg)
-                ):
-                    must_exit_tokens.pop(token_id, None)
-                    last_nonzero_my_shares.pop(token_id, None)
-                    must_exit_active = False
-                    logger.info(
-                        "[MUST_EXIT] token_id=%s clear reason=no_inventory_no_orders",
-                        token_id,
-                    )
-
-            # FIX: Only meaningful tokens should accumulate missing_streak / freeze.
-            has_meaningful_state = (
-                my_notional_est >= max(0.0, missing_meaningful_min_usd - eps)
-                or bool(open_orders)
-            )
-            if not has_meaningful_state and missing_streak > 0:
-                state.setdefault("target_missing_streak", {})[token_id] = 0
-                missing_streak = 0
-                _mf = state.setdefault("missing_data_freeze", {})
-                if _mf.get(token_id):
-                    _mf.pop(token_id, None)
 
             if topic_mode:
-                # Suspect Zero Quarantine recovery
-                if phase == "SUSPECT_ZERO":
-                    quarantine_sec = int(cfg.get("cleanup_quarantine_sec") or 300)
-                    if my_shares > eps or orders_t:
-                        # Position resurrected: API previously lied about zero
-                        resume_phase = "EXITING" if has_sell else "LONG"
-                        st["phase"] = resume_phase
-                        logger.warning(
-                            "[RECOVERY] token_id=%s reason=position_resurrected phase=%s my_shares=%s orders=%s resume_exit",
-                            token_id,
-                            resume_phase,
-                            my_shares,
-                            len(orders_t),
-                        )
-                        topic_state[token_id] = st
-                        phase = resume_phase
-                    elif now_ts - st.get("cleanup_ts", now_ts) >= quarantine_sec:
-                        # Should have been hard-deleted in cleanup block; safety fallback
-                        topic_state.pop(token_id, None)
-                        continue
-
                 if phase == "IDLE" and has_buy:
                     st = {
                         "phase": "LONG",
@@ -4871,54 +2804,6 @@ def main() -> None:
                     topic_state[token_id] = st
                     phase = "LONG"
                     logger.info("[TOPIC] ENTER token_id=%s first_buy_ts=%s", token_id, now_ts)
-
-                # If topic state was cleaned to IDLE but a fresh SELL arrives while we still
-                # hold shares/open orders, recover EXITING immediately instead of treating it
-                # as non-topic SELL (which can be throttled by normal cooldown/accumulator).
-                last_target_sell_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
-                recent_target_sell = (
-                    last_target_sell_ms > 0
-                    and (now_ms - last_target_sell_ms) <= online_sell_recover_window_sec * 1000
-                )
-                recover_by_recent_target_sell = (
-                    phase == "IDLE"
-                    and (not has_sell)
-                    and recent_target_sell
-                    and (my_shares > eps or open_orders_count > 0)
-                    and (not t_now_present)
-                    and (now_ms - last_target_sell_ms) >= online_sell_recover_grace_sec * 1000
-                )
-                if (
-                    phase == "IDLE"
-                    and (has_sell or recover_by_recent_target_sell)
-                    and (my_shares > eps or open_orders_count > 0)
-                ):
-                    st = {
-                        "phase": "EXITING",
-                        "first_buy_ts": int(st.get("first_buy_ts") or now_ts),
-                        "first_sell_ts": now_ts,
-                        "entry_sized": bool(st.get("entry_sized")),
-                        "did_probe": bool(st.get("did_probe")),
-                        "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
-                        "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
-                        "desired_shares": 0.0,
-                    }
-                    topic_state[token_id] = st
-                    phase = "EXITING"
-                    _mark_must_exit_token(
-                        state,
-                        token_id,
-                        now_ts,
-                        source="topic_exit_recover",
-                        target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
-                    )
-                    logger.info(
-                        "[TOPIC] EXIT_RECOVER token_id=%s reason=%s my_shares=%s orders=%s",
-                        token_id,
-                        "idle_sell_signal" if has_sell else "idle_recent_target_sell",
-                        my_shares,
-                        open_orders_count,
-                    )
 
                 if phase == "LONG":
                     if t_now is not None:
@@ -4944,29 +2829,17 @@ def main() -> None:
                     st["first_sell_ts"] = now_ts
                     topic_state[token_id] = st
                     phase = "EXITING"
-                    _mark_must_exit_token(
-                        state,
-                        token_id,
-                        now_ts,
-                        source="topic_exit_signal",
-                        target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
-                    )
                     logger.info("[TOPIC] EXIT token_id=%s first_sell_ts=%s", token_id, now_ts)
 
                 if phase == "EXITING":
                     min_order_shares = float(cfg.get("min_order_shares") or 0.0)
                     dust_eps = float(cfg.get("dust_exit_eps") or 0.0)
-                    below_min_as_dust = bool(cfg.get("exit_treat_below_min_as_dust", False))
                     desired_shares = float(st.get("desired_shares") or 0.0)
                     is_dust = False
                     if desired_shares <= eps and my_shares > eps:
                         if dust_eps > 0 and my_shares <= dust_eps:
                             is_dust = True
-                        elif (
-                            below_min_as_dust
-                            and min_order_shares > 0
-                            and my_shares + eps < min_order_shares
-                        ):
+                        elif min_order_shares > 0 and my_shares < min_order_shares:
                             is_dust = True
                     if is_dust:
                         state.setdefault("dust_exits", {})[token_id] = {
@@ -4974,7 +2847,6 @@ def main() -> None:
                             "shares": my_shares,
                         }
                         topic_state.pop(token_id, None)
-                        must_exit_tokens.pop(token_id, None)
                         phase = "IDLE"
                         logger.info(
                             "[TOPIC] DUST_RESET token_id=%s remaining=%s",
@@ -4984,15 +2856,13 @@ def main() -> None:
 
                 if phase == "EXITING" and my_shares <= eps and open_orders_count == 0:
                     topic_state.pop(token_id, None)
-                    must_exit_tokens.pop(token_id, None)
-                    last_nonzero_my_shares.pop(token_id, None)
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
             is_exiting = phase == "EXITING"
             topic_active = topic_mode and phase in ("LONG", "EXITING")
             probe_attempted = False
-            if (not action_seen) and (not t_now_present) and (not topic_active) and has_meaningful_state:
+            if (not action_seen) and (not t_now_present) and (not topic_active):
                 missing_streak += 1
                 state.setdefault("target_missing_streak", {})[token_id] = missing_streak
                 missing_timeout = (
@@ -5032,24 +2902,12 @@ def main() -> None:
                                 "reason": "missing_streak",
                                 "streak": missing_streak,
                             }
-                            dedup_key = "FREEZE:missing_streak"
-                            should_log, suppressed = _log_dedup.should_log(dedup_key)
-                            if should_log:
-                                if suppressed > 0:
-                                    logger.warning(
-                                        "[FREEZE] token_id=%s reason=missing_streak streak=%s until=%s (suppressed %d)",
-                                        token_id,
-                                        missing_streak,
-                                        until_ts,
-                                        suppressed,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "[FREEZE] token_id=%s reason=missing_streak streak=%s until=%s",
-                                        token_id,
-                                        missing_streak,
-                                        until_ts,
-                                    )
+                            logger.warning(
+                                "[FREEZE] token_id=%s reason=missing_streak streak=%s until=%s",
+                                token_id,
+                                missing_streak,
+                                until_ts,
+                            )
                 should_log_missing = (
                     missing
                     and (my_shares > 0 or open_orders_count > 0)
@@ -5059,7 +2917,7 @@ def main() -> None:
                     legacy_desired = float(cfg.get("follow_ratio") or 0.0) * (
                         t_now or 0.0
                     )
-                    logger.debug(
+                    logger.info(
                         "[DBG] token_id=%s missing=%s missing_streak=%s t_now=%s t_last=%s "
                         "my_shares=%s open_orders_count=%s",
                         token_id,
@@ -5070,7 +2928,7 @@ def main() -> None:
                         my_shares,
                         open_orders_count,
                     )
-                    logger.debug("[DBG] token_id=%s legacy_desired=%s", token_id, legacy_desired)
+                    logger.info("[DBG] token_id=%s legacy_desired=%s", token_id, legacy_desired)
                     if should_log_missing:
                         missing_notice_tokens.add(token_id)
                 if open_orders_count > 0 and missing and (
@@ -5166,19 +3024,9 @@ def main() -> None:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 # Even if position snapshot temporarily misses t_now, actions mean "recently seen".
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
-                _mf = state.setdefault("missing_data_freeze", {})
-                _existing = _mf.get(token_id)
-                if isinstance(_existing, dict) and _existing.get("reason") == "missing_streak":
-                    _mf.pop(token_id, None)
-                    logger.info("[UNFREEZE] token_id=%s reason=data_recovered", token_id)
             elif t_now_present:
                 state.setdefault("target_missing_streak", {})[token_id] = 0
                 state.setdefault("target_last_seen_ts", {})[token_id] = now_ts
-                _mf = state.setdefault("missing_data_freeze", {})
-                _existing = _mf.get(token_id)
-                if isinstance(_existing, dict) and _existing.get("reason") == "missing_streak":
-                    _mf.pop(token_id, None)
-                    logger.info("[UNFREEZE] token_id=%s reason=data_recovered", token_id)
 
             should_update_last = t_now_present
             if t_last is None and (not action_seen) and (not topic_active):
@@ -5199,33 +3047,29 @@ def main() -> None:
                     if token_id in orderbooks:
                         ob = orderbooks[token_id]
                     else:
-                        ob = get_orderbook(clob_client, token_id, api_timeout_sec)
+                        ob = _get_orderbook_checked(token_id)
+                        if ob is None:
+                            closed_now = _record_orderbook_empty(
+                                state,
+                                token_id,
+                                logger,
+                                cfg,
+                                now_ts,
+                            )
+                            if closed_now:
+                                logger.info(
+                                    "[SKIP] closed_by_orderbook_empty token_id=%s",
+                                    token_id,
+                                )
+                            continue
                         orderbooks[token_id] = ob
 
                     best_bid = ob.get("best_bid")
                     best_ask = ob.get("best_ask")
-                    if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                        logger.warning(
-                            "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
-                            token_id,
-                            best_bid,
-                            best_ask,
-                        )
-                        orderbooks.pop(token_id, None)
-                        ob = get_orderbook(clob_client, token_id, api_timeout_sec)
-                        orderbooks[token_id] = ob
-                        best_bid = ob.get("best_bid")
-                        best_ask = ob.get("best_ask")
-                        if (
-                            best_bid is not None
-                            and best_ask is not None
-                            and best_bid > best_ask
-                        ):
-                            continue
                     ref_price = _mid_price(ob)
                     if ref_price is None or ref_price <= 0:
                         logger.warning(
-                            "[WARN] 鏃犳晥鐩樺彛(鎺㈤拡): token_id=%s best_bid=%s best_ask=%s",
+                            "[WARN] 无效盘口(探针): token_id=%s best_bid=%s best_ask=%s",
                             token_id,
                             best_bid,
                             best_ask,
@@ -5404,56 +3248,6 @@ def main() -> None:
                             )
                             continue
 
-                        max_position_usd_per_token = float(cfg_for_reconcile.get("max_position_usd_per_token") or 0.0)
-                        if max_position_usd_per_token > 0:
-                            acc_usd = float(state.get("buy_notional_accumulator", {}).get(token_id, {}).get("usd", 0.0))
-                            if acc_usd > max_position_usd_per_token:
-                                logger.info(
-                                    "[SKIP_PREFLIGHT] %s grandfather acc=%s max=%s",
-                                    token_key,
-                                    acc_usd,
-                                    max_position_usd_per_token,
-                                )
-                                continue
-
-                        if max_per_condition > 0:
-                            cond_id = _get_condition_id(state, token_id)
-                            if cond_id:
-                                cond_planned = condition_planned_map.get(cond_id, 0.0)
-                                if cond_planned >= max_per_condition * 0.95:
-                                    logger.info(
-                                        "[SKIP_PREFLIGHT] %s condition=%s condition_limit=%s/%s",
-                                        token_key,
-                                        cond_id[:16],
-                                        cond_planned,
-                                        max_per_condition,
-                                    )
-                                    continue
-
-                        if max_per_event > 0:
-                            event_id = _get_event_id(state, token_id)
-                            if event_id:
-                                event_planned = event_planned_map.get(event_id, 0.0)
-                                if event_planned >= max_per_event * 0.95:
-                                    logger.info(
-                                        "[SKIP_PREFLIGHT] %s event=%s event_limit=%s/%s",
-                                        token_key,
-                                        event_id[:16],
-                                        event_planned,
-                                        max_per_event,
-                                    )
-                                    continue
-
-                        max_total_pos = float(cfg.get("max_notional_total") or 0.0)
-                        if max_total_pos > 0 and planned_total_notional_shadow >= max_total_pos * 0.95:
-                            logger.info(
-                                "[SKIP_PREFLIGHT] %s total_position_limit=%s/%s",
-                                token_key,
-                                planned_total_notional_shadow,
-                                max_total_pos,
-                            )
-                            continue
-
                     actions = reconcile_one(
                         token_id,
                         my_target,
@@ -5505,9 +3299,6 @@ def main() -> None:
                             continue
 
                         side = str(act.get("side") or "").upper()
-                        if side == "SELL" and sell_reconcile_lock_active:
-                            blocked_reasons.add("sell_reconcile_lock")
-                            continue
                         price = float(act.get("price") or ref_price or 0.0)
                         size = float(act.get("size") or 0.0)
                         if price <= 0 or size <= 0:
@@ -5544,17 +3335,16 @@ def main() -> None:
                                 side=side,
                                 local_delta=local_accumulator_delta,
                                 planned_token_notional=planned_token_notional_for_acc,
-                                planned_total_notional=planned_total_notional,
                             )
                             if not acc_ok:
                                 # Get accumulator actual values for detailed logging
                                 accumulator = state.get("buy_notional_accumulator")
                                 acc_current = 0.0
                                 if isinstance(accumulator, dict):
-                                    for acc_data in accumulator.values():
-                                        if isinstance(acc_data, dict):
-                                            acc_current += float(acc_data.get("usd", 0.0))
-                                max_total = float(cfg_for_acc.get("accumulator_max_total_usd") or 0)
+                                    token_acc = accumulator.get(token_id)
+                                    if isinstance(token_acc, dict):
+                                        acc_current = float(token_acc.get("usd", 0.0))
+                                max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
 
                                 # Try to shrink order to fit within accumulator limit
                                 if acc_available > 0:
@@ -5570,13 +3360,13 @@ def main() -> None:
                                         act["size"] = size
                                         order_notional = acc_available
                                         logger.warning(
-                                            "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
+                                            "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
                                             token_id,
                                             old_usd,
                                             acc_available,
                                             acc_current,
-                                            max_total,
-                                            planned_total_notional,
+                                            max_per_token,
+                                            planned_token_notional_for_acc,
                                             is_lowp,
                                             acc_reason,
                                         )
@@ -5584,15 +3374,15 @@ def main() -> None:
                                     else:
                                         # Available amount is below minimum order size
                                         logger.warning(
-                                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_total=%s is_lowp=%s reason=%s",
+                                            "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
                                             token_id,
                                             order_notional,
                                             acc_current,
                                             local_accumulator_delta,
-                                            max_total,
+                                            max_per_token,
                                             acc_available,
                                             effective_min_usd,
-                                            planned_total_notional,
+                                            planned_token_notional_for_acc,
                                             is_lowp,
                                             acc_reason,
                                         )
@@ -5601,13 +3391,13 @@ def main() -> None:
                                 else:
                                     # No room available
                                     logger.warning(
-                                        "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
+                                        "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
                                         token_id,
                                         order_notional,
                                         acc_current,
                                         local_accumulator_delta,
-                                        max_total,
-                                        planned_total_notional,
+                                        max_per_token,
+                                        planned_token_notional_for_acc,
                                         is_lowp,
                                         acc_reason,
                                     )
@@ -5644,24 +3434,6 @@ def main() -> None:
                             )
 
                         cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
-                        reserved_sell_open = 0.0
-                        if side == "SELL":
-                            for oo in open_orders:
-                                try:
-                                    if str(oo.get("side") or "").upper() != "SELL":
-                                        continue
-                                    reserved_sell_open += float(
-                                        oo.get("size") or oo.get("original_size") or 0.0
-                                    )
-                                except Exception:
-                                    continue
-                        sell_buffer_shares = float(cfg_for_action.get("sell_available_buffer_shares") or 0.01)
-                        available_shares = max(
-                            0.0,
-                            float(my_shares)
-                            - max(0.0, reserved_sell_open)
-                            - max(0.0, sell_buffer_shares),
-                        )
                         ok, reason = risk_check(
                             token_key,
                             size,
@@ -5670,7 +3442,6 @@ def main() -> None:
                             cfg_for_action,
                             token_title=token_title,
                             side=side,
-                            available_shares=available_shares if side == "SELL" else None,
                             planned_total_notional=planned_total_notional_risk,
                             planned_token_notional=planned_token_notional_risk,
                             cumulative_total_usd=None,
@@ -5923,18 +3694,8 @@ def main() -> None:
                                 missing_limit,
                             )
                             continue
-                    has_exit_sell_place = any(
-                        act.get("type") == "place"
-                        and str(act.get("side") or "").upper() == "SELL"
-                        for act in actions
-                    ) and is_exiting
-                    ignore_place_backoff = bool(
-                        cfg.get("exit_ignore_place_backoff", True)
-                    ) and has_exit_sell_place and ((not sell_reconcile_lock_active) or must_exit_active)
-                    if (
-                        place_backoff_active
-                        and any(act.get("type") == "place" for act in actions)
-                        and (not ignore_place_backoff)
+                    if place_backoff_active and any(
+                        act.get("type") == "place" for act in actions
                     ):
                         dedup_key = f"SKIP:{token_id}:place_backoff"
                         should_log, suppressed = _log_dedup.should_log(dedup_key)
@@ -5950,21 +3711,6 @@ def main() -> None:
                                     token_id, place_fail_until,
                                 )
                         continue
-                    if place_backoff_active and ignore_place_backoff:
-                        dedup_key = f"BYPASS:{token_id}:place_backoff_exit_sell"
-                        should_log, suppressed = _log_dedup.should_log(dedup_key)
-                        if should_log:
-                            if suppressed > 0:
-                                logger.info(
-                                    "[BACKOFF_BYPASS] token_id=%s reason=exit_sell_place (suppressed %d)",
-                                    token_id,
-                                    suppressed,
-                                )
-                            else:
-                                logger.info(
-                                    "[BACKOFF_BYPASS] token_id=%s reason=exit_sell_place",
-                                    token_id,
-                                )
                     ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
                     if cooldown_active and (not ignore_cd) and (not is_reprice):
                         dedup_key = f"SKIP:{token_id}:cooldown"
@@ -5988,12 +3734,6 @@ def main() -> None:
                         cfg=cfg,
                         state=state,
                         planned_by_token_usd=planned_by_token_usd_shadow,
-                    )
-                    sell_health_round["actions"] = int(sell_health_round.get("actions") or 0) + sum(
-                        1
-                        for act in actions
-                        if act.get("type") == "place"
-                        and str(act.get("side") or "").upper() == "SELL"
                     )
                     if updated_orders:
                         state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -6075,7 +3815,6 @@ def main() -> None:
             topic_active = topic_mode and phase in ("LONG", "EXITING")
             actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
             actions_unreliable = actions_unreliable_until > now_ts
-            force_exit_by_confirm_drop = False
             if has_sell and d_target >= -eps:
                 d_target = -max(sell_sum, eps)
                 logger.info(
@@ -6085,7 +3824,7 @@ def main() -> None:
                     sell_sum,
                 )
             if d_target < -eps:
-                if has_sell or is_exiting:
+                if has_sell:
                     state.setdefault("sell_confirm", {}).pop(token_id, None)
                 else:
                     sell_confirm = state.setdefault("sell_confirm", {})
@@ -6148,7 +3887,6 @@ def main() -> None:
                                     base_shares,
                                 )
                                 sell_confirm.pop(token_id, None)
-                                force_exit_by_confirm_drop = True
                             else:
                                 logger.info(
                                     "[HOLD] token_id=%s reason=no_sell_after_confirm d_target=%s confirm=%s/%s drop=%s threshold=%s",
@@ -6164,42 +3902,6 @@ def main() -> None:
                                 d_target = 0.0
             else:
                 state.setdefault("sell_confirm", {}).pop(token_id, None)
-
-            # Promote significant non-action sell-drop to EXITING immediately.
-            # This avoids getting stuck in non-exiting small-sell accumulator mode.
-            if (
-                force_exit_by_confirm_drop
-                and topic_mode
-                and (my_shares > eps or open_orders_count > 0)
-            ):
-                _mark_must_exit_token(
-                    state,
-                    token_id,
-                    now_ts,
-                    source="sell_confirm_drop",
-                    target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
-                )
-                st = topic_state.get(token_id) or {}
-                st = {
-                    "phase": "EXITING",
-                    "first_buy_ts": int(st.get("first_buy_ts") or now_ts),
-                    "first_sell_ts": now_ts,
-                    "entry_sized": bool(st.get("entry_sized")),
-                    "did_probe": bool(st.get("did_probe")),
-                    "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
-                    "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
-                    "desired_shares": 0.0,
-                }
-                topic_state[token_id] = st
-                phase = "EXITING"
-                is_exiting = True
-                topic_active = True
-                logger.info(
-                    "[FORCE] token_id=%s reason=sell_confirm_drop promote_to=EXITING my_shares=%s open_orders=%s",
-                    token_id,
-                    my_shares,
-                    open_orders_count,
-                )
             if abs(d_target) <= eps and not topic_active:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
@@ -6207,29 +3909,40 @@ def main() -> None:
             if token_id in orderbooks:
                 ob = orderbooks[token_id]
             else:
-                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
+                ob = _get_orderbook_checked(token_id)
+                if ob is None:
+                    closed_now = _record_orderbook_empty(
+                        state,
+                        token_id,
+                        logger,
+                        cfg,
+                        now_ts,
+                    )
+                    if closed_now:
+                        logger.info(
+                            "[SKIP] closed_by_orderbook_empty token_id=%s",
+                            token_id,
+                        )
+                    dedup_key = f"NOOP:{token_id}:orderbook_empty"
+                    should_log, suppressed = _log_dedup.should_log(dedup_key)
+                    if should_log:
+                        if suppressed > 0:
+                            logger.info(
+                                "[NOOP] token_id=%s reason=orderbook_empty (suppressed %d)",
+                                token_id,
+                                suppressed,
+                            )
+                        else:
+                            logger.info("[NOOP] token_id=%s reason=orderbook_empty", token_id)
+                    continue
                 orderbooks[token_id] = ob
 
             best_bid = ob.get("best_bid")
             best_ask = ob.get("best_ask")
-            if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                logger.warning(
-                    "[SKIP] invalid book bid>ask token_id=%s best_bid=%s best_ask=%s",
-                    token_id,
-                    best_bid,
-                    best_ask,
-                )
-                orderbooks.pop(token_id, None)
-                ob = get_orderbook(clob_client, token_id, api_timeout_sec)
-                orderbooks[token_id] = ob
-                best_bid = ob.get("best_bid")
-                best_ask = ob.get("best_ask")
-                if best_bid is not None and best_ask is not None and best_bid > best_ask:
-                    continue
             ref_price = _mid_price(ob)
             if ref_price is None or ref_price <= 0:
                 logger.warning(
-                    "[WARN] 鏃犳晥鐩樺彛: token_id=%s best_bid=%s best_ask=%s",
+                    "[WARN] 无效盘口: token_id=%s best_bid=%s best_ask=%s",
                     token_id,
                     best_bid,
                     best_ask,
@@ -6311,8 +4024,6 @@ def main() -> None:
             my_target = my_shares + d_my
             if my_target < 0:
                 my_target = 0.0
-            if d_target > 0 and buy_blocked_by_boot:
-                my_target = min(my_target, my_shares)
             if d_target > 0:
                 my_target = min(my_target, cap_shares, cap_shares_notional)
             else:
@@ -6328,19 +4039,7 @@ def main() -> None:
                 probe_shares = probe_usd / ref_price
 
                 if phase == "LONG":
-                    if buy_blocked_by_boot:
-                        my_target = min(my_target, my_shares)
-                        _block_key = f"BOOT_BLOCK_BUY:{token_id}"
-                        _should_log, _supp = _log_dedup.should_log(_block_key)
-                        if _should_log:
-                            logger.info(
-                                "[SKIP] boot_block_buy token_id=%s follow_new_topics_only=%s scope=%s",
-                                token_id,
-                                follow_new_topics_only,
-                                boot_scope,
-                            )
-
-                    if (not buy_blocked_by_boot) and (not st.get("did_probe")) and my_shares <= eps:
+                    if not st.get("did_probe") and my_shares <= eps:
                         my_target = min(cap_shares, cap_shares_notional, my_shares + probe_shares)
                         probe_attempted = True
                         dedup_key = f"TOPIC_PROBE:{token_id}"
@@ -6354,7 +4053,7 @@ def main() -> None:
                             else:
                                 logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
-                    if (not buy_blocked_by_boot) and (not st.get("entry_sized")):
+                    if not st.get("entry_sized"):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
                         if now_ts - first_buy_ts >= entry_settle_sec:
                             base = float(t_now) if t_now is not None else float(
@@ -6394,15 +4093,14 @@ def main() -> None:
                     # FIX: Same fallback for continuous tracking after entry_sized.
                     if base <= 0:
                         base = float(st.get("entry_buy_accum") or 0.0)
-                    if not buy_blocked_by_boot:
-                        desired_locked = float(st.get("desired_shares") or 0.0)
-                        desired_target = desired_locked
-                        if base > 0 and ratio_buy > 0:
-                            desired_target = min(cap_shares, cap_shares_notional, ratio_buy * base)
-                        if desired_target > 0:
-                            st["desired_shares"] = float(desired_target)
-                            topic_state[token_id] = st
-                            my_target = max(my_shares, min(cap_shares, cap_shares_notional, desired_target))
+                    desired_locked = float(st.get("desired_shares") or 0.0)
+                    desired_target = desired_locked
+                    if base > 0 and ratio_buy > 0:
+                        desired_target = min(cap_shares, cap_shares_notional, ratio_buy * base)
+                    if desired_target > 0:
+                        st["desired_shares"] = float(desired_target)
+                        topic_state[token_id] = st
+                        my_target = max(my_shares, min(cap_shares, cap_shares_notional, desired_target))
 
                 elif phase == "EXITING":
                     my_target = 0.0
@@ -6583,60 +4281,6 @@ def main() -> None:
                     _maybe_update_target_last(state, token_id, t_now, should_update_last)
                     continue
 
-                max_position_usd_per_token = float(cfg_for_reconcile.get("max_position_usd_per_token") or 0.0)
-                if max_position_usd_per_token > 0:
-                    acc_usd = float(state.get("buy_notional_accumulator", {}).get(token_id, {}).get("usd", 0.0))
-                    if acc_usd > max_position_usd_per_token:
-                        logger.info(
-                            "[SKIP_PREFLIGHT] %s grandfather acc=%s max=%s",
-                            token_key,
-                            acc_usd,
-                            max_position_usd_per_token,
-                        )
-                        _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                        continue
-
-                if max_per_condition > 0:
-                    cond_id = _get_condition_id(state, token_id)
-                    if cond_id:
-                        cond_planned = condition_planned_map.get(cond_id, 0.0)
-                        if cond_planned >= max_per_condition * 0.95:
-                            logger.info(
-                                "[SKIP_PREFLIGHT] %s condition=%s condition_limit=%s/%s",
-                                token_key,
-                                cond_id[:16],
-                                cond_planned,
-                                max_per_condition,
-                            )
-                            _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                            continue
-
-                if max_per_event > 0:
-                    event_id = _get_event_id(state, token_id)
-                    if event_id:
-                        event_planned = event_planned_map.get(event_id, 0.0)
-                        if event_planned >= max_per_event * 0.95:
-                            logger.info(
-                                "[SKIP_PREFLIGHT] %s event=%s event_limit=%s/%s",
-                                token_key,
-                                event_id[:16],
-                                event_planned,
-                                max_per_event,
-                            )
-                            _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                            continue
-
-                max_total_pos = float(cfg.get("max_notional_total") or 0.0)
-                if max_total_pos > 0 and planned_total_notional_shadow >= max_total_pos * 0.95:
-                    logger.info(
-                        "[SKIP_PREFLIGHT] %s total_position_limit=%s/%s",
-                        token_key,
-                        planned_total_notional_shadow,
-                        max_total_pos,
-                    )
-                    _maybe_update_target_last(state, token_id, t_now, should_update_last)
-                    continue
-
             actions = reconcile_one(
                 token_id,
                 my_target,
@@ -6682,9 +4326,6 @@ def main() -> None:
                     continue
 
                 side = str(act.get("side") or "").upper()
-                if side == "SELL" and sell_reconcile_lock_active and (not must_exit_active):
-                    blocked_reasons.add("sell_reconcile_lock")
-                    continue
                 price = float(act.get("price") or ref_price or 0.0)
                 size = float(act.get("size") or 0.0)
                 if price <= 0 or size <= 0:
@@ -6721,17 +4362,16 @@ def main() -> None:
                         side=side,
                         local_delta=local_accumulator_delta,
                         planned_token_notional=planned_token_notional_for_acc,
-                        planned_total_notional=planned_total_notional,
                     )
                     if not acc_ok:
                         # Get accumulator actual values for detailed logging
                         accumulator = state.get("buy_notional_accumulator")
                         acc_current = 0.0
                         if isinstance(accumulator, dict):
-                            for acc_data in accumulator.values():
-                                if isinstance(acc_data, dict):
-                                    acc_current += float(acc_data.get("usd", 0.0))
-                        max_total = float(cfg_for_acc.get("accumulator_max_total_usd") or 0)
+                            token_acc = accumulator.get(token_id)
+                            if isinstance(token_acc, dict):
+                                acc_current = float(token_acc.get("usd", 0.0))
+                        max_per_token = float(cfg_for_acc.get("max_notional_per_token") or 0)
 
                         # Try to shrink order to fit within accumulator limit
                         if acc_available > 0:
@@ -6747,13 +4387,13 @@ def main() -> None:
                                 act["size"] = size
                                 order_notional = acc_available
                                 logger.warning(
-                                    "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
+                                    "[ACCUMULATOR_SHRINK] token_id=%s old_usd=%s new_usd=%s acc_current=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
                                     token_id,
                                     old_usd,
                                     acc_available,
                                     acc_current,
-                                    max_total,
-                                    planned_total_notional,
+                                    max_per_token,
+                                    planned_token_notional_for_acc,
                                     is_lowp,
                                     acc_reason,
                                 )
@@ -6761,15 +4401,15 @@ def main() -> None:
                             else:
                                 # Available amount is below minimum order size
                                 logger.warning(
-                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_total=%s is_lowp=%s reason=%s",
+                                    "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s acc_available=%s min_usd=%s planned_token=%s is_lowp=%s reason=%s",
                                     token_id,
                                     order_notional,
                                     acc_current,
                                     local_accumulator_delta,
-                                    max_total,
+                                    max_per_token,
                                     acc_available,
                                     effective_min_usd,
-                                    planned_total_notional,
+                                    planned_token_notional_for_acc,
                                     is_lowp,
                                     acc_reason,
                                 )
@@ -6778,13 +4418,13 @@ def main() -> None:
                         else:
                             # No room available
                             logger.warning(
-                                "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_total=%s is_lowp=%s reason=%s",
+                                "[ACCUMULATOR_BLOCK] token_id=%s order_usd=%s acc_current=%s local_delta=%s acc_limit=%s planned_token=%s is_lowp=%s reason=%s",
                                 token_id,
                                 order_notional,
                                 acc_current,
                                 local_accumulator_delta,
-                                max_total,
-                                planned_total_notional,
+                                max_per_token,
+                                planned_token_notional_for_acc,
                                 is_lowp,
                                 acc_reason,
                             )
@@ -6799,67 +4439,6 @@ def main() -> None:
                     planned_total_notional, planned_total_notional_shadow
                 )
                 cfg_for_action = cfg_lowp if (is_lowp and side == "BUY") else cfg
-
-                # Hard guard (no extra API): when target snapshot is available on BUY signal,
-                # do not let this order push holdings above target-follow cap + one minimum order bump.
-                # Prefer shrinking to allowed size (same style as risk resize) instead of hard block.
-                if side == "BUY" and d_target > 0 and t_now is not None:
-                    target_now_shares = max(0.0, float(t_now))
-                    follow_cap_shares = max(0.0, ratio_buy) * target_now_shares
-                    min_order_usd_guard = float(cfg_for_action.get("min_order_usd") or 0.0)
-                    min_order_shares_guard = float(cfg_for_action.get("min_order_shares") or 0.0)
-                    one_bump_shares = max(
-                        min_order_shares_guard,
-                        (min_order_usd_guard / price) if price > 0 else 0.0,
-                    )
-                    projected_shares = my_shares + abs(size)
-                    hard_cap_shares = follow_cap_shares + one_bump_shares
-                    if projected_shares > hard_cap_shares + eps:
-                        allowed_shares = max(0.0, hard_cap_shares - my_shares)
-                        effective_min_usd_guard = max(
-                            min_order_usd_guard,
-                            (min_order_shares_guard * price) if min_order_shares_guard > 0 else 0.0,
-                        )
-                        allowed_usd_guard = allowed_shares * price
-                        if (
-                            allowed_shares <= eps
-                            or allowed_usd_guard + 1e-9 < effective_min_usd_guard
-                        ):
-                            logger.warning(
-                                "[HARD_CAP_BLOCK] token_id=%s projected=%.6f cap=%.6f "
-                                "(follow=%.6f bump=%.6f my=%.6f size=%.6f t_now=%.6f ratio=%.6f)",
-                                token_id,
-                                projected_shares,
-                                hard_cap_shares,
-                                follow_cap_shares,
-                                one_bump_shares,
-                                my_shares,
-                                abs(size),
-                                target_now_shares,
-                                ratio_buy,
-                            )
-                            blocked_reasons.add("hard_follow_cap")
-                            continue
-
-                        old_size = abs(size)
-                        old_usd = old_size * price
-                        if allowed_shares < old_size * (1 - 1e-9):
-                            size = allowed_shares
-                            act["size"] = size
-                            logger.warning(
-                                "[HARD_CAP_SHRINK] token_id=%s old_usd=%s new_usd=%s "
-                                "old_shares=%s new_shares=%s cap=%.6f my=%.6f t_now=%.6f ratio=%.6f",
-                                token_id,
-                                old_usd,
-                                allowed_usd_guard,
-                                old_size,
-                                size,
-                                hard_cap_shares,
-                                my_shares,
-                                target_now_shares,
-                                ratio_buy,
-                            )
-
                 ok, reason = risk_check(
                     token_key,
                     size,
@@ -6996,21 +4575,7 @@ def main() -> None:
             logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
 
             is_reprice = _is_pure_reprice(actions)
-            has_exit_sell_place = any(
-                act.get("type") == "place"
-                and str(act.get("side") or "").upper() == "SELL"
-                for act in actions
-            ) and is_exiting
-            ignore_place_backoff = (
-                bool(cfg.get("exit_ignore_place_backoff", True))
-                and has_exit_sell_place
-                and ((not sell_reconcile_lock_active) or must_exit_active)
-            )
-            if (
-                place_backoff_active
-                and any(act.get("type") == "place" for act in actions)
-                and (not ignore_place_backoff)
-            ):
+            if place_backoff_active and any(act.get("type") == "place" for act in actions):
                 dedup_key = f"SKIP:{token_id}:place_backoff"
                 should_log, suppressed = _log_dedup.should_log(dedup_key)
                 if should_log:
@@ -7026,21 +4591,6 @@ def main() -> None:
                         )
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
-            if place_backoff_active and ignore_place_backoff:
-                dedup_key = f"BYPASS:{token_id}:place_backoff_exit_sell"
-                should_log, suppressed = _log_dedup.should_log(dedup_key)
-                if should_log:
-                    if suppressed > 0:
-                        logger.info(
-                            "[BACKOFF_BYPASS] token_id=%s reason=exit_sell_place (suppressed %d)",
-                            token_id,
-                            suppressed,
-                        )
-                    else:
-                        logger.info(
-                            "[BACKOFF_BYPASS] token_id=%s reason=exit_sell_place",
-                            token_id,
-                        )
             ignore_cd = bool(cfg.get("exit_ignore_cooldown", True)) and is_exiting
             if cooldown_active and (not ignore_cd) and (not is_reprice):
                 dedup_key = f"SKIP:{token_id}:cooldown"
@@ -7072,12 +4622,6 @@ def main() -> None:
                 cfg=cfg,
                 state=state,
                 planned_by_token_usd=planned_by_token_usd_shadow,
-            )
-            sell_health_round["actions"] = int(sell_health_round.get("actions") or 0) + sum(
-                1
-                for act in actions
-                if act.get("type") == "place"
-                and str(act.get("side") or "").upper() == "SELL"
             )
             if updated_orders:
                 state.setdefault("open_orders", {})[token_id] = updated_orders
@@ -7142,67 +4686,10 @@ def main() -> None:
             state.setdefault("sizing", {})["ema_delta_usd"] = new_ema
             state["sizing"]["last_k"] = cfg.get("_auto_order_k")
 
-        _update_sell_health_monitor(
-            state=state,
-            cfg=cfg,
-            now_ts=now_ts,
-            sell_signals_inc=int(sell_health_round.get("signals") or 0),
-            sell_actions_inc=int(sell_health_round.get("actions") or 0),
-            logger=logger,
-            account_label=_shorten_address(current_my_address),
-        )
-
         state["last_sync_ts"] = now_ts
         save_state(args.state, state)
-
-        # ============================================================
-        # MULTI-ACCOUNT: Rotate to next account for next iteration
-        # ============================================================
-        current_account_idx = (current_account_idx + 1) % len(account_contexts)
-
         time.sleep(_get_poll_interval())
 
 
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        # Best-effort fatal error log to a dedicated file for systemd restarts.
-        import json
-        import os
-        import sys
-        import traceback
-        from datetime import datetime
-
-        def _find_config_path(argv: list[str]) -> str | None:
-            for idx, item in enumerate(argv):
-                if item in ("--config",):
-                    if idx + 1 < len(argv):
-                        return argv[idx + 1]
-            return None
-
-        def _resolve_log_dir(config_path: str | None) -> str:
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            cfg_path = config_path or os.path.join(base_dir, "copytrade_config.json")
-            try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = json.load(f)
-                log_dir = str(cfg.get("log_dir") or "logs")
-            except Exception:
-                log_dir = "logs"
-            if not os.path.isabs(log_dir):
-                log_dir = os.path.join(base_dir, log_dir)
-            return log_dir
-
-        cfg_path = _find_config_path(sys.argv)
-        log_dir = _resolve_log_dir(cfg_path)
-        os.makedirs(log_dir, exist_ok=True)
-        fatal_path = os.path.join(log_dir, "fatal_error.log")
-        with open(fatal_path, "a", encoding="utf-8") as f:
-            f.write("\n=== FATAL ERROR ===\n")
-            f.write(f"time_utc={datetime.utcnow().isoformat()}Z\n")
-            f.write("argv=" + " ".join(sys.argv) + "\n")
-            f.write(traceback.format_exc())
-        raise
-
-
+    main()

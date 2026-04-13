@@ -57,24 +57,7 @@ def _normalize_orderbook_payload(book: Any) -> Optional[Mapping[str, Any]]:
     return None
 
 
-def _supports_timeout_param(func: Any) -> bool:
-    try:
-        return "timeout" in inspect.signature(func).parameters
-    except Exception:
-        return False
-
-
-def _call_with_timeout(
-    func: Any, timeout: Optional[float], *args: Any, **kwargs: Any
-) -> Any:
-    if timeout is not None and timeout > 0 and _supports_timeout_param(func):
-        kwargs["timeout"] = timeout
-    return func(*args, **kwargs)
-
-
-def get_orderbook(
-    client: Any, token_id: str, timeout: Optional[float] = None
-) -> Dict[str, Optional[float]]:
+def get_orderbook(client: Any, token_id: str) -> Dict[str, Optional[float]]:
     tid = str(token_id)
 
     best_ask: Optional[float] = None
@@ -83,7 +66,7 @@ def get_orderbook(
     price_ask_raw: Any = None
 
     try:
-        price_bid_raw = _call_with_timeout(client.get_price, timeout, tid, side="BUY")
+        price_bid_raw = client.get_price(tid, side="BUY")
         if isinstance(price_bid_raw, dict):
             best_bid = safe_float(price_bid_raw.get("price"))
         else:
@@ -91,7 +74,7 @@ def get_orderbook(
     except Exception:
         pass
     try:
-        price_ask_raw = _call_with_timeout(client.get_price, timeout, tid, side="SELL")
+        price_ask_raw = client.get_price(tid, side="SELL")
         if isinstance(price_ask_raw, dict):
             best_ask = safe_float(price_ask_raw.get("price"))
         else:
@@ -120,7 +103,7 @@ def get_orderbook(
             best_bid = None
 
     try:
-        book = _call_with_timeout(client.get_order_book, timeout, tid)
+        book = client.get_order_book(tid)
         payload: Any = book
         if hasattr(book, "dict"):
             payload = book.dict()
@@ -348,10 +331,8 @@ def reconcile_one(
         size = max_shares_cap
 
     allow_short = bool(cfg.get("allow_short"))
-    sell_buffer_shares = float(cfg.get("sell_available_buffer_shares") or 0.01)
-    sellable_shares = max(0.0, float(my_shares) - max(0.0, sell_buffer_shares))
     if side == "SELL" and not allow_short:
-        size = min(size, sellable_shares)
+        size = min(size, my_shares)
 
     min_shares = float(cfg.get("min_order_shares") or 0.0)
     api_min_shares = 0.0
@@ -363,19 +344,6 @@ def reconcile_one(
         ) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
     size_step = api_min_shares if api_min_shares > 0 else 0.0
-    if side == "BUY" and desired_shares <= 0:
-        return actions
-    if side == "BUY" and my_shares >= desired_shares - deadband:
-        logger.info(
-            "[BUY_SKIP] token_id=%s reason=already_at_or_above_desired my_shares=%s desired=%s deadband=%s",
-            token_id,
-            my_shares,
-            desired_shares,
-            deadband,
-        )
-        return actions
-    if side == "BUY" and abs_delta > 0 and size > abs_delta:
-        size = abs_delta
     cap_shares = None
     cap_shares_remaining = None
     if price > 0 and side == "BUY":
@@ -487,68 +455,7 @@ def reconcile_one(
         and side == "BUY"
         and not small_taker_override
     ):
-        if abs_delta + 1e-12 < effective_min_shares:
-            # Completion tolerance: allow final top-up if overshoot <= 0.3 USD.
-            completion_tol_usd = 0.3
-            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-            effective_min_usd = max(1.0, min_order_usd, effective_min_shares * price)
-            if min_order_shares > 0:
-                effective_min_usd = max(effective_min_usd, min_order_shares * price)
-            gap_usd = abs_delta * price
-            overshoot = effective_min_usd - gap_usd
-            if gap_usd <= completion_tol_usd + 1e-9:
-                logger.info(
-                    "[COMPLETE_NEAR] token_id=%s gap_usd=%s tol=%s",
-                    token_id,
-                    gap_usd,
-                    completion_tol_usd,
-                )
-                return actions
-            if overshoot <= completion_tol_usd + 1e-9:
-                bumped_size = effective_min_usd / price
-                if cap_shares_remaining is not None:
-                    if cap_shares_remaining <= 0:
-                        logger.debug(
-                            "[MIN_BUMP_SKIP] token_id=%s no_remaining cap_shares_remaining=%s "
-                            "planned_notional=%s my_shares=%s price=%s",
-                            token_id,
-                            cap_shares_remaining,
-                            planned_token_notional,
-                            my_shares,
-                            price,
-                        )
-                        return actions
-                    bumped_size = min(bumped_size, cap_shares_remaining)
-                if bumped_size + 1e-12 < effective_min_shares:
-                    logger.debug(
-                        "[MIN_BUMP_SKIP] token_id=%s bumped_below_min bumped=%s min=%s",
-                        token_id,
-                        bumped_size,
-                        effective_min_shares,
-                    )
-                    return actions
-                logger.info(
-                    "[MIN_BUMP_FINAL] token_id=%s gap_usd=%s min_usd=%s overshoot=%s",
-                    token_id,
-                    gap_usd,
-                    effective_min_usd,
-                    overshoot,
-                )
-                size = bumped_size
-            else:
-                logger.debug(
-                    "[MIN_BUMP_SKIP] token_id=%s abs_delta=%s < min=%s gap_usd=%s overshoot=%s",
-                    token_id,
-                    abs_delta,
-                    effective_min_shares,
-                    gap_usd,
-                    overshoot,
-                )
-                return actions
         bumped_size = effective_min_shares
-        if abs_delta > 0:
-            bumped_size = min(bumped_size, abs_delta)
         if cap_shares_remaining is not None:
             if cap_shares_remaining <= 0:
                 logger.debug(
@@ -616,7 +523,7 @@ def reconcile_one(
     if size > max_shares_cap:
         size = max_shares_cap
     if side == "SELL" and not allow_short:
-        size = min(size, sellable_shares)
+        size = min(size, my_shares)
     if size_step > 0 and not small_taker_override:
         size = round_to_step(size, size_step, direction="down")
         if side == "BUY" and size + 1e-12 < effective_min_shares:
@@ -624,7 +531,7 @@ def reconcile_one(
         if size > max_shares_cap:
             size = max_shares_cap
         if side == "SELL" and not allow_short:
-            size = min(size, sellable_shares)
+            size = min(size, my_shares)
     if (
         effective_min_shares > 0
         and size < effective_min_shares
@@ -650,50 +557,8 @@ def reconcile_one(
     if size <= 0:
         return actions
 
-    # Check for maker order timeout: if a BUY order has been open too long, force taker
-    maker_max_wait_sec = int(cfg.get("maker_max_wait_sec") or 0)
-    maker_to_taker_enabled = bool(cfg.get("maker_to_taker_enabled", True))
-    force_taker_for_timeout = False
-    timed_out_orders: List[Dict[str, Any]] = []
-    max_timeout_wait_sec: Optional[int] = None
-    
-    if (
-        maker_to_taker_enabled
-        and maker_max_wait_sec > 0
-        and side == "BUY"
-        and open_orders
-        and not use_taker
-    ):
-        order_ts_by_id = state.get("order_ts_by_id") if state else None
-        if not isinstance(order_ts_by_id, dict):
-            order_ts_by_id = {}
-        for order in open_orders:
-            order_side = str(order.get("side") or "").upper()
-            if order_side != "BUY":
-                continue
-            order_id = str(order.get("order_id") or order.get("id") or "")
-            if not order_id:
-                continue
-            # Get order creation time
-            order_ts = int(order.get("ts") or order_ts_by_id.get(order_id) or now_ts)
-            wait_sec = now_ts - order_ts
-            if wait_sec >= maker_max_wait_sec:
-                timed_out_orders.append(order)
-                if max_timeout_wait_sec is None or wait_sec > max_timeout_wait_sec:
-                    max_timeout_wait_sec = wait_sec
-                logger.info(
-                    "[MAKER_TIMEOUT] token_id=%s order_id=%s wait=%ss (max=%ss), will switch to taker",
-                    token_id,
-                    order_id,
-                    wait_sec,
-                    maker_max_wait_sec,
-                )
-        if timed_out_orders:
-            force_taker_for_timeout = True
-            use_taker = True
-
     if open_orders:
-        if use_taker or force_taker_for_timeout:
+        if use_taker:
             actions = []
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
@@ -715,32 +580,18 @@ def reconcile_one(
                         "price": price,
                         "size": size,
                         "ts": now_ts,
-                        **(
-                            {"_available_shares": sellable_shares}
-                            if side == "SELL" and not allow_short
-                            else {}
-                        ),
                         "_taker": True,
                         "_taker_spread": spread,
                         "_taker_thr": taker_spread_thr,
                     }
                 )
-            if force_taker_for_timeout:
-                wait_for_log = max_timeout_wait_sec or maker_max_wait_sec
-                logger.info(
-                    "[SWITCH_TO_TAKER] token_id=%s side=%s reason=maker_timeout wait=%ss",
-                    token_id,
-                    side,
-                    wait_for_log,
-                )
-            else:
-                logger.info(
-                    "[SWITCH_TO_TAKER] token_id=%s side=%s spread=%s thr=%s",
-                    token_id,
-                    side,
-                    spread,
-                    taker_spread_thr,
-                )
+            logger.info(
+                "[SWITCH_TO_TAKER] token_id=%s side=%s spread=%s thr=%s",
+                token_id,
+                side,
+                spread,
+                taker_spread_thr,
+            )
             return actions
         if is_exiting and side == "SELL" and bool(cfg.get("exit_full_sell", True)):
             eps = 1e-9
@@ -769,9 +620,8 @@ def reconcile_one(
                         "token_id": token_id,
                         "side": "SELL",
                         "price": price,
-                        "size": min(abs_delta, sellable_shares),
+                        "size": abs_delta,
                         "ts": now_ts,
-                        "_available_shares": sellable_shares,
                         "_exit_consolidate": True,
                     }
                 )
@@ -850,11 +700,6 @@ def reconcile_one(
             "size": size,
             "ts": now_ts,
             **(
-                {"_available_shares": sellable_shares}
-                if side == "SELL" and not allow_short
-                else {}
-            ),
-            **(
                 {
                     "_taker": True,
                     "_taker_spread": spread,
@@ -906,26 +751,24 @@ def _extract_order_id(response: object) -> Optional[str]:
     return walk(response)
 
 
-def cancel_order(
-    client: Any, order_id: str, timeout: Optional[float] = None
-) -> Optional[object]:
+def cancel_order(client: Any, order_id: str) -> Optional[object]:
     if not order_id:
         return None
     if callable(getattr(client, "cancel", None)):
-        return _call_with_timeout(client.cancel, timeout, order_id=order_id)
+        return client.cancel(order_id=order_id)
     if callable(getattr(client, "cancel_order", None)):
-        return _call_with_timeout(client.cancel_order, timeout, order_id)
+        return client.cancel_order(order_id)
     if callable(getattr(client, "cancel_orders", None)):
-        return _call_with_timeout(client.cancel_orders, timeout, [order_id])
+        return client.cancel_orders([order_id])
 
     private = getattr(client, "private", None)
     if private is not None:
         if callable(getattr(private, "cancel", None)):
-            return _call_with_timeout(private.cancel, timeout, order_id=order_id)
+            return private.cancel(order_id=order_id)
         if callable(getattr(private, "cancel_order", None)):
-            return _call_with_timeout(private.cancel_order, timeout, order_id)
+            return private.cancel_order(order_id)
         if callable(getattr(private, "cancel_orders", None)):
-            return _call_with_timeout(private.cancel_orders, timeout, [order_id])
+            return private.cancel_orders([order_id])
 
     return None
 
@@ -976,7 +819,6 @@ def place_order(
     price: float,
     size: float,
     allow_partial: bool = True,
-    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY, SELL
@@ -1004,17 +846,11 @@ def place_order(
     signed = client.create_order(order_args)
     if allow_partial and allow_partial_key is None:
         try:
-            response = _call_with_timeout(
-                client.post_order,
-                timeout,
-                signed,
-                OrderType.GTC,
-                allow_partial=True,
-            )
+            response = client.post_order(signed, OrderType.GTC, allow_partial=True)
         except TypeError:
-            response = _call_with_timeout(client.post_order, timeout, signed, OrderType.GTC)
+            response = client.post_order(signed, OrderType.GTC)
     else:
-        response = _call_with_timeout(client.post_order, timeout, signed, OrderType.GTC)
+        response = client.post_order(signed, OrderType.GTC)
     order_id = _extract_order_id(response)
     result: Dict[str, Any] = {"response": response}
     if order_id:
@@ -1029,7 +865,6 @@ def place_market_order(
     amount: float,
     price: Optional[float] = None,
     order_type: str = "FAK",
-    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Taker path via MarketOrderArgs.
@@ -1069,7 +904,7 @@ def place_market_order(
     if ot is None:
         ot = getattr(OrderType, "FAK", None) or getattr(OrderType, "FOK")
 
-    response = _call_with_timeout(client.post_order, timeout, signed, ot)
+    response = client.post_order(signed, ot)
     order_id = _extract_order_id(response)
     result: Dict[str, Any] = {"response": response}
     if order_id:
@@ -1088,14 +923,6 @@ def apply_actions(
     planned_by_token_usd: Optional[Dict[str, float]] = None,
 ) -> List[Dict[str, Any]]:
     updated = [dict(order) for order in open_orders]
-    api_timeout_sec: Optional[float] = None
-    if cfg is not None:
-        try:
-            api_timeout_sec = float(cfg.get("api_timeout_sec") or 15.0)
-        except Exception:
-            api_timeout_sec = 15.0
-        if api_timeout_sec <= 0:
-            api_timeout_sec = None
 
     def _short_msg(value: object, limit: int = 160) -> str:
         text = str(value)
@@ -1134,7 +961,7 @@ def apply_actions(
                 updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
                 continue
             try:
-                cancel_order(client, str(order_id), api_timeout_sec)
+                cancel_order(client, str(order_id))
                 updated = [o for o in updated if str(o.get("order_id")) != str(order_id)]
             except Exception as exc:
                 logger.warning("cancel_order failed order_id=%s: %s", order_id, exc)
@@ -1211,35 +1038,6 @@ def apply_actions(
         side_u = str(action.get("side") or "").upper()
         price = float(action.get("price") or 0.0)
         size = float(action.get("size") or 0.0)
-        # Ensure minimum buy notional (avoid exchange rejection like "min size: $1").
-        if side_u == "BUY" and cfg is not None and price > 0 and size > 0:
-            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-            max_order_usd = float(cfg.get("max_order_usd") or 0.0)
-            effective_min_usd = max(1.0, min_order_usd)
-            if min_order_shares > 0:
-                effective_min_usd = max(effective_min_usd, min_order_shares * price)
-            order_usd = abs(size) * price
-            if order_usd + 1e-9 < effective_min_usd:
-                if max_order_usd > 0 and effective_min_usd > max_order_usd + 1e-9:
-                    logger.warning(
-                        "[MIN_BUY_SKIP] token_id=%s order_usd=%s min_usd=%s max_usd=%s",
-                        action.get("token_id"),
-                        order_usd,
-                        effective_min_usd,
-                        max_order_usd,
-                    )
-                    continue
-                new_size = effective_min_usd / price
-                size = new_size
-                size_for_record = new_size
-                action["size"] = new_size
-                logger.info(
-                    "[MIN_BUY_BUMP] token_id=%s old_usd=%s new_usd=%s",
-                    action.get("token_id"),
-                    order_usd,
-                    effective_min_usd,
-                )
         try:
             if is_taker:
                 if side_u == "BUY" and cfg is not None and planned_by_token_usd is not None:
@@ -1263,17 +1061,23 @@ def apply_actions(
 
                 if side_u == "BUY":
                     amount = abs(size) * price
-                    # Enforce min notional right before sending to avoid rounding drift.
                     if cfg is not None and price > 0:
                         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
                         min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-                        effective_min_usd = max(1.0, min_order_usd)
+                        min_amount = min_order_usd
                         if min_order_shares > 0:
-                            effective_min_usd = max(effective_min_usd, min_order_shares * price)
-                        if amount + 1e-9 < effective_min_usd:
-                            amount = effective_min_usd
+                            min_amount = max(min_amount, min_order_shares * price)
+                        if min_amount > 0 and amount + 1e-12 < min_amount:
+                            old_amount = amount
+                            amount = min_amount
                             size_for_record = amount / price
-                            action["size"] = size_for_record
+                            logger.info(
+                                "[ADJUST_MIN_USD] token_id=%s old=%s new=%s price=%s",
+                                str(action.get("token_id")),
+                                old_amount,
+                                amount,
+                                price,
+                            )
                 else:
                     amount = abs(size)
                 taker_order_type = "FAK"
@@ -1289,18 +1093,8 @@ def apply_actions(
                     amount=amount,
                     price=price,
                     order_type=taker_order_type,
-                    timeout=api_timeout_sec,
                 )
             else:
-                if side_u == "BUY" and cfg is not None and price > 0:
-                    min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-                    min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-                    effective_min_usd = max(1.0, min_order_usd)
-                    if min_order_shares > 0:
-                        effective_min_usd = max(effective_min_usd, min_order_shares * price)
-                    if abs(size) * price + 1e-9 < effective_min_usd:
-                        size_for_record = effective_min_usd / price
-                        action["size"] = size_for_record
                 response = place_order(
                     client,
                     token_id=str(action.get("token_id")),
@@ -1308,7 +1102,6 @@ def apply_actions(
                     price=price,
                     size=size_for_record,
                     allow_partial=allow_partial,
-                    timeout=api_timeout_sec,
                 )
         except Exception as exc:
             logger.warning("place_order failed token_id=%s: %s", action.get("token_id"), exc)
@@ -1324,87 +1117,71 @@ def apply_actions(
                         min_order_usd = float(cfg.get("min_order_usd") or 0.0)
                         min_order_shares = float(cfg.get("min_order_shares") or 0.0)
                         shrink_factor = float(cfg.get("retry_shrink_factor") or 0.5)
-                        max_retry = max(1, int(cfg.get("sell_insufficient_retry_max") or 3))
-                        available_hint = safe_float(action.get("_available_shares")) or 0.0
-                        retry_size = min(size, available_hint) if available_hint > 0 else size
-                        retry_ok = False
-                        for attempt in range(1, max_retry + 1):
-                            old_usd = abs(retry_size) * price
-                            new_usd = max(min_order_usd, old_usd * shrink_factor)
-                            if min_order_shares > 0:
-                                new_usd = max(new_usd, min_order_shares * price)
+                        old_usd = abs(size) * price
+                        new_usd = max(min_order_usd, old_usd * shrink_factor)
+                        if min_order_shares > 0:
+                            new_usd = max(new_usd, min_order_shares * price)
+                        if new_usd < old_usd * (1 - 1e-9):
                             new_size = new_usd / price
-                            if available_hint > 0:
-                                new_size = min(new_size, available_hint)
-                            if new_size >= retry_size * (1 - 1e-9):
-                                break
-                            if min_order_shares > 0 and new_size + 1e-12 < min_order_shares:
-                                break
-                            try:
-                                if is_taker:
-                                    response = place_market_order(
-                                        client,
-                                        token_id=str(action.get("token_id")),
-                                        side=side_u,
-                                        amount=abs(new_size),
-                                        price=price,
-                                        order_type="FAK" if allow_partial else "FOK",
-                                        timeout=api_timeout_sec,
+                            if min_order_shares <= 0 or new_size + 1e-12 >= min_order_shares:
+                                try:
+                                    if is_taker:
+                                        response = place_market_order(
+                                            client,
+                                            token_id=str(action.get("token_id")),
+                                            side=side_u,
+                                            amount=abs(new_size),
+                                            price=price,
+                                            order_type="FAK" if allow_partial else "FOK",
+                                        )
+                                    else:
+                                        response = place_order(
+                                            client,
+                                            token_id=str(action.get("token_id")),
+                                            side=side_u,
+                                            price=price,
+                                            size=new_size,
+                                            allow_partial=allow_partial,
+                                        )
+                                except Exception as retry_exc:
+                                    logger.warning(
+                                        "[RETRY_SELL_FAIL] token_id=%s old_usd=%s new_usd=%s: %s",
+                                        action.get("token_id"),
+                                        old_usd,
+                                        new_usd,
+                                        retry_exc,
                                     )
-                                else:
-                                    response = place_order(
-                                        client,
-                                        token_id=str(action.get("token_id")),
-                                        side=side_u,
-                                        price=price,
-                                        size=new_size,
-                                        allow_partial=allow_partial,
-                                        timeout=api_timeout_sec,
-                                    )
-                            except Exception as retry_exc:
-                                logger.warning(
-                                    "[RETRY_SELL_FAIL] token_id=%s attempt=%s old_usd=%s new_usd=%s: %s",
+                                    _bump_backoff(token_id, "sell_insufficient", str(retry_exc))
+                                    continue
+                                size_for_record = new_size
+                                logger.info(
+                                    "[RETRY_SELL_OK] token_id=%s old_usd=%s new_usd=%s",
                                     action.get("token_id"),
-                                    attempt,
                                     old_usd,
                                     new_usd,
-                                    retry_exc,
                                 )
-                                if not _is_insufficient_balance(retry_exc):
-                                    _bump_backoff(token_id, "sell_insufficient", str(retry_exc))
-                                    break
-                                retry_size = new_size
+                                order_id = response.get("order_id")
+                                if order_id and not is_taker:
+                                    updated.append(
+                                        {
+                                            "order_id": order_id,
+                                            "side": action.get("side"),
+                                            "price": action.get("price"),
+                                            "size": size_for_record,
+                                            "ts": now_ts,
+                                        }
+                                    )
+                                    if state is not None:
+                                        token_id = str(action.get("token_id") or "")
+                                        place_fail_until = state.get("place_fail_until")
+                                        if isinstance(place_fail_until, dict):
+                                            place_fail_until.pop(token_id, None)
+                                        logger.info(
+                                            "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear "
+                                            "place_fail_until",
+                                            token_id,
+                                        )
                                 continue
-                            size_for_record = new_size
-                            retry_ok = True
-                            logger.info(
-                                "[RETRY_SELL_OK] token_id=%s attempt=%s old_usd=%s new_usd=%s",
-                                action.get("token_id"),
-                                attempt,
-                                old_usd,
-                                new_usd,
-                            )
-                            order_id = response.get("order_id")
-                            if order_id and not is_taker:
-                                updated.append(
-                                    {
-                                        "order_id": order_id,
-                                        "side": action.get("side"),
-                                        "price": action.get("price"),
-                                        "size": size_for_record,
-                                        "ts": now_ts,
-                                    }
-                                )
-                            place_fail_until = state.get("place_fail_until")
-                            if isinstance(place_fail_until, dict):
-                                place_fail_until.pop(token_id, None)
-                            logger.info(
-                                "[BACKOFF_CLEAR] token_id=%s place succeeded -> clear place_fail_until",
-                                token_id,
-                            )
-                            break
-                        if retry_ok:
-                            continue
                     _bump_backoff(token_id, "sell_insufficient", str(exc))
                 continue
             if not _is_insufficient_balance(exc):
@@ -1432,7 +1209,6 @@ def apply_actions(
                         amount=abs(new_size) * price,
                         price=price,
                         order_type="FAK" if allow_partial else "FOK",
-                        timeout=api_timeout_sec,
                     )
                 else:
                     response = place_order(
@@ -1442,7 +1218,6 @@ def apply_actions(
                         price=price,
                         size=new_size,
                         allow_partial=allow_partial,
-                        timeout=api_timeout_sec,
                     )
             except Exception as retry_exc:
                 logger.warning(
@@ -1676,9 +1451,7 @@ def _normalize_open_order(order: Any) -> Optional[Dict[str, Any]]:
     }
 
 
-def fetch_open_orders_norm(
-    client: Any, timeout_sec: Optional[float] = None
-) -> tuple[list[dict[str, Any]], bool, str | None]:
+def fetch_open_orders_norm(client: Any) -> tuple[list[dict[str, Any]], bool, str | None]:
     from py_clob_client.clob_types import OpenOrderParams
 
     def _resolve_open_orders_url() -> str | None:
@@ -1695,20 +1468,15 @@ def fetch_open_orders_norm(
         except Exception:
             return False
 
-    def _call_get_orders(params: Any | None, timeout: Optional[float]) -> Any:
+    def _call_get_orders(params: Any | None, timeout: float) -> Any:
         kwargs: Dict[str, Any] = {}
-        if timeout is not None and timeout > 0 and _supports_timeout(client.get_orders):
+        if _supports_timeout(client.get_orders):
             kwargs["timeout"] = timeout
         if params is None:
             return client.get_orders(**kwargs)
         return client.get_orders(params, **kwargs)
 
-    if timeout_sec is None:
-        timeout: Optional[float] = 15.0
-    else:
-        timeout = float(timeout_sec)
-        if timeout <= 0:
-            timeout = None
+    timeout = 15.0
     retry_delays = [0.5, 1.0, 2.0]
     max_attempts = len(retry_delays) + 1
     payload = None
