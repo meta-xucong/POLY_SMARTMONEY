@@ -28,5 +28,9 @@ env/
 **/state.json
 **/state_*.json
 
+# Local dry-run snapshots
+copytrade_config.dryrun_*.json
+**/copytrade_config.dryrun_*.json
+
 # Test / tooling caches
 **/.pytest_cache/
