@@ -927,6 +927,34 @@ def _should_hold_reentry_buy(
     return True, "cooldown_hold"
 
 
+def _topic_risk_decay_score(score: float, elapsed_sec: int, window_sec: int) -> float:
+    """Exponentially decay topic risk score over time."""
+    score_f = float(score or 0.0)
+    if score_f <= 0:
+        return 0.0
+    if elapsed_sec <= 0 or window_sec <= 0:
+        return max(0.0, score_f)
+    try:
+        return max(0.0, score_f * math.exp(-float(elapsed_sec) / max(1.0, float(window_sec))))
+    except Exception:
+        return max(0.0, score_f)
+
+
+def _orderbook_min_order_shares(orderbook: Dict[str, Any] | None) -> float:
+    """Extract market min order size from orderbook payload when available."""
+    if not isinstance(orderbook, dict):
+        return 0.0
+    for key in ("min_order_size", "minimum_order_size", "minOrderSize"):
+        raw = orderbook.get(key)
+        try:
+            val = float(raw or 0.0)
+        except Exception:
+            continue
+        if val > 0:
+            return val
+    return 0.0
+
+
 def _book_min_order_shares(
     client: Any,
     token_id: str,
@@ -3617,6 +3645,19 @@ def main() -> None:
         reentry_cooldown_sec = max(0, int(cfg.get("reentry_cooldown_sec") or 0))
         reentry_force_buy_shares = max(0.0, float(cfg.get("reentry_force_buy_shares") or 0.0))
         reentry_force_buy_usd = max(0.0, float(cfg.get("reentry_force_buy_usd") or 0.0))
+        topic_risk_overlay_enabled = bool(cfg.get("topic_risk_overlay_enabled", True))
+        topic_risk_flip_window_sec = max(30, int(cfg.get("topic_risk_flip_window_sec") or 900))
+        topic_risk_l1_threshold = float(cfg.get("topic_risk_l1_threshold") or 2.0)
+        topic_risk_l2_threshold = float(cfg.get("topic_risk_l2_threshold") or 4.0)
+        if topic_risk_l2_threshold <= topic_risk_l1_threshold:
+            topic_risk_l2_threshold = topic_risk_l1_threshold + 0.5
+        topic_risk_l2_freeze_sec = max(60, int(cfg.get("topic_risk_l2_freeze_sec") or 1800))
+        topic_risk_l1_follow_mult = max(
+            0.0, min(1.0, float(cfg.get("topic_risk_l1_follow_mult") or 0.5))
+        )
+        topic_risk_l1_deadband_mult = max(1.0, float(cfg.get("topic_risk_l1_deadband_mult") or 1.5))
+        topic_risk_l1_reentry_mult = max(1.0, float(cfg.get("topic_risk_l1_reentry_mult") or 2.0))
+        topic_risk_book_min_shares_cache: Dict[str, float] = {}
         must_exit_fresh_sell_window_sec = max(
             60, int(cfg.get("must_exit_fresh_sell_window_sec") or 1800)
         )
@@ -5256,6 +5297,13 @@ def main() -> None:
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
+            base_deadband_shares = float(cfg.get("deadband_shares") or 0.0)
+            token_deadband_shares = base_deadband_shares
+            token_reentry_cooldown_sec = reentry_cooldown_sec
+            topic_risk_level = int(st.get("topic_risk_level") or 0)
+            topic_risk_score = float(st.get("topic_risk_score") or 0.0)
+            topic_risk_freeze_buy_until = int(st.get("topic_risk_freeze_buy_until") or 0)
+            topic_risk_action_hint = f"L{max(0, topic_risk_level)}"
             if _should_clear_stale_must_exit_on_buy(
                 must_exit_active=must_exit_active,
                 must_exit_fresh=must_exit_fresh,
@@ -6018,12 +6066,48 @@ def main() -> None:
                             continue
                         if side == "BUY":
                             order_notional = abs(size) * price
+                            if topic_risk_overlay_enabled and topic_risk_level >= 1:
+                                cfg_for_topic_risk = cfg_lowp if is_lowp else cfg
+                                min_shares_cfg = float(cfg_for_topic_risk.get("min_order_shares") or 0.0)
+                                api_min_shares = _orderbook_min_order_shares(ob)
+                                if api_min_shares <= 0:
+                                    api_min_shares = float(
+                                        topic_risk_book_min_shares_cache.get(token_id) or 0.0
+                                    )
+                                    if api_min_shares <= 0:
+                                        api_min_shares = _book_min_order_shares(
+                                            clob_client, token_id, api_timeout_sec
+                                        )
+                                        topic_risk_book_min_shares_cache[token_id] = float(
+                                            api_min_shares or 0.0
+                                        )
+                                effective_min_shares_guard = max(min_shares_cfg, api_min_shares)
+                                min_order_usd_guard = float(cfg_for_topic_risk.get("min_order_usd") or 0.0)
+                                effective_min_usd_guard = max(
+                                    min_order_usd_guard,
+                                    (effective_min_shares_guard * price)
+                                    if effective_min_shares_guard > 0 and price > 0
+                                    else 0.0,
+                                )
+                                if (
+                                    effective_min_usd_guard > 0
+                                    and order_notional + 1e-9 < effective_min_usd_guard
+                                ):
+                                    blocked_reasons.add("topic_risk_below_min")
+                                    logger.info(
+                                        "[HOLD] token_id=%s reason=topic_risk_below_min level=L%s order_usd=%.6f min_usd=%.6f",
+                                        token_id,
+                                        int(topic_risk_level),
+                                        order_notional,
+                                        effective_min_usd_guard,
+                                    )
+                                    continue
                             last_exit_ts = int(last_exit_ts_by_token.get(token_id) or 0)
                             hold_buy, hold_reason = _should_hold_reentry_buy(
                                 now_ts=now_ts,
                                 my_shares=my_shares,
                                 last_exit_ts=last_exit_ts,
-                                reentry_cooldown_sec=reentry_cooldown_sec,
+                                reentry_cooldown_sec=token_reentry_cooldown_sec,
                                 signal_buy_shares=abs(delta),
                                 order_buy_shares=abs(size),
                                 order_buy_usd=order_notional,
@@ -6037,7 +6121,7 @@ def main() -> None:
                                 should_log, suppressed = _log_dedup.should_log(dedup_key)
                                 if should_log:
                                     remain = max(
-                                        0, reentry_cooldown_sec - max(0, now_ts - last_exit_ts)
+                                        0, token_reentry_cooldown_sec - max(0, now_ts - last_exit_ts)
                                     )
                                     if suppressed > 0:
                                         logger.info(
@@ -6392,7 +6476,12 @@ def main() -> None:
                                     logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
                         continue
                     actions = filtered_actions
-                    logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+                    logger.info(
+                        "[ACTION] token_id=%s topic_risk=%s -> %s",
+                        token_id,
+                        topic_risk_action_hint,
+                        actions,
+                    )
 
                     is_reprice = _is_pure_reprice(actions)
                     missing_freeze = state.setdefault("missing_data_freeze", {})
@@ -6859,7 +6948,72 @@ def main() -> None:
                 (max_notional_per_token / ref_price) if max_notional_per_token > 0 else float("inf")
             )
 
+            if topic_risk_overlay_enabled and topic_mode:
+                prev_level = int(topic_risk_level)
+                prev_eval_ts = int(st.get("topic_risk_last_eval_ts") or 0)
+                if prev_eval_ts > 0:
+                    topic_risk_score = _topic_risk_decay_score(
+                        topic_risk_score,
+                        max(0, now_ts - prev_eval_ts),
+                        topic_risk_flip_window_sec,
+                    )
+                signal_side = "BUY" if d_target > eps else ("SELL" if d_target < -eps else "")
+                last_side = str(st.get("topic_risk_last_side") or "")
+                last_side_ts = int(st.get("topic_risk_last_side_ts") or 0)
+                if signal_side:
+                    if last_side and signal_side != last_side:
+                        flip_gap = max(0, now_ts - last_side_ts) if last_side_ts > 0 else 0
+                        if last_side_ts <= 0 or flip_gap <= topic_risk_flip_window_sec:
+                            topic_risk_score += 1.0
+                            st["topic_risk_last_flip_ts"] = int(now_ts)
+                    st["topic_risk_last_side"] = signal_side
+                    st["topic_risk_last_side_ts"] = int(now_ts)
+                if topic_risk_freeze_buy_until > now_ts:
+                    topic_risk_level = 2
+                elif topic_risk_score >= topic_risk_l2_threshold:
+                    topic_risk_level = 2
+                    topic_risk_freeze_buy_until = int(now_ts + topic_risk_l2_freeze_sec)
+                elif topic_risk_score >= topic_risk_l1_threshold:
+                    topic_risk_level = 1
+                    if topic_risk_freeze_buy_until <= now_ts:
+                        topic_risk_freeze_buy_until = 0
+                else:
+                    topic_risk_level = 0
+                    if topic_risk_freeze_buy_until <= now_ts:
+                        topic_risk_freeze_buy_until = 0
+                st["topic_risk_score"] = float(topic_risk_score)
+                st["topic_risk_level"] = int(topic_risk_level)
+                st["topic_risk_freeze_buy_until"] = int(topic_risk_freeze_buy_until)
+                st["topic_risk_last_eval_ts"] = int(now_ts)
+                topic_state[token_id] = st
+                if topic_risk_level != prev_level:
+                    logger.info(
+                        "[TOPIC_RISK] token_id=%s level=L%s score=%.3f freeze_buy_until=%s",
+                        token_id,
+                        topic_risk_level,
+                        topic_risk_score,
+                        topic_risk_freeze_buy_until,
+                    )
+                topic_risk_action_hint = (
+                    f"L{int(topic_risk_level)}|score={topic_risk_score:.2f}|freeze={int(topic_risk_freeze_buy_until)}"
+                )
+
             use_ratio = ratio_buy if d_target > 0 else ratio_base
+            overlay_buy_frozen = False
+            if topic_risk_overlay_enabled and d_target > 0:
+                if topic_risk_level >= 2 and topic_risk_freeze_buy_until > now_ts:
+                    overlay_buy_frozen = True
+                    use_ratio = 0.0
+                elif topic_risk_level >= 1:
+                    use_ratio *= topic_risk_l1_follow_mult
+                    token_deadband_shares = max(
+                        token_deadband_shares,
+                        base_deadband_shares * topic_risk_l1_deadband_mult,
+                    )
+                    token_reentry_cooldown_sec = max(
+                        token_reentry_cooldown_sec,
+                        int(round(token_reentry_cooldown_sec * topic_risk_l1_reentry_mult)),
+                    )
             d_my = use_ratio * d_target
             if d_target > 0:
                 logger.info(
@@ -7111,7 +7265,7 @@ def main() -> None:
                 for order in open_orders
                 if str(order.get("side") or "").upper() == desired_side
             ]
-            deadband_shares = float(cfg.get("deadband_shares") or 0.0)
+            deadband_shares = token_deadband_shares
             if abs(delta) <= deadband_shares and not open_orders_for_reconcile:
                 dedup_key = f"NOOP:{token_id}:deadband"
                 should_log, suppressed = _log_dedup.should_log(dedup_key)
@@ -7263,12 +7417,48 @@ def main() -> None:
                     continue
                 if side == "BUY":
                     order_notional = abs(size) * price
+                    if topic_risk_overlay_enabled and topic_risk_level >= 1:
+                        cfg_for_topic_risk = cfg_lowp if is_lowp else cfg
+                        min_shares_cfg = float(cfg_for_topic_risk.get("min_order_shares") or 0.0)
+                        api_min_shares = _orderbook_min_order_shares(ob)
+                        if api_min_shares <= 0:
+                            api_min_shares = float(
+                                topic_risk_book_min_shares_cache.get(token_id) or 0.0
+                            )
+                            if api_min_shares <= 0:
+                                api_min_shares = _book_min_order_shares(
+                                    clob_client, token_id, api_timeout_sec
+                                )
+                                topic_risk_book_min_shares_cache[token_id] = float(
+                                    api_min_shares or 0.0
+                                )
+                        effective_min_shares_guard = max(min_shares_cfg, api_min_shares)
+                        min_order_usd_guard = float(cfg_for_topic_risk.get("min_order_usd") or 0.0)
+                        effective_min_usd_guard = max(
+                            min_order_usd_guard,
+                            (effective_min_shares_guard * price)
+                            if effective_min_shares_guard > 0 and price > 0
+                            else 0.0,
+                        )
+                        if (
+                            effective_min_usd_guard > 0
+                            and order_notional + 1e-9 < effective_min_usd_guard
+                        ):
+                            blocked_reasons.add("topic_risk_below_min")
+                            logger.info(
+                                "[HOLD] token_id=%s reason=topic_risk_below_min level=L%s order_usd=%.6f min_usd=%.6f",
+                                token_id,
+                                int(topic_risk_level),
+                                order_notional,
+                                effective_min_usd_guard,
+                            )
+                            continue
                     last_exit_ts = int(last_exit_ts_by_token.get(token_id) or 0)
                     hold_buy, hold_reason = _should_hold_reentry_buy(
                         now_ts=now_ts,
                         my_shares=my_shares,
                         last_exit_ts=last_exit_ts,
-                        reentry_cooldown_sec=reentry_cooldown_sec,
+                        reentry_cooldown_sec=token_reentry_cooldown_sec,
                         signal_buy_shares=max(0.0, float(d_my)),
                         order_buy_shares=abs(size),
                         order_buy_usd=order_notional,
@@ -7281,7 +7471,7 @@ def main() -> None:
                         dedup_key = f"HOLD:{token_id}:reentry_cooldown"
                         should_log, suppressed = _log_dedup.should_log(dedup_key)
                         if should_log:
-                            remain = max(0, reentry_cooldown_sec - max(0, now_ts - last_exit_ts))
+                            remain = max(0, token_reentry_cooldown_sec - max(0, now_ts - last_exit_ts))
                             if suppressed > 0:
                                 logger.info(
                                     "[HOLD] token_id=%s reason=reentry_cooldown remain=%ss "
@@ -7689,7 +7879,12 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             actions = filtered_actions
-            logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+            logger.info(
+                "[ACTION] token_id=%s topic_risk=%s -> %s",
+                token_id,
+                topic_risk_action_hint,
+                actions,
+            )
 
             is_reprice = _is_pure_reprice(actions)
             has_exit_sell_place = any(

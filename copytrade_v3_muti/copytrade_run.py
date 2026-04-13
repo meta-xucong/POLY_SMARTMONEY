@@ -5,6 +5,7 @@ import json
 import glob
 import logging
 import logging.handlers
+import math
 import os
 import re
 import random
@@ -682,6 +683,81 @@ def _cfg_bool(value: Any, default: bool = False) -> bool:
         if text in {"0", "false", "no", "n", "off", "disable", "disabled", ""}:
             return False
     return bool(value)
+
+
+def _should_accept_buy_action_source(
+    mode: str,
+    source_target: str,
+    preferred_source: str,
+) -> bool:
+    """Filter BUY signal source in multi-target mode."""
+    mode_norm = str(mode or "all").strip().lower()
+    if mode_norm in ("position_source", "position_source_consistent"):
+        if preferred_source and source_target and source_target != preferred_source:
+            return False
+    return True
+
+
+def _should_hold_reentry_buy(
+    *,
+    now_ts: int,
+    my_shares: float,
+    last_exit_ts: int,
+    reentry_cooldown_sec: int,
+    signal_buy_shares: float,
+    order_buy_shares: float,
+    order_buy_usd: float,
+    force_buy_shares: float,
+    force_buy_usd: float,
+    eps: float,
+) -> tuple[bool, str]:
+    """
+    Hold BUY for a short window after a completed exit to avoid whipsaw churn.
+    SELL path is intentionally never blocked here.
+    """
+    if reentry_cooldown_sec <= 0 or last_exit_ts <= 0:
+        return False, "disabled_or_no_exit"
+    if my_shares > eps:
+        return False, "has_inventory"
+    elapsed = int(now_ts - last_exit_ts)
+    if elapsed < 0 or elapsed >= reentry_cooldown_sec:
+        return False, "outside_window"
+    strong_by_shares = (
+        force_buy_shares > 0
+        and max(signal_buy_shares, order_buy_shares) >= force_buy_shares
+    )
+    strong_by_usd = force_buy_usd > 0 and order_buy_usd >= force_buy_usd
+    if strong_by_shares or strong_by_usd:
+        return False, "force_override"
+    return True, "cooldown_hold"
+
+
+def _topic_risk_decay_score(score: float, elapsed_sec: int, window_sec: int) -> float:
+    """Exponentially decay topic risk score over time."""
+    score_f = float(score or 0.0)
+    if score_f <= 0:
+        return 0.0
+    if elapsed_sec <= 0 or window_sec <= 0:
+        return max(0.0, score_f)
+    try:
+        return max(0.0, score_f * math.exp(-float(elapsed_sec) / max(1.0, float(window_sec))))
+    except Exception:
+        return max(0.0, score_f)
+
+
+def _orderbook_min_order_shares(orderbook: Dict[str, Any] | None) -> float:
+    """Extract market min order size from orderbook payload when available."""
+    if not isinstance(orderbook, dict):
+        return 0.0
+    for key in ("min_order_size", "minimum_order_size", "minOrderSize"):
+        raw = orderbook.get(key)
+        try:
+            val = float(raw or 0.0)
+        except Exception:
+            continue
+        if val > 0:
+            return val
+    return 0.0
 
 
 def _book_min_order_shares(
@@ -1887,6 +1963,81 @@ def _refresh_managed_order_ids(state: Dict[str, Any]) -> None:
     state["managed_order_ids"] = sorted(managed_ids)
 
 
+_MUST_EXIT_SOURCE_PRIORITY: Dict[str, int] = {
+    "target_sell_action": 100,
+    "topic_exit_signal": 80,
+    "topic_exit_recover": 70,
+    "sell_confirm_drop": 60,
+    "hemostasis_candidate": 50,
+    "hemostasis_seed": 40,
+    "reconcile_loop": 10,
+}
+
+
+def _must_exit_source_priority(source: str) -> int:
+    return int(_MUST_EXIT_SOURCE_PRIORITY.get(str(source or "").strip().lower(), 20))
+
+
+def _get_must_exit_signal_ms(meta: Dict[str, Any], last_target_sell_ms: int = 0) -> int:
+    signal_ms = 0
+    if isinstance(meta, dict):
+        try:
+            signal_ms = max(signal_ms, int(meta.get("target_sell_ms") or 0))
+        except Exception:
+            pass
+        try:
+            signal_ms = max(signal_ms, int(meta.get("signal_ms") or 0))
+        except Exception:
+            pass
+        try:
+            last_ts = int(meta.get("last_ts") or meta.get("first_ts") or 0)
+        except Exception:
+            last_ts = 0
+        if last_ts > 0:
+            signal_ms = max(signal_ms, last_ts * 1000)
+    try:
+        signal_ms = max(signal_ms, int(last_target_sell_ms or 0))
+    except Exception:
+        pass
+    return int(max(0, signal_ms))
+
+
+def _is_must_exit_fresh(
+    *,
+    meta: Dict[str, Any],
+    last_target_sell_ms: int,
+    now_ms: int,
+    fresh_window_sec: int,
+) -> bool:
+    if not isinstance(meta, dict):
+        return False
+    if fresh_window_sec <= 0:
+        return True
+    signal_ms = _get_must_exit_signal_ms(meta, last_target_sell_ms=last_target_sell_ms)
+    if signal_ms <= 0:
+        return False
+    return (now_ms - signal_ms) <= max(1, int(fresh_window_sec)) * 1000
+
+
+def _should_clear_stale_must_exit_on_buy(
+    *,
+    must_exit_active: bool,
+    must_exit_fresh: bool,
+    t_now_present: bool,
+    t_now: Optional[float],
+    has_buy: bool,
+    buy_sum: float,
+    min_target_buy_shares: float,
+) -> bool:
+    if not must_exit_active or must_exit_fresh:
+        return False
+    if not t_now_present or float(t_now or 0.0) <= 0:
+        return False
+    if not has_buy:
+        return False
+    return float(buy_sum or 0.0) >= max(0.0, float(min_target_buy_shares or 0.0))
+
+
 def _mark_must_exit_token(
     state: Dict[str, Any],
     token_id: str,
@@ -1908,10 +2059,23 @@ def _mark_must_exit_token(
         }
     if int(meta.get("first_ts") or 0) <= 0:
         meta["first_ts"] = int(now_ts)
-    meta["last_ts"] = int(now_ts)
-    meta["source"] = str(source or "unknown")
+    source = str(source or "unknown")
+    old_source = str(meta.get("source") or "")
+    old_priority = _must_exit_source_priority(old_source)
+    new_priority = _must_exit_source_priority(source)
+    if not old_source or new_priority >= old_priority:
+        meta["source"] = source
+    # Do not keep stale must_exit alive forever: weak reconcile-loop touches
+    # without fresh target SELL evidence should not refresh last_ts.
+    if not (source == "reconcile_loop" and int(target_sell_ms or 0) <= 0):
+        meta["last_ts"] = int(now_ts)
     if int(target_sell_ms or 0) > int(meta.get("target_sell_ms") or 0):
         meta["target_sell_ms"] = int(target_sell_ms)
+    # Track signal freshness in ms for stale-must-exit unlock.
+    if int(target_sell_ms or 0) > 0:
+        meta["signal_ms"] = max(int(meta.get("signal_ms") or 0), int(target_sell_ms))
+    elif new_priority >= 60:
+        meta["signal_ms"] = max(int(meta.get("signal_ms") or 0), int(now_ts) * 1000)
     must_exit[token_id] = meta
 
 
@@ -2514,6 +2678,7 @@ def main() -> None:
         state["target_last_seen_ts"] = {}
         state["target_missing_streak"] = {}
         state["last_target_sell_action_ts_by_token"] = {}
+        state["last_exit_ts_by_token"] = {}
         state["topic_state"] = {}
         state["open_orders"] = {}
         state["open_orders_all"] = []
@@ -2560,6 +2725,7 @@ def main() -> None:
     state.setdefault("target_last_seen_ts", {})
     state.setdefault("target_missing_streak", {})
     state.setdefault("last_target_sell_action_ts_by_token", {})
+    state.setdefault("last_exit_ts_by_token", {})
     state.setdefault("cooldown_until", {})
     state.setdefault("target_last_event_ts", {})
     state.setdefault("topic_state", {})
@@ -2613,6 +2779,8 @@ def main() -> None:
         state["target_missing_streak"] = {}
     if not isinstance(state.get("last_target_sell_action_ts_by_token"), dict):
         state["last_target_sell_action_ts_by_token"] = {}
+    if not isinstance(state.get("last_exit_ts_by_token"), dict):
+        state["last_exit_ts_by_token"] = {}
     if not isinstance(state.get("cooldown_until"), dict):
         state["cooldown_until"] = {}
     if not isinstance(state.get("target_last_event_ts"), dict):
@@ -3236,6 +3404,29 @@ def main() -> None:
         sell_confirm_force_ratio = 0.5 if force_ratio_raw is None else float(force_ratio_raw)
         force_shares_raw = cfg.get("sell_confirm_force_shares")
         sell_confirm_force_shares = 0.0 if force_shares_raw is None else float(force_shares_raw)
+        reentry_cooldown_sec = max(0, int(cfg.get("reentry_cooldown_sec") or 0))
+        reentry_force_buy_shares = max(0.0, float(cfg.get("reentry_force_buy_shares") or 0.0))
+        reentry_force_buy_usd = max(0.0, float(cfg.get("reentry_force_buy_usd") or 0.0))
+        topic_risk_overlay_enabled = bool(cfg.get("topic_risk_overlay_enabled", True))
+        topic_risk_flip_window_sec = max(30, int(cfg.get("topic_risk_flip_window_sec") or 900))
+        topic_risk_l1_threshold = float(cfg.get("topic_risk_l1_threshold") or 2.0)
+        topic_risk_l2_threshold = float(cfg.get("topic_risk_l2_threshold") or 4.0)
+        if topic_risk_l2_threshold <= topic_risk_l1_threshold:
+            topic_risk_l2_threshold = topic_risk_l1_threshold + 0.5
+        topic_risk_l2_freeze_sec = max(60, int(cfg.get("topic_risk_l2_freeze_sec") or 1800))
+        topic_risk_l1_follow_mult = max(
+            0.0, min(1.0, float(cfg.get("topic_risk_l1_follow_mult") or 0.5))
+        )
+        topic_risk_l1_deadband_mult = max(1.0, float(cfg.get("topic_risk_l1_deadband_mult") or 1.5))
+        topic_risk_l1_reentry_mult = max(1.0, float(cfg.get("topic_risk_l1_reentry_mult") or 2.0))
+        topic_risk_book_min_shares_cache: Dict[str, float] = {}
+        must_exit_fresh_sell_window_sec = max(
+            60, int(cfg.get("must_exit_fresh_sell_window_sec") or 1800)
+        )
+        must_exit_clear_on_buy_min_target_shares = max(
+            0.0, float(cfg.get("must_exit_clear_on_buy_min_target_shares") or 1.0)
+        )
+        buy_actions_source_mode = str(cfg.get("buy_actions_source_mode") or "all").strip().lower()
         lag_ms = 0
         now_ms = int(now_ts * 1000)
         replay_from_ms = int(state.get("actions_replay_from_ms") or 0)
@@ -3253,6 +3444,9 @@ def main() -> None:
         last_target_sell_action_ts_by_token = state.setdefault(
             "last_target_sell_action_ts_by_token", {}
         )
+        last_exit_ts_by_token = state.setdefault("last_exit_ts_by_token", {})
+        position_source = dict(cached_position_source)
+        buy_source_filtered = 0
 
         def _record_action(token_id: str, side: str, size: float, action_ms: int = 0) -> None:
             if not token_id or size <= 0:
@@ -3326,12 +3520,22 @@ def main() -> None:
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             action_ms = _action_ms(action)
+            source_target = str(action.get("_source_target") or "").strip().lower()
 
             token_id = action.get("token_id") or _extract_token_id_from_raw(
                 action.get("raw") or {}
             )
             if token_id:
                 tid = str(token_id)
+                if side == "BUY":
+                    preferred_source = str(position_source.get(tid) or "").strip().lower()
+                    if not _should_accept_buy_action_source(
+                        buy_actions_source_mode,
+                        source_target,
+                        preferred_source,
+                    ):
+                        buy_source_filtered += 1
+                        continue
                 action["token_id"] = tid
                 _record_action(tid, side, size, action_ms)
             else:
@@ -3354,6 +3558,12 @@ def main() -> None:
             logger.warning(
                 "[ACT] token_missing_ratio=%.3f",
                 actions_missing_ratio,
+            )
+        if buy_source_filtered > 0:
+            logger.info(
+                "[ACT] buy_source_filtered=%s mode=%s",
+                buy_source_filtered,
+                buy_actions_source_mode,
             )
         latest_action_ms = int(actions_info.get("latest_ms") or 0)
         actions_ok = bool(actions_info.get("ok"))
@@ -3921,8 +4131,19 @@ def main() -> None:
         for action in actions_list:
             token_id = action.get("token_id")
             token_key = action.get("token_key")
+            source_target = str(action.get("_source_target") or "").strip().lower()
             if token_id:
                 token_key_by_token_id.setdefault(str(token_id), str(token_key or ""))
+                side = str(action.get("side") or "").upper()
+                if side == "BUY":
+                    preferred_source = str(position_source.get(str(token_id)) or "").strip().lower()
+                    if not _should_accept_buy_action_source(
+                        buy_actions_source_mode,
+                        source_target,
+                        preferred_source,
+                    ):
+                        buy_source_filtered += 1
+                        continue
                 continue
             if not token_key:
                 continue
@@ -3932,6 +4153,15 @@ def main() -> None:
                 token_map[str(token_key)] = tid
                 token_key_by_token_id.setdefault(tid, str(token_key))
                 side = str(action.get("side") or "").upper()
+                if side == "BUY":
+                    preferred_source = str(position_source.get(tid) or "").strip().lower()
+                    if not _should_accept_buy_action_source(
+                        buy_actions_source_mode,
+                        source_target,
+                        preferred_source,
+                    ):
+                        buy_source_filtered += 1
+                        continue
                 size = float(action.get("size") or 0.0)
                 _record_action(tid, side, size)
                 continue
@@ -3964,6 +4194,15 @@ def main() -> None:
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             tid = str(token_id)
+            if side == "BUY":
+                preferred_source = str(position_source.get(tid) or "").strip().lower()
+                if not _should_accept_buy_action_source(
+                    buy_actions_source_mode,
+                    source_target,
+                    preferred_source,
+                ):
+                    buy_source_filtered += 1
+                    continue
             token_map[str(token_key)] = tid
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
@@ -4462,6 +4701,17 @@ def main() -> None:
         for token_id in reconcile_set:
             must_exit_meta = must_exit_tokens.get(token_id)
             must_exit_active = isinstance(must_exit_meta, dict)
+            last_target_sell_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
+            must_exit_fresh = (
+                _is_must_exit_fresh(
+                    meta=must_exit_meta,
+                    last_target_sell_ms=last_target_sell_ms,
+                    now_ms=now_ms,
+                    fresh_window_sec=must_exit_fresh_sell_window_sec,
+                )
+                if must_exit_active
+                else False
+            )
             if token_id in active_ignored and (not must_exit_active):
                 continue
             if token_id in active_ignored and must_exit_active:
@@ -4782,13 +5032,45 @@ def main() -> None:
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
+            base_deadband_shares = float(cfg.get("deadband_shares") or 0.0)
+            token_deadband_shares = base_deadband_shares
+            token_reentry_cooldown_sec = reentry_cooldown_sec
+            topic_risk_level = int(st.get("topic_risk_level") or 0)
+            topic_risk_score = float(st.get("topic_risk_score") or 0.0)
+            topic_risk_freeze_buy_until = int(st.get("topic_risk_freeze_buy_until") or 0)
+            topic_risk_action_hint = f"L{max(0, topic_risk_level)}"
+            if _should_clear_stale_must_exit_on_buy(
+                must_exit_active=must_exit_active,
+                must_exit_fresh=must_exit_fresh,
+                t_now_present=t_now_present,
+                t_now=t_now,
+                has_buy=has_buy,
+                buy_sum=buy_sum,
+                min_target_buy_shares=must_exit_clear_on_buy_min_target_shares,
+            ):
+                must_exit_tokens.pop(token_id, None)
+                if phase == "EXITING":
+                    st["phase"] = "LONG"
+                    st["first_sell_ts"] = 0
+                    topic_state[token_id] = st
+                    phase = "LONG"
+                must_exit_meta = None
+                must_exit_active = False
+                must_exit_fresh = False
+                logger.warning(
+                    "[MUST_EXIT_CLEAR] token_id=%s reason=stale_with_fresh_buy buy_sum=%.6f target_now=%.6f window_sec=%s",
+                    token_id,
+                    buy_sum,
+                    float(t_now or 0.0),
+                    must_exit_fresh_sell_window_sec,
+                )
             if must_exit_active:
                 _mark_must_exit_token(
                     state,
                     token_id,
                     now_ts,
                     source="reconcile_loop",
-                    target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
+                    target_sell_ms=last_target_sell_ms,
                 )
                 if phase != "EXITING" and (my_shares > eps or open_orders_count > 0):
                     st = {
@@ -4817,6 +5099,7 @@ def main() -> None:
                 ):
                     must_exit_tokens.pop(token_id, None)
                     last_nonzero_my_shares.pop(token_id, None)
+                    last_exit_ts_by_token[token_id] = int(now_ts)
                     must_exit_active = False
                     logger.info(
                         "[MUST_EXIT] token_id=%s clear reason=no_inventory_no_orders",
@@ -4986,6 +5269,7 @@ def main() -> None:
                     topic_state.pop(token_id, None)
                     must_exit_tokens.pop(token_id, None)
                     last_nonzero_my_shares.pop(token_id, None)
+                    last_exit_ts_by_token[token_id] = int(now_ts)
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
 
@@ -5515,8 +5799,112 @@ def main() -> None:
                         if my_trades_unreliable and side == "BUY":
                             blocked_reasons.add("my_trades_unreliable")
                             continue
-                        if side == "BUY" and buy_window_sec > 0:
+                        if side == "BUY":
                             order_notional = abs(size) * price
+                            if topic_risk_overlay_enabled and topic_risk_level >= 1:
+                                cfg_for_topic_risk = cfg_lowp if is_lowp else cfg
+                                min_shares_cfg = float(cfg_for_topic_risk.get("min_order_shares") or 0.0)
+                                api_min_shares = _orderbook_min_order_shares(ob)
+                                if api_min_shares <= 0:
+                                    api_min_shares = float(
+                                        topic_risk_book_min_shares_cache.get(token_id) or 0.0
+                                    )
+                                    if api_min_shares <= 0:
+                                        api_min_shares = _book_min_order_shares(
+                                            clob_client, token_id, api_timeout_sec
+                                        )
+                                        topic_risk_book_min_shares_cache[token_id] = float(
+                                            api_min_shares or 0.0
+                                        )
+                                effective_min_shares_guard = max(min_shares_cfg, api_min_shares)
+                                min_order_usd_guard = float(cfg_for_topic_risk.get("min_order_usd") or 0.0)
+                                effective_min_usd_guard = max(
+                                    min_order_usd_guard,
+                                    (effective_min_shares_guard * price)
+                                    if effective_min_shares_guard > 0 and price > 0
+                                    else 0.0,
+                                )
+                                if (
+                                    effective_min_usd_guard > 0
+                                    and order_notional + 1e-9 < effective_min_usd_guard
+                                ):
+                                    blocked_reasons.add("topic_risk_below_min")
+                                    logger.info(
+                                        "[HOLD] token_id=%s reason=topic_risk_below_min level=L%s order_usd=%.6f min_usd=%.6f",
+                                        token_id,
+                                        int(topic_risk_level),
+                                        order_notional,
+                                        effective_min_usd_guard,
+                                    )
+                                    continue
+                            last_exit_ts = int(last_exit_ts_by_token.get(token_id) or 0)
+                            hold_buy, hold_reason = _should_hold_reentry_buy(
+                                now_ts=now_ts,
+                                my_shares=my_shares,
+                                last_exit_ts=last_exit_ts,
+                                reentry_cooldown_sec=token_reentry_cooldown_sec,
+                                signal_buy_shares=abs(delta),
+                                order_buy_shares=abs(size),
+                                order_buy_usd=order_notional,
+                                force_buy_shares=reentry_force_buy_shares,
+                                force_buy_usd=reentry_force_buy_usd,
+                                eps=eps,
+                            )
+                            if hold_buy:
+                                blocked_reasons.add("reentry_cooldown")
+                                dedup_key = f"HOLD:{token_id}:reentry_cooldown"
+                                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                                if should_log:
+                                    remain = max(
+                                        0, token_reentry_cooldown_sec - max(0, now_ts - last_exit_ts)
+                                    )
+                                    if suppressed > 0:
+                                        logger.info(
+                                            "[HOLD] token_id=%s reason=reentry_cooldown remain=%ss "
+                                            "signal_shares=%.6f force_shares=%.6f (suppressed %d)",
+                                            token_id,
+                                            remain,
+                                            abs(delta),
+                                            reentry_force_buy_shares,
+                                            suppressed,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[HOLD] token_id=%s reason=reentry_cooldown remain=%ss "
+                                            "signal_shares=%.6f force_shares=%.6f",
+                                            token_id,
+                                            remain,
+                                            abs(delta),
+                                            reentry_force_buy_shares,
+                                        )
+                                continue
+                            if hold_reason == "force_override":
+                                dedup_key = f"BYPASS:{token_id}:reentry_force"
+                                should_log, suppressed = _log_dedup.should_log(dedup_key)
+                                if should_log:
+                                    if suppressed > 0:
+                                        logger.info(
+                                            "[REENTRY_BYPASS] token_id=%s reason=force_override "
+                                            "signal_shares=%.6f order_usd=%.6f "
+                                            "force_shares=%.6f force_usd=%.6f (suppressed %d)",
+                                            token_id,
+                                            abs(delta),
+                                            order_notional,
+                                            reentry_force_buy_shares,
+                                            reentry_force_buy_usd,
+                                            suppressed,
+                                        )
+                                    else:
+                                        logger.info(
+                                            "[REENTRY_BYPASS] token_id=%s reason=force_override "
+                                            "signal_shares=%.6f order_usd=%.6f force_shares=%.6f force_usd=%.6f",
+                                            token_id,
+                                            abs(delta),
+                                            order_notional,
+                                            reentry_force_buy_shares,
+                                            reentry_force_buy_usd,
+                                        )
+                        if side == "BUY" and buy_window_sec > 0:
                             recent_token = float(recent_buy_by_token.get(token_id, 0.0))
                             if (
                                 buy_window_max_usd_per_token > 0
@@ -5823,7 +6211,12 @@ def main() -> None:
                                     logger.info("[NOOP] token_id=%s reason=%s", token_id, reason_text)
                         continue
                     actions = filtered_actions
-                    logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+                    logger.info(
+                        "[ACTION] token_id=%s topic_risk=%s -> %s",
+                        token_id,
+                        topic_risk_action_hint,
+                        actions,
+                    )
 
                     is_reprice = _is_pure_reprice(actions)
                     missing_freeze = state.setdefault("missing_data_freeze", {})
@@ -6290,7 +6683,72 @@ def main() -> None:
                 (max_notional_per_token / ref_price) if max_notional_per_token > 0 else float("inf")
             )
 
+            if topic_risk_overlay_enabled and topic_mode:
+                prev_level = int(topic_risk_level)
+                prev_eval_ts = int(st.get("topic_risk_last_eval_ts") or 0)
+                if prev_eval_ts > 0:
+                    topic_risk_score = _topic_risk_decay_score(
+                        topic_risk_score,
+                        max(0, now_ts - prev_eval_ts),
+                        topic_risk_flip_window_sec,
+                    )
+                signal_side = "BUY" if d_target > eps else ("SELL" if d_target < -eps else "")
+                last_side = str(st.get("topic_risk_last_side") or "")
+                last_side_ts = int(st.get("topic_risk_last_side_ts") or 0)
+                if signal_side:
+                    if last_side and signal_side != last_side:
+                        flip_gap = max(0, now_ts - last_side_ts) if last_side_ts > 0 else 0
+                        if last_side_ts <= 0 or flip_gap <= topic_risk_flip_window_sec:
+                            topic_risk_score += 1.0
+                            st["topic_risk_last_flip_ts"] = int(now_ts)
+                    st["topic_risk_last_side"] = signal_side
+                    st["topic_risk_last_side_ts"] = int(now_ts)
+                if topic_risk_freeze_buy_until > now_ts:
+                    topic_risk_level = 2
+                elif topic_risk_score >= topic_risk_l2_threshold:
+                    topic_risk_level = 2
+                    topic_risk_freeze_buy_until = int(now_ts + topic_risk_l2_freeze_sec)
+                elif topic_risk_score >= topic_risk_l1_threshold:
+                    topic_risk_level = 1
+                    if topic_risk_freeze_buy_until <= now_ts:
+                        topic_risk_freeze_buy_until = 0
+                else:
+                    topic_risk_level = 0
+                    if topic_risk_freeze_buy_until <= now_ts:
+                        topic_risk_freeze_buy_until = 0
+                st["topic_risk_score"] = float(topic_risk_score)
+                st["topic_risk_level"] = int(topic_risk_level)
+                st["topic_risk_freeze_buy_until"] = int(topic_risk_freeze_buy_until)
+                st["topic_risk_last_eval_ts"] = int(now_ts)
+                topic_state[token_id] = st
+                if topic_risk_level != prev_level:
+                    logger.info(
+                        "[TOPIC_RISK] token_id=%s level=L%s score=%.3f freeze_buy_until=%s",
+                        token_id,
+                        topic_risk_level,
+                        topic_risk_score,
+                        topic_risk_freeze_buy_until,
+                    )
+                topic_risk_action_hint = (
+                    f"L{int(topic_risk_level)}|score={topic_risk_score:.2f}|freeze={int(topic_risk_freeze_buy_until)}"
+                )
+
             use_ratio = ratio_buy if d_target > 0 else ratio_base
+            overlay_buy_frozen = False
+            if topic_risk_overlay_enabled and d_target > 0:
+                if topic_risk_level >= 2 and topic_risk_freeze_buy_until > now_ts:
+                    overlay_buy_frozen = True
+                    use_ratio = 0.0
+                elif topic_risk_level >= 1:
+                    use_ratio *= topic_risk_l1_follow_mult
+                    token_deadband_shares = max(
+                        token_deadband_shares,
+                        base_deadband_shares * topic_risk_l1_deadband_mult,
+                    )
+                    token_reentry_cooldown_sec = max(
+                        token_reentry_cooldown_sec,
+                        int(round(token_reentry_cooldown_sec * topic_risk_l1_reentry_mult)),
+                    )
             d_my = use_ratio * d_target
             if d_target > 0:
                 logger.info(
@@ -6311,6 +6769,8 @@ def main() -> None:
             my_target = my_shares + d_my
             if my_target < 0:
                 my_target = 0.0
+            if overlay_buy_frozen:
+                my_target = min(my_target, my_shares)
             if d_target > 0 and buy_blocked_by_boot:
                 my_target = min(my_target, my_shares)
             if d_target > 0:
@@ -6542,7 +7002,7 @@ def main() -> None:
                 for order in open_orders
                 if str(order.get("side") or "").upper() == desired_side
             ]
-            deadband_shares = float(cfg.get("deadband_shares") or 0.0)
+            deadband_shares = token_deadband_shares
             if abs(delta) <= deadband_shares and not open_orders_for_reconcile:
                 dedup_key = f"NOOP:{token_id}:deadband"
                 should_log, suppressed = _log_dedup.should_log(dedup_key)
@@ -6692,8 +7152,112 @@ def main() -> None:
                 if my_trades_unreliable and side == "BUY":
                     blocked_reasons.add("my_trades_unreliable")
                     continue
-                if side == "BUY" and buy_window_sec > 0:
+                if side == "BUY":
                     order_notional = abs(size) * price
+                    if topic_risk_overlay_enabled and topic_risk_level >= 1:
+                        cfg_for_topic_risk = cfg_lowp if is_lowp else cfg
+                        min_shares_cfg = float(cfg_for_topic_risk.get("min_order_shares") or 0.0)
+                        api_min_shares = _orderbook_min_order_shares(ob)
+                        if api_min_shares <= 0:
+                            api_min_shares = float(
+                                topic_risk_book_min_shares_cache.get(token_id) or 0.0
+                            )
+                            if api_min_shares <= 0:
+                                api_min_shares = _book_min_order_shares(
+                                    clob_client, token_id, api_timeout_sec
+                                )
+                                topic_risk_book_min_shares_cache[token_id] = float(
+                                    api_min_shares or 0.0
+                                )
+                        effective_min_shares_guard = max(min_shares_cfg, api_min_shares)
+                        min_order_usd_guard = float(cfg_for_topic_risk.get("min_order_usd") or 0.0)
+                        effective_min_usd_guard = max(
+                            min_order_usd_guard,
+                            (effective_min_shares_guard * price)
+                            if effective_min_shares_guard > 0 and price > 0
+                            else 0.0,
+                        )
+                        if (
+                            effective_min_usd_guard > 0
+                            and order_notional + 1e-9 < effective_min_usd_guard
+                        ):
+                            blocked_reasons.add("topic_risk_below_min")
+                            logger.info(
+                                "[HOLD] token_id=%s reason=topic_risk_below_min level=L%s order_usd=%.6f min_usd=%.6f",
+                                token_id,
+                                int(topic_risk_level),
+                                order_notional,
+                                effective_min_usd_guard,
+                            )
+                            continue
+                    last_exit_ts = int(last_exit_ts_by_token.get(token_id) or 0)
+                    hold_buy, hold_reason = _should_hold_reentry_buy(
+                        now_ts=now_ts,
+                        my_shares=my_shares,
+                        last_exit_ts=last_exit_ts,
+                        reentry_cooldown_sec=token_reentry_cooldown_sec,
+                        signal_buy_shares=max(0.0, float(d_my)),
+                        order_buy_shares=abs(size),
+                        order_buy_usd=order_notional,
+                        force_buy_shares=reentry_force_buy_shares,
+                        force_buy_usd=reentry_force_buy_usd,
+                        eps=eps,
+                    )
+                    if hold_buy:
+                        blocked_reasons.add("reentry_cooldown")
+                        dedup_key = f"HOLD:{token_id}:reentry_cooldown"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            remain = max(
+                                0, token_reentry_cooldown_sec - max(0, now_ts - last_exit_ts)
+                            )
+                            if suppressed > 0:
+                                logger.info(
+                                    "[HOLD] token_id=%s reason=reentry_cooldown remain=%ss "
+                                    "signal_shares=%.6f force_shares=%.6f (suppressed %d)",
+                                    token_id,
+                                    remain,
+                                    max(0.0, float(d_my)),
+                                    reentry_force_buy_shares,
+                                    suppressed,
+                                )
+                            else:
+                                logger.info(
+                                    "[HOLD] token_id=%s reason=reentry_cooldown remain=%ss "
+                                    "signal_shares=%.6f force_shares=%.6f",
+                                    token_id,
+                                    remain,
+                                    max(0.0, float(d_my)),
+                                    reentry_force_buy_shares,
+                                )
+                        continue
+                    if hold_reason == "force_override":
+                        dedup_key = f"BYPASS:{token_id}:reentry_force"
+                        should_log, suppressed = _log_dedup.should_log(dedup_key)
+                        if should_log:
+                            if suppressed > 0:
+                                logger.info(
+                                    "[REENTRY_BYPASS] token_id=%s reason=force_override "
+                                    "signal_shares=%.6f order_usd=%.6f "
+                                    "force_shares=%.6f force_usd=%.6f (suppressed %d)",
+                                    token_id,
+                                    max(0.0, float(d_my)),
+                                    order_notional,
+                                    reentry_force_buy_shares,
+                                    reentry_force_buy_usd,
+                                    suppressed,
+                                )
+                            else:
+                                logger.info(
+                                    "[REENTRY_BYPASS] token_id=%s reason=force_override "
+                                    "signal_shares=%.6f order_usd=%.6f force_shares=%.6f force_usd=%.6f",
+                                    token_id,
+                                    max(0.0, float(d_my)),
+                                    order_notional,
+                                    reentry_force_buy_shares,
+                                    reentry_force_buy_usd,
+                                )
+                if side == "BUY" and buy_window_sec > 0:
                     recent_token = float(recent_buy_by_token.get(token_id, 0.0))
                     if (
                         buy_window_max_usd_per_token > 0
@@ -6993,7 +7557,12 @@ def main() -> None:
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
                 continue
             actions = filtered_actions
-            logger.info("[ACTION] token_id=%s -> %s", token_id, actions)
+            logger.info(
+                "[ACTION] token_id=%s topic_risk=%s -> %s",
+                token_id,
+                topic_risk_action_hint,
+                actions,
+            )
 
             is_reprice = _is_pure_reprice(actions)
             has_exit_sell_place = any(

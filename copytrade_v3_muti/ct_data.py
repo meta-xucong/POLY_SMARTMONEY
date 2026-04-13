@@ -766,7 +766,7 @@ def _fetch_activity_actions_fallback(
     session = getattr(client, "session", None) or requests.Session()
     url = f"{host}/activity"
     page_size = max(1, min(int(page_size), 500))
-    max_offset = max(0, min(int(max_offset), 3000))
+    max_offset = max(0, min(int(max_offset), 10000))
     start_ts_sec = int(start_time.timestamp())
     end_ts_sec = int(end_time.timestamp())
     ok = True
