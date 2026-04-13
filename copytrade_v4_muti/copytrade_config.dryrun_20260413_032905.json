@@ -1,0 +1,241 @@
+﻿{
+    "target_addresses":  [
+                             {
+                                 "address":  "0xd748c701ad93cfec32a3420e10f3b08e68612125",
+                                 "ratio":  0.61,
+                                 "level":  "A"
+                             },
+                             {
+                                 "address":  "0x39d0f1dca6fb7e5514858c1a337724a426764fe8",
+                                 "ratio":  0.6,
+                                 "level":  "A",
+                                 "blacklist_token_keys":  [
+                                                              "forces enter",
+                                                              "us forces enter",
+                                                              "ceasefire"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0xe52c0a1327a12edc7bd54ea6f37ce00a4ca96924",
+                                 "ratio":  0.61,
+                                 "level":  "A"
+                             },
+                             {
+                                 "address":  "0x9dfe2f73d3c988a9d69df8fa0beb85651340b3dd",
+                                 "ratio":  0.53,
+                                 "level":  "B",
+                                 "blacklist_token_keys":  [
+                                                              "forces enter",
+                                                              "us forces enter",
+                                                              "ceasefire",
+                                                              "supreme leader",
+                                                              "public appearance",
+                                                              "P2P sale",
+                                                              "MrBeast",
+                                                              "range"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0x9238743eeba8bbfe9e85ac7ba2e1e3d77877b73e",
+                                 "ratio":  0.44,
+                                 "level":  "B",
+                                 "blacklist_token_keys":  [
+                                                              "conflict ends",
+                                                              "us forces enter",
+                                                              "forces enter",
+                                                              "meeting",
+                                                              "re-enter"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0xd5b97d08ec6098407bfbf66c2786ccc9967fe44e",
+                                 "ratio":  0.71,
+                                 "level":  "A"
+                             },
+                             {
+                                 "address":  "0x5095e97281f28d4d8549fd3834802c24cbb793ee",
+                                 "ratio":  0.15,
+                                 "level":  "C",
+                                 "blacklist_token_keys":  [
+                                                              "box office",
+                                                              "opening weekend",
+                                                              "between"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0x41583f2efc720b8e2682750fffb67f2806fece9f",
+                                 "ratio":  0.41,
+                                 "level":  "B",
+                                 "blacklist_token_keys":  [
+                                                              "advance to the second round",
+                                                              "second round",
+                                                              "successor",
+                                                              "supreme leader",
+                                                              "which countries",
+                                                              "another country strike",
+                                                              "meeting",
+                                                              "forces enter",
+                                                              "us forces enter"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0xd66f79a8d19d4223b6c70dd4e620d4875501a19b",
+                                 "ratio":  0.32,
+                                 "level":  "B",
+                                 "blacklist_token_keys":  [
+                                                              "win on",
+                                                              "draw",
+                                                              "both teams to score",
+                                                              "match winner",
+                                                              "moneyline",
+                                                              "1x2",
+                                                              "League",
+                                                              "Cup",
+                                                              "Serie A",
+                                                              "Championship"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0xe732156a2d84cdfb4de831d3f11a22899e49898f",
+                                 "ratio":  0.15,
+                                 "level":  "C",
+                                 "blacklist_token_keys":  [
+                                                              "moneyline",
+                                                              "spread",
+                                                              "over/under",
+                                                              "O/U",
+                                                              "first blood",
+                                                              "player stats",
+                                                              "sports range",
+                                                              "sports props"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0x1aeebd7b0eb92037a630004f8eabc0759c36c139",
+                                 "ratio":  0.42,
+                                 "level":  "B",
+                                 "blacklist_token_keys":  [
+                                                              "winner",
+                                                              "championship",
+                                                              "top 4",
+                                                              "quarter-finals",
+                                                              "relegated",
+                                                              "sports winner",
+                                                              "entertainment winner"
+                                                          ]
+                             },
+                             {
+                                 "address":  "0x48e7ca9d4754021dc8b32adcaec0234dd6c9d5f8",
+                                 "ratio":  0.05,
+                                 "level":  "C",
+                                 "blacklist_token_keys":  [
+                                                              "highest grossing movie",
+                                                              "movie basket",
+                                                              "film basket",
+                                                              "highest-grossing-movie",
+                                                              "movie winner"
+                                                          ]
+                             }
+                         ],
+    "default_target_level":  "A",
+    "target_level_skip_ratios":  {
+                                     "A":  0.0,
+                                     "B":  0.4,
+                                     "C":  0.8
+                                 },
+    "target_level_signal_cache_ttl_sec":  3600,
+    "target_level_skip_log_file":  "target_level_skip_log.jsonl",
+    "poly_host":  "https://clob.polymarket.com",
+    "poly_chain_id":  137,
+    "accounts_file":  "accounts.json",
+    "lowp_guard_enabled":  true,
+    "lowp_price_threshold":  0.1,
+    "lowp_follow_ratio_mult":  0.02,
+    "lowp_min_order_usd":  1,
+    "lowp_max_order_usd":  1,
+    "lowp_probe_order_usd":  1,
+    "poll_interval_sec":  20,
+    "poll_interval_sec_exiting":  3,
+    "config_reload_sec":  600,
+    "target_positions_refresh_sec":  60,
+    "deadband_shares":  0.5,
+    "slice_min":  1,
+    "slice_max":  1,
+    "order_size_mode":  "auto_usd",
+    "min_order_usd":  1,
+    "min_order_shares":  5,
+    "max_order_usd":  1,
+    "max_position_usd_per_token":  12,
+    "max_position_usd_per_condition":  15,
+    "max_position_usd_per_event":  20,
+    "max_notional_total":  500,
+    "accumulator_max_total_usd":  500,
+    "accumulator_stale_reset_sec":  7200,
+    "sell_accumulator_ttl_sec":  3600,
+    "shadow_buy_ttl_sec":  900,
+    "boot_sync_mode":  "baseline_only",
+    "actions_replay_window_sec":  0,
+    "hemostasis_recovery_enabled":  true,
+    "hemostasis_recovery_window_sec":  172800,
+    "hemostasis_recovery_max_rounds":  4,
+    "hemostasis_recovery_poll_sec":  2,
+    "hemostasis_recovery_min_shares":  0,
+    "hemostasis_recovery_sell_buffer_shares":  0,
+    "actions_source":  "actions",
+    "fresh_boot_on_start":  true,
+    "ignore_boot_tokens":  false,
+    "ignore_boot_tokens_scope":  "probe_only",
+    "probe_order_usd":  1,
+    "follow_new_topics_only":  false,
+    "adopt_existing_orders_on_boot":  true,
+    "maker_only":  true,
+    "reprice_ticks":  1,
+    "reprice_cooldown_sec":  3,
+    "enable_reprice":  true,
+    "exit_full_sell":  true,
+    "exit_ignore_cooldown":  true,
+    "exit_ignore_place_backoff":  true,
+    "exit_sell_available_buffer_shares":  0.0,
+    "exit_treat_below_min_as_dust":  false,
+    "cooldown_sec_per_token":  120,
+    "buy_window_sec":  120,
+    "buy_window_max_usd_per_token":  4,
+    "buy_window_max_usd_total":  10,
+    "missing_timeout_sec":  600,
+    "missing_to_zero_rounds":  60,
+    "topic_unfilled_max_rounds":  3,
+    "topic_unfilled_ignore_sec":  1800,
+    "sell_confirm_max":  2,
+    "sell_confirm_window_sec":  600,
+    "sell_confirm_force_ratio":  0.5,
+    "sell_confirm_force_shares":  0.0,
+    "reentry_cooldown_sec":  150,
+    "reentry_force_buy_shares":  8.0,
+    "reentry_force_buy_usd":  6.0,
+    "must_exit_fresh_sell_window_sec":  1800,
+    "must_exit_clear_on_buy_min_target_shares":  1.0,
+    "buy_actions_source_mode":  "position_source_consistent",
+    "sell_health_window_sec":  600,
+    "sell_health_min_signals":  8,
+    "sell_health_min_exec_ratio":  0.35,
+    "sell_health_max_signal_action_gap":  12,
+    "sell_health_warn_cooldown_sec":  600,
+    "sell_health_log_ok":  false,
+    "dust_exit_eps":  0.2,
+    "log_dir":  "logs/dryrun_isolated_20260413_032905",
+    "log_level":  "INFO",
+    "skip_closed_markets":  true,
+    "block_on_unknown_market_state":  false,
+    "allow_partial":  true,
+    "taker_enabled":  true,
+    "taker_spread_threshold":  0.01,
+    "taker_order_type":  "FAK",
+    "api_timeout_sec":  30,
+    "maker_max_wait_sec":  1800,
+    "maker_timeout_max_spread":  0.03,
+    "positions_limit":  200,
+    "actions_page_size":  200,
+    "blacklist_token_keys":  [
+                                 "Bitcoin"
+                             ]
+}

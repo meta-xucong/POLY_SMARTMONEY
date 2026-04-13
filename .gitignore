@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.class
+*.so
+.Python
+
+# Virtualenv
+.venv/
+venv/
+ENV/
+env/
+
+# Local configs / secrets
+**/accounts.json
+.env
+.env.*
+
+# Runtime state / logs (generated)
+**/logs/
+**/*.log
+**/*.log.*
+**/*.err.log
+**/*.out.log
+**/*.jsonl
+
+# Copytrade state files (generated)
+**/state.json
+**/state_*.json
+
+# Test / tooling caches
+**/.pytest_cache/
