@@ -8,6 +8,7 @@ import logging.handlers
 import os
 import re
 import random
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -46,12 +47,14 @@ if str(REPO_ROOT) not in sys.path:
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 
 from ct_data import (
+    configure_data_http_rate_limit,
     fetch_positions_norm,
     fetch_target_actions_since,
     fetch_target_trades_since,
 )
 from ct_exec import (
     apply_actions,
+    configure_clob_rate_limit,
     fetch_open_orders_norm,
     get_orderbook,
     reconcile_one,
@@ -2564,8 +2567,211 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Force HTTP direct fetch for my positions (override config).",
     )
+    parser.add_argument("--worker-index", type=int, dest="worker_index", default=0)
+    parser.add_argument("--worker-count", type=int, dest="worker_count", default=1)
+    parser.add_argument(
+        "--worker-supervised",
+        action="store_true",
+        dest="worker_supervised",
+        help="Internal flag used by worker supervisor.",
+    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
+
+
+def _to_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _to_float(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _configure_global_api_rate_limits(
+    cfg: Dict[str, Any],
+    *,
+    worker_count: int,
+    logger: logging.Logger,
+) -> None:
+    total_data_rps = max(0.2, _to_float(cfg.get("global_data_api_rps"), 2.0))
+    total_data_http_rps = max(0.2, _to_float(cfg.get("global_data_http_rps"), 4.0))
+    total_clob_rps = max(0.2, _to_float(cfg.get("global_clob_api_rps"), 8.0))
+    wc = max(1, int(worker_count))
+
+    per_worker_data_rps = max(0.2, total_data_rps / wc)
+    per_worker_data_http_rps = max(0.2, total_data_http_rps / wc)
+    per_worker_clob_rps = max(0.2, total_clob_rps / wc)
+
+    try:
+        from smartmoney_query.poly_martmoney_query import api_client as data_api_mod
+
+        if hasattr(data_api_mod, "RateLimiter"):
+            data_api_mod._GLOBAL_LIMITER = data_api_mod.RateLimiter(per_worker_data_rps)
+            data_api_mod.MAX_REQUESTS_PER_SECOND = per_worker_data_rps
+    except Exception as exc:
+        logger.warning("[RATE_LIMIT] failed to set data-api limiter: %s", exc)
+
+    try:
+        configure_data_http_rate_limit(per_worker_data_http_rps)
+    except Exception as exc:
+        logger.warning("[RATE_LIMIT] failed to set data-http limiter: %s", exc)
+
+    try:
+        configure_clob_rate_limit(per_worker_clob_rps)
+    except Exception as exc:
+        logger.warning("[RATE_LIMIT] failed to set clob limiter: %s", exc)
+
+    logger.info(
+        "[RATE_LIMIT] workers=%s data_rps(total=%.3f per_worker=%.3f) "
+        "data_http_rps(total=%.3f per_worker=%.3f) "
+        "clob_rps(total=%.3f per_worker=%.3f)",
+        wc,
+        total_data_rps,
+        per_worker_data_rps,
+        total_data_http_rps,
+        per_worker_data_http_rps,
+        total_clob_rps,
+        per_worker_clob_rps,
+    )
+
+
+def _build_worker_cmd(
+    args: argparse.Namespace,
+    *,
+    worker_index: int,
+    worker_count: int,
+) -> List[str]:
+    cmd: List[str] = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--config",
+        str(args.config),
+        "--state",
+        str(args.state),
+        "--worker-index",
+        str(worker_index),
+        "--worker-count",
+        str(worker_count),
+        "--worker-supervised",
+    ]
+    if args.target_address:
+        cmd.extend(["--target", str(args.target_address)])
+    if args.my_address:
+        cmd.extend(["--my", str(args.my_address)])
+    if args.follow_ratio is not None:
+        cmd.extend(["--ratio", str(args.follow_ratio)])
+    if args.poll_interval_sec is not None:
+        cmd.extend(["--poll", str(args.poll_interval_sec)])
+    if args.poll_interval_sec_exiting is not None:
+        cmd.extend(["--poll-exit", str(args.poll_interval_sec_exiting)])
+    if args.my_positions_force_http:
+        cmd.append("--my-positions-force-http")
+    if args.dry_run:
+        cmd.append("--dry-run")
+    return cmd
+
+
+def _run_worker_supervisor_if_needed(
+    *,
+    args: argparse.Namespace,
+    cfg: Dict[str, Any],
+    base_dir: Path,
+    logger: logging.Logger,
+) -> bool:
+    configured_workers = max(1, _to_int(cfg.get("account_workers"), 1))
+    if args.worker_supervised or configured_workers <= 1:
+        return False
+
+    logger.info("[WORKER] supervisor starting %s worker processes", configured_workers)
+
+    total_data_rps = max(0.2, _to_float(cfg.get("global_data_api_rps"), 2.0))
+    total_data_http_rps = max(0.2, _to_float(cfg.get("global_data_http_rps"), 4.0))
+    total_clob_rps = max(0.2, _to_float(cfg.get("global_clob_api_rps"), 8.0))
+
+    per_worker_data_rps = max(0.2, total_data_rps / configured_workers)
+    per_worker_data_http_rps = max(0.2, total_data_http_rps / configured_workers)
+    per_worker_clob_rps = max(0.2, total_clob_rps / configured_workers)
+
+    children: List[tuple[int, subprocess.Popen[Any]]] = []
+    try:
+        for worker_index in range(configured_workers):
+            cmd = _build_worker_cmd(
+                args,
+                worker_index=worker_index,
+                worker_count=configured_workers,
+            )
+            env = os.environ.copy()
+            env["SMART_QUERY_MAX_RPS"] = str(per_worker_data_rps)
+            env["CT_DATA_HTTP_MAX_RPS"] = str(per_worker_data_http_rps)
+            env["CT_CLOB_MAX_RPS"] = str(per_worker_clob_rps)
+            proc = subprocess.Popen(cmd, cwd=str(base_dir), env=env)
+            children.append((worker_index, proc))
+            logger.info(
+                "[WORKER] started worker=%s/%s pid=%s",
+                worker_index + 1,
+                configured_workers,
+                proc.pid,
+            )
+
+        while True:
+            for worker_index, proc in children:
+                rc = proc.poll()
+                if rc is not None:
+                    raise RuntimeError(
+                        f"worker {worker_index + 1}/{configured_workers} exited with code {rc}"
+                    )
+            time.sleep(1.0)
+    finally:
+        for _, proc in children:
+            if proc.poll() is None:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+        deadline = time.time() + 5.0
+        for _, proc in children:
+            if proc.poll() is None:
+                timeout = max(0.0, deadline - time.time())
+                try:
+                    proc.wait(timeout=timeout)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
+    return True
+
+
+def _apply_worker_shard(
+    account_contexts: List[AccountContext],
+    *,
+    worker_index: int,
+    worker_count: int,
+    logger: logging.Logger,
+) -> List[AccountContext]:
+    wc = max(1, int(worker_count))
+    wi = int(worker_index)
+    if wc <= 1:
+        return account_contexts
+    if wi < 0 or wi >= wc:
+        raise ValueError(f"Invalid worker_index={wi} for worker_count={wc}")
+    sharded = [acct for idx, acct in enumerate(account_contexts) if (idx % wc) == wi]
+    if not sharded:
+        raise ValueError(f"Worker shard empty: worker_index={wi}, worker_count={wc}")
+    logger.info(
+        "[WORKER] shard worker=%s/%s accounts=%s/%s",
+        wi + 1,
+        wc,
+        len(sharded),
+        len(account_contexts),
+    )
+    return sharded
 
 
 def _state_path_for_account(base_dir: Path, target_address: str, my_address: str) -> Path:
@@ -2837,6 +3043,23 @@ def main() -> None:
     logger = _setup_logging(cfg, cfg["target_address"], base_dir)
     target_level_skip_log_path = _resolve_target_level_skip_log_path(cfg, base_dir)
 
+    # Optional process-level worker supervisor: spawn N worker subprocesses,
+    # each handling a disjoint account shard.
+    _run_worker_supervisor_if_needed(
+        args=args,
+        cfg=cfg,
+        base_dir=base_dir,
+        logger=logger,
+    )
+
+    effective_worker_count = max(1, _to_int(args.worker_count, 1))
+    effective_worker_index = max(0, _to_int(args.worker_index, 0))
+    _configure_global_api_rate_limits(
+        cfg,
+        worker_count=effective_worker_count,
+        logger=logger,
+    )
+
     # Log resolved targets
     logger.info(
         "[MULTI-TARGET] Resolved %d target address(es): %s",
@@ -2856,6 +3079,12 @@ def main() -> None:
     # MULTI-ACCOUNT INITIALIZATION
     # ============================================================
     account_contexts = _init_account_contexts(cfg, base_dir, logger)
+    account_contexts = _apply_worker_shard(
+        account_contexts,
+        worker_index=effective_worker_index,
+        worker_count=effective_worker_count,
+        logger=logger,
+    )
     current_account_idx = 0  # Used for round-robin account selection
     all_account_ids: List[str] = [
         str(acct.my_address or "").strip().lower()
@@ -3271,7 +3500,18 @@ def main() -> None:
         dry_run=bool(args.dry_run),
     )
 
-    logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
+    if effective_worker_count > 1:
+        logger.info(
+            "[MULTI] Starting main loop worker=%s/%s with %d account(s) in round-robin mode",
+            effective_worker_index + 1,
+            effective_worker_count,
+            len(account_contexts),
+        )
+    else:
+        logger.info(
+            "[MULTI] Starting main loop with %d account(s) in round-robin mode",
+            len(account_contexts),
+        )
 
     # Shared cross-account cache for target data
     shared_target_cache: Dict[str, Any] = {}

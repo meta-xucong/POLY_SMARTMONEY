@@ -84,6 +84,12 @@ sudo bash "$repo/systemd/install_service_v4.sh" "$repo" root auto -
 sudo systemctl restart polysmart-copytrade-v4.service
 ```
 
+v4 并发与限速（避免 429）：
+- `copytrade_v4_muti/copytrade_config.json` 默认 `account_workers=2`
+- 全局总速率：`global_data_api_rps` / `global_data_http_rps` / `global_clob_api_rps`
+- 程序会按 `account_workers` 自动均分到每个 worker
+- 若 VPS 资源紧张，可把 `account_workers` 改回 `1`
+
 ## 2) 无 `.git` 的机器（宝塔/直接复制部署）
 
 你的实际路径：

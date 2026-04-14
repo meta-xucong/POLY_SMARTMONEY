@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import inspect
 import logging
+import os
+import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
@@ -9,6 +11,40 @@ from ct_utils import round_to_step, round_to_tick, safe_float
 
 
 logger = logging.getLogger(__name__)
+
+
+class _SimpleRateLimiter:
+    def __init__(self, rps: float) -> None:
+        self._lock = threading.Lock()
+        self._next_ts = 0.0
+        self.set_rps(rps)
+
+    def set_rps(self, rps: float) -> None:
+        self.rps = max(float(rps or 0.0), 0.0)
+        self.min_interval = (1.0 / self.rps) if self.rps > 0 else 0.0
+
+    def wait(self) -> None:
+        if self.min_interval <= 0:
+            return
+        with self._lock:
+            now = time.monotonic()
+            wait = max(0.0, self._next_ts - now)
+            target = max(self._next_ts, now) + self.min_interval
+            self._next_ts = target
+        if wait > 0:
+            time.sleep(wait)
+
+
+_DEFAULT_CLOB_MAX_RPS = float(os.getenv("CT_CLOB_MAX_RPS", "8"))
+_CLOB_LIMITER = _SimpleRateLimiter(_DEFAULT_CLOB_MAX_RPS)
+
+
+def configure_clob_rate_limit(rps: float) -> None:
+    """Configure global per-process CLOB API rate limit for ct_exec network calls."""
+    try:
+        _CLOB_LIMITER.set_rps(float(rps))
+    except Exception:
+        pass
 
 
 def _mid_price(orderbook: Dict[str, Optional[float]]) -> Optional[float]:
@@ -67,6 +103,7 @@ def _supports_timeout_param(func: Any) -> bool:
 def _call_with_timeout(
     func: Any, timeout: Optional[float], *args: Any, **kwargs: Any
 ) -> Any:
+    _CLOB_LIMITER.wait()
     if timeout is not None and timeout > 0 and _supports_timeout_param(func):
         kwargs["timeout"] = timeout
     return func(*args, **kwargs)
@@ -1968,6 +2005,7 @@ def fetch_open_orders_norm(
         kwargs: Dict[str, Any] = {}
         if timeout is not None and timeout > 0 and _supports_timeout(client.get_orders):
             kwargs["timeout"] = timeout
+        _CLOB_LIMITER.wait()
         if params is None:
             return client.get_orders(**kwargs)
         return client.get_orders(params, **kwargs)
