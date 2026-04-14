@@ -42,6 +42,13 @@ git -C $repo checkout origin/main -- `
   systemd/install_service_v3.sh
 ```
 
+更新后可直接重装并启动 v3 服务：
+```bash
+repo="$(git rev-parse --show-toplevel)"
+sudo bash "$repo/systemd/install_service_v3.sh" "$repo" root auto -
+sudo systemctl restart polysmart-copytrade-v3.service
+```
+
 ### 更新 v4（只执行一段）
 
 VPS / Linux / macOS:
@@ -70,6 +77,13 @@ git -C $repo checkout origin/main -- `
   systemd/install_service_v4.sh
 ```
 
+更新后可直接重装并启动 v4 服务：
+```bash
+repo="$(git rev-parse --show-toplevel)"
+sudo bash "$repo/systemd/install_service_v4.sh" "$repo" root auto -
+sudo systemctl restart polysmart-copytrade-v4.service
+```
+
 ## 2) 无 `.git` 的机器（宝塔/直接复制部署）
 
 你的实际路径：
@@ -92,6 +106,10 @@ cp -f "$src"/test_*.py "$dst"/
 cp -f "$src"/copytrade_config.json "$dst"/
 mkdir -p "$base/systemd"
 cp -f "$tmp/POLY_SMARTMONEY-main/systemd/install_service_v3.sh" "$base/systemd"/
+sed -i 's/\r$//' "$base/systemd/install_service_v3.sh" || true
+sed -i '1s/^\xEF\xBB\xBF//' "$base/systemd/install_service_v3.sh" || true
+sudo bash "$base/systemd/install_service_v3.sh" "$base" root auto -
+sudo systemctl restart polysmart-copytrade-v3.service
 
 echo "v3 update done: $dst"
 ```
@@ -112,6 +130,10 @@ cp -f "$src"/test_*.py "$dst"/
 cp -f "$src"/copytrade_config.json "$dst"/
 mkdir -p "$base/systemd"
 cp -f "$tmp/POLY_SMARTMONEY-main/systemd/install_service_v4.sh" "$base/systemd"/
+sed -i 's/\r$//' "$base/systemd/install_service_v4.sh" || true
+sed -i '1s/^\xEF\xBB\xBF//' "$base/systemd/install_service_v4.sh" || true
+sudo bash "$base/systemd/install_service_v4.sh" "$base" root auto -
+sudo systemctl restart polysmart-copytrade-v4.service
 
 echo "v4 update done: $dst"
 ```
@@ -155,10 +177,18 @@ mkdir -p "$BASE/copytrade_v3_muti/logs" "$BASE/copytrade_v4_muti/logs"
 [ -f "$BASE/copytrade_v3_muti/accounts.json" ] || cp "$BASE/copytrade_v3_muti/accounts.example.json" "$BASE/copytrade_v3_muti/accounts.json"
 [ -f "$BASE/copytrade_v4_muti/accounts.json" ] || cp "$BASE/copytrade_v4_muti/accounts.example.json" "$BASE/copytrade_v4_muti/accounts.json"
 
+sed -i 's/\r$//' "$BASE/systemd/install_service_v3.sh" "$BASE/systemd/install_service_v4.sh" 2>/dev/null || true
+sed -i '1s/^\xEF\xBB\xBF//' "$BASE/systemd/install_service_v3.sh" "$BASE/systemd/install_service_v4.sh" 2>/dev/null || true
+
 echo "deploy done: $BASE"
 echo "next: edit accounts.json manually"
 echo "v3 account file: $BASE/copytrade_v3_muti/accounts.json"
 echo "v4 account file: $BASE/copytrade_v4_muti/accounts.json"
+```
+
+部署后可直接一键启服务（推荐 `auto` 自动找 Python）：
+```bash
+sudo bash /home/trader/polymarket_api/POLY_SMARTMONEY/systemd/install_service_v4.sh /home/trader/polymarket_api/POLY_SMARTMONEY root auto -
 ```
 
 部署后快速验证（任选一个版本）：

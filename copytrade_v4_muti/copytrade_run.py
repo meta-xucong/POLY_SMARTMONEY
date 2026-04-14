@@ -143,7 +143,8 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
-    payload = json.loads(path.read_text(encoding="utf-8"))
+    # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
+    payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("閰嶇疆鏂囦欢蹇呴』涓?JSON dict")
     return payload
@@ -2590,7 +2591,8 @@ def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> Lis
         raise FileNotFoundError(f"Accounts file not found: {accounts_file}")
 
     try:
-        content = accounts_file.read_text(encoding="utf-8")
+        # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
+        content = accounts_file.read_text(encoding="utf-8-sig")
         data = json.loads(content)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in accounts file: {e}")
@@ -8076,7 +8078,8 @@ if __name__ == "__main__":
             base_dir = os.path.dirname(os.path.abspath(__file__))
             cfg_path = config_path or os.path.join(base_dir, "copytrade_config.json")
             try:
-                with open(cfg_path, "r", encoding="utf-8") as f:
+                # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
+                with open(cfg_path, "r", encoding="utf-8-sig") as f:
                     cfg = json.load(f)
                 log_dir = str(cfg.get("log_dir") or "logs")
             except Exception:
