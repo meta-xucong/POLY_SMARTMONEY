@@ -25,7 +25,8 @@ git -C "$repo" checkout origin/main -- \
   copytrade_v3_muti/*.py \
   copytrade_v3_muti/check_*.py \
   copytrade_v3_muti/test_*.py \
-  copytrade_v3_muti/copytrade_config.json
+  copytrade_v3_muti/copytrade_config.json \
+  systemd/install_service_v3.sh
 ```
 
 Windows PowerShell:
@@ -37,7 +38,8 @@ git -C $repo checkout origin/main -- `
   copytrade_v3_muti/*.py `
   copytrade_v3_muti/check_*.py `
   copytrade_v3_muti/test_*.py `
-  copytrade_v3_muti/copytrade_config.json
+  copytrade_v3_muti/copytrade_config.json `
+  systemd/install_service_v3.sh
 ```
 
 ### 更新 v4（只执行一段）
@@ -51,7 +53,8 @@ git -C "$repo" checkout origin/main -- \
   copytrade_v4_muti/*.py \
   copytrade_v4_muti/check_*.py \
   copytrade_v4_muti/test_*.py \
-  copytrade_v4_muti/copytrade_config.json
+  copytrade_v4_muti/copytrade_config.json \
+  systemd/install_service_v4.sh
 ```
 
 Windows PowerShell:
@@ -63,7 +66,8 @@ git -C $repo checkout origin/main -- `
   copytrade_v4_muti/*.py `
   copytrade_v4_muti/check_*.py `
   copytrade_v4_muti/test_*.py `
-  copytrade_v4_muti/copytrade_config.json
+  copytrade_v4_muti/copytrade_config.json `
+  systemd/install_service_v4.sh
 ```
 
 ## 2) 无 `.git` 的机器（宝塔/直接复制部署）
@@ -77,6 +81,7 @@ git -C $repo checkout origin/main -- `
 ```bash
 set -euo pipefail
 dst="/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v3_muti"
+base="$(dirname "$dst")"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 curl -L "https://github.com/meta-xucong/POLY_SMARTMONEY/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp"
 src="$tmp/POLY_SMARTMONEY-main/copytrade_v3_muti"
@@ -85,6 +90,8 @@ cp -f "$src"/*.py "$dst"/
 cp -f "$src"/check_*.py "$dst"/
 cp -f "$src"/test_*.py "$dst"/
 cp -f "$src"/copytrade_config.json "$dst"/
+mkdir -p "$base/systemd"
+cp -f "$tmp/POLY_SMARTMONEY-main/systemd/install_service_v3.sh" "$base/systemd"/
 
 echo "v3 update done: $dst"
 ```
@@ -94,6 +101,7 @@ echo "v3 update done: $dst"
 ```bash
 set -euo pipefail
 dst="/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v4_muti"
+base="$(dirname "$dst")"
 tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
 curl -L "https://github.com/meta-xucong/POLY_SMARTMONEY/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp"
 src="$tmp/POLY_SMARTMONEY-main/copytrade_v4_muti"
@@ -102,6 +110,8 @@ cp -f "$src"/*.py "$dst"/
 cp -f "$src"/check_*.py "$dst"/
 cp -f "$src"/test_*.py "$dst"/
 cp -f "$src"/copytrade_config.json "$dst"/
+mkdir -p "$base/systemd"
+cp -f "$tmp/POLY_SMARTMONEY-main/systemd/install_service_v4.sh" "$base/systemd"/
 
 echo "v4 update done: $dst"
 ```
