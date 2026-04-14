@@ -1,4 +1,4 @@
-{
+﻿{
     "target_addresses":  [
                              {
                                  "address":  "0xd748c701ad93cfec32a3420e10f3b08e68612125",
@@ -53,16 +53,6 @@
                                  "level":  "A"
                              },
                              {
-                                 "address":  "0x5095e97281f28d4d8549fd3834802c24cbb793ee",
-                                 "ratio":  0.15,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "box office",
-                                                              "opening weekend",
-                                                              "between"
-                                                          ]
-                             },
-                             {
                                  "address":  "0x41583f2efc720b8e2682750fffb67f2806fece9f",
                                  "ratio":  0.41,
                                  "level":  "B",
@@ -96,21 +86,6 @@
                                                           ]
                              },
                              {
-                                 "address":  "0xe732156a2d84cdfb4de831d3f11a22899e49898f",
-                                 "ratio":  0.15,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "moneyline",
-                                                              "spread",
-                                                              "over/under",
-                                                              "O/U",
-                                                              "first blood",
-                                                              "player stats",
-                                                              "sports range",
-                                                              "sports props"
-                                                          ]
-                             },
-                             {
                                  "address":  "0x1aeebd7b0eb92037a630004f8eabc0759c36c139",
                                  "ratio":  0.42,
                                  "level":  "B",
@@ -122,18 +97,6 @@
                                                               "relegated",
                                                               "sports winner",
                                                               "entertainment winner"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x48e7ca9d4754021dc8b32adcaec0234dd6c9d5f8",
-                                 "ratio":  0.05,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "highest grossing movie",
-                                                              "movie basket",
-                                                              "film basket",
-                                                              "highest-grossing-movie",
-                                                              "movie winner"
                                                           ]
                              },
                              {
