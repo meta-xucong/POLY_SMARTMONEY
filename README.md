@@ -1,16 +1,22 @@
 # POLY_SMARTMONEY
 
-## 一键更新（仅干净代码，不涉及私钥）
+## 更新说明（只更新干净代码，不包含私钥）
 
-说明：
-- 下面命令会自动识别当前 Git 仓库根目录，不写死本地路径，适配 VPS。
-- 只更新 `v3/v4` 代码和 `copytrade_config.json`。
-- 不会改动 `accounts.json`、`state_*.json`、`logs/`。
+下面所有命令都不会主动改动以下文件：
+- `accounts.json`
+- `state_*.json`
+- `logs/`
+
+你只需要按你的部署方式选一个章节执行，不要混用。
+
+## 1) 有 `.git` 的机器（标准 Git 更新）
 
 前提：
-- 你在本仓库内任意目录执行命令（`git rev-parse --show-toplevel` 能返回路径）。
+- 在仓库目录内执行（`git rev-parse --show-toplevel` 能返回路径）。
 
-### 更新 v3（干净代码）
+### 更新 v3（只执行一段）
+
+VPS / Linux / macOS:
 
 ```bash
 repo="$(git rev-parse --show-toplevel)" && \
@@ -22,6 +28,8 @@ git -C "$repo" checkout origin/main -- \
   copytrade_v3_muti/copytrade_config.json
 ```
 
+Windows PowerShell:
+
 ```powershell
 $repo=(git rev-parse --show-toplevel).Trim(); `
 git -C $repo fetch origin main; `
@@ -32,7 +40,9 @@ git -C $repo checkout origin/main -- `
   copytrade_v3_muti/copytrade_config.json
 ```
 
-### 更新 v4（干净代码）
+### 更新 v4（只执行一段）
+
+VPS / Linux / macOS:
 
 ```bash
 repo="$(git rev-parse --show-toplevel)" && \
@@ -44,6 +54,8 @@ git -C "$repo" checkout origin/main -- \
   copytrade_v4_muti/copytrade_config.json
 ```
 
+Windows PowerShell:
+
 ```powershell
 $repo=(git rev-parse --show-toplevel).Trim(); `
 git -C $repo fetch origin main; `
@@ -54,21 +66,97 @@ git -C $repo checkout origin/main -- `
   copytrade_v4_muti/copytrade_config.json
 ```
 
-### 可选：更新后快速自检
+## 2) 无 `.git` 的机器（宝塔/直接复制部署）
+
+你的实际路径：
+- `v3`: `/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v3_muti`
+- `v4`: `/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v4_muti`
+
+### 仅更新 v3
 
 ```bash
-repo="$(git rev-parse --show-toplevel)" && \
-pytest -q "$repo/copytrade_v3_muti" && \
-pytest -q "$repo/copytrade_v4_muti"
+set -euo pipefail
+dst="/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v3_muti"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+curl -L "https://github.com/meta-xucong/POLY_SMARTMONEY/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp"
+src="$tmp/POLY_SMARTMONEY-main/copytrade_v3_muti"
+
+cp -f "$src"/*.py "$dst"/
+cp -f "$src"/check_*.py "$dst"/
+cp -f "$src"/test_*.py "$dst"/
+cp -f "$src"/copytrade_config.json "$dst"/
+
+echo "v3 update done: $dst"
 ```
 
-```powershell
-$repo=(git rev-parse --show-toplevel).Trim(); `
-pytest -q (Join-Path $repo "copytrade_v3_muti"); `
-pytest -q (Join-Path $repo "copytrade_v4_muti")
+### 仅更新 v4
+
+```bash
+set -euo pipefail
+dst="/home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v4_muti"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+curl -L "https://github.com/meta-xucong/POLY_SMARTMONEY/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp"
+src="$tmp/POLY_SMARTMONEY-main/copytrade_v4_muti"
+
+cp -f "$src"/*.py "$dst"/
+cp -f "$src"/check_*.py "$dst"/
+cp -f "$src"/test_*.py "$dst"/
+cp -f "$src"/copytrade_config.json "$dst"/
+
+echo "v4 update done: $dst"
 ```
 
-## 备注
+## 3) 空白 VPS 一键部署（不含私钥，部署后手动填写）
 
-- 私钥请手动维护在你本地的 `accounts.json`。
-- 如果只想更新某一个版本，只执行对应那一段命令即可。
+用途：
+- 新 VPS 首次安装（无代码、无环境）。
+- 脚本会拉取最新代码，创建虚拟环境，安装依赖，并生成 `accounts.json` 模板。
+
+执行命令：
+
+```bash
+set -euo pipefail
+
+BASE="/home/trader/polymarket_api/POLY_SMARTMONEY"
+
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip curl tar
+
+mkdir -p "$(dirname "$BASE")"
+tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+curl -L "https://github.com/meta-xucong/POLY_SMARTMONEY/archive/refs/heads/main.tar.gz" | tar -xz -C "$tmp"
+src="$tmp/POLY_SMARTMONEY-main"
+
+mkdir -p "$BASE"
+cp -a "$src/copytrade_v1" "$BASE/" 2>/dev/null || true
+cp -a "$src/copytrade_v2" "$BASE/" 2>/dev/null || true
+cp -a "$src/copytrade_v3_muti" "$BASE/"
+cp -a "$src/copytrade_v4_muti" "$BASE/"
+cp -a "$src/smartmoney_query" "$BASE/"
+cp -a "$src/systemd" "$BASE/"
+cp -a "$src/check_key_address.py" "$BASE/" 2>/dev/null || true
+cp -a "$src/README.md" "$BASE/" 2>/dev/null || true
+
+python3 -m venv "$BASE/.venv"
+"$BASE/.venv/bin/pip" install -U pip wheel
+"$BASE/.venv/bin/pip" install py-clob-client requests eth-account
+
+mkdir -p "$BASE/copytrade_v3_muti/logs" "$BASE/copytrade_v4_muti/logs"
+[ -f "$BASE/copytrade_v3_muti/accounts.json" ] || cp "$BASE/copytrade_v3_muti/accounts.example.json" "$BASE/copytrade_v3_muti/accounts.json"
+[ -f "$BASE/copytrade_v4_muti/accounts.json" ] || cp "$BASE/copytrade_v4_muti/accounts.example.json" "$BASE/copytrade_v4_muti/accounts.json"
+
+echo "deploy done: $BASE"
+echo "next: edit accounts.json manually"
+echo "v3 account file: $BASE/copytrade_v3_muti/accounts.json"
+echo "v4 account file: $BASE/copytrade_v4_muti/accounts.json"
+```
+
+部署后快速验证（任选一个版本）：
+
+```bash
+/home/trader/polymarket_api/POLY_SMARTMONEY/.venv/bin/python /home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v3_muti/copytrade_run.py --dry-run
+```
+
+```bash
+/home/trader/polymarket_api/POLY_SMARTMONEY/.venv/bin/python /home/trader/polymarket_api/POLY_SMARTMONEY/copytrade_v4_muti/copytrade_run.py --dry-run
+```
