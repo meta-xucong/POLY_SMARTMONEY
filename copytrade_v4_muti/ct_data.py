@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
-import os
 import random
-import threading
 import time
 from typing import Dict, List, Tuple, Optional
 
@@ -11,40 +9,6 @@ import requests
 
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 from smartmoney_query.poly_martmoney_query.models import Position, Trade
-
-
-class _SimpleRateLimiter:
-    def __init__(self, rps: float) -> None:
-        self._lock = threading.Lock()
-        self._next_ts = 0.0
-        self.set_rps(rps)
-
-    def set_rps(self, rps: float) -> None:
-        self.rps = max(float(rps or 0.0), 0.0)
-        self.min_interval = (1.0 / self.rps) if self.rps > 0 else 0.0
-
-    def wait(self) -> None:
-        if self.min_interval <= 0:
-            return
-        with self._lock:
-            now = time.monotonic()
-            wait = max(0.0, self._next_ts - now)
-            target = max(self._next_ts, now) + self.min_interval
-            self._next_ts = target
-        if wait > 0:
-            time.sleep(wait)
-
-
-_DEFAULT_DATA_HTTP_MAX_RPS = float(os.getenv("CT_DATA_HTTP_MAX_RPS", "4"))
-_DATA_HTTP_LIMITER = _SimpleRateLimiter(_DEFAULT_DATA_HTTP_MAX_RPS)
-
-
-def configure_data_http_rate_limit(rps: float) -> None:
-    """Configure global per-process HTTP fallback rate limit in ct_data."""
-    try:
-        _DATA_HTTP_LIMITER.set_rps(float(rps))
-    except Exception:
-        pass
 
 
 def _extract_token_id_from_raw(raw: Dict[str, object] | None) -> Optional[str]:
@@ -280,10 +244,8 @@ def _fetch_positions_norm_http(
             try:
                 if callable(cache_disable_ctx):
                     with cache_disable_ctx():
-                        _DATA_HTTP_LIMITER.wait()
                         resp = session.get(url, params=params, headers=headers, timeout=15.0)
                 else:
-                    _DATA_HTTP_LIMITER.wait()
                     resp = session.get(url, params=params, headers=headers, timeout=15.0)
                 if resp.status_code == 429 or 500 <= resp.status_code < 600:
                     retryable = True
@@ -828,7 +790,6 @@ def _fetch_activity_actions_fallback(
             "start": int(start_ts_sec),
         }
         try:
-            _DATA_HTTP_LIMITER.wait()
             resp = session.get(url, params=params, timeout=15.0)
             resp.raise_for_status()
         except requests.RequestException as exc:

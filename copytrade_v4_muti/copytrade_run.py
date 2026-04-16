@@ -8,7 +8,6 @@ import logging.handlers
 import os
 import re
 import random
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -47,14 +46,12 @@ if str(REPO_ROOT) not in sys.path:
 from smartmoney_query.poly_martmoney_query.api_client import DataApiClient
 
 from ct_data import (
-    configure_data_http_rate_limit,
     fetch_positions_norm,
     fetch_target_actions_since,
     fetch_target_trades_since,
 )
 from ct_exec import (
     apply_actions,
-    configure_clob_rate_limit,
     fetch_open_orders_norm,
     get_orderbook,
     reconcile_one,
@@ -146,7 +143,6 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
-    # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
     payload = json.loads(path.read_text(encoding="utf-8-sig"))
     if not isinstance(payload, dict):
         raise ValueError("閰嶇疆鏂囦欢蹇呴』涓?JSON dict")
@@ -199,7 +195,7 @@ def _update_sell_health_monitor(
     """
     Track sell signal->execution health in a rolling window and emit warning on imbalance.
 
-    signals: target SELL actions observed this loop.
+    signals: local actionable SELL opportunities observed this loop.
     actions: SELL place actions that passed all local gates and were sent to apply_actions.
     """
     window_sec = int(cfg.get("sell_health_window_sec") or 600)
@@ -253,6 +249,57 @@ def _update_sell_health_monitor(
     monitor["start_ts"] = now_ts
     monitor["signals"] = 0
     monitor["actions"] = 0
+
+
+def _prepare_sell_health_monitor_for_run(state: Dict[str, Any], run_start_ms: int) -> None:
+    prev_run_start_ms = int(state.get("run_start_ms") or 0)
+    state["run_start_ms"] = int(run_start_ms)
+    if prev_run_start_ms != int(run_start_ms):
+        state.pop("sell_health_monitor", None)
+
+
+def _should_count_sell_health_signal(
+    *,
+    has_sell: bool,
+    my_shares: float,
+    open_sell_orders_count: int,
+    eps: float,
+) -> bool:
+    if not has_sell:
+        return False
+    # Only count fresh local sell opportunities. Existing SELL orders may be stale
+    # carry-over and should not look like a new execution miss.
+    return my_shares > eps
+
+
+def _normalize_idle_conflicting_actions(
+    *,
+    phase: str,
+    my_shares: float,
+    open_orders_count: int,
+    has_buy: bool,
+    buy_sum: float,
+    has_sell: bool,
+    sell_sum: float,
+    eps: float,
+) -> tuple[bool, float, bool, float, str]:
+    """
+    Avoid local churn when an IDLE token with no exposure sees both BUY and SELL in the
+    same loop. Keep only the net BUY edge; otherwise drop the conflict entirely.
+    """
+    buy_sum = float(buy_sum or 0.0)
+    sell_sum = float(sell_sum or 0.0)
+    if str(phase or "IDLE").upper() != "IDLE":
+        return has_buy, buy_sum, has_sell, sell_sum, ""
+    if my_shares > eps or int(open_orders_count or 0) > 0:
+        return has_buy, buy_sum, has_sell, sell_sum, ""
+    if not (has_buy and has_sell):
+        return has_buy, buy_sum, has_sell, sell_sum, ""
+
+    net_buy = buy_sum - sell_sum
+    if net_buy > eps:
+        return True, net_buy, False, 0.0, "keep_net_buy"
+    return False, 0.0, False, 0.0, "drop_conflict"
 
 
 def _is_evm_address(value: Optional[str]) -> bool:
@@ -761,6 +808,7 @@ def _fetch_all_target_actions(
     max_offset: int,
     taker_only: bool,
     logger: logging.Logger,
+    target_ratios: Dict[str, float] | None = None,
     target_blacklists: Dict[str, List[str]] | None = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -775,6 +823,7 @@ def _fetch_all_target_actions(
     from ct_data import fetch_target_actions_since, fetch_target_trades_since
 
     all_actions: List[Dict[str, Any]] = []
+    target_ratios = target_ratios or {}
     any_ok = False
     any_incomplete = False
     max_latest_ms = 0  # Track latest timestamp across all targets
@@ -812,9 +861,13 @@ def _fetch_all_target_actions(
             # Add source target to each action (with per-target blacklist filter on BUY only)
             blacklist = (target_blacklists or {}).get(target_addr.lower(), [])
             skipped_blacklist = 0
+            source_ratio = float(target_ratios.get(target_addr.lower(), 1.0))
             for action in actions:
                 action_copy = dict(action)
                 action_copy["_source_target"] = target_addr
+                action_copy["_source_target_ratio"] = source_ratio
+                raw_size = float(action_copy.get("size") or 0.0)
+                action_copy["size"] = raw_size * source_ratio
                 side = str(action_copy.get("side") or "").upper()
                 if blacklist and side == "BUY":
                     title_l = str(
@@ -889,7 +942,17 @@ def _should_accept_buy_action_source(
     source_target: str,
     preferred_source: str,
 ) -> bool:
-    """Filter BUY signal source in multi-target mode."""
+    """Backward-compatible BUY-only signal source filter."""
+    return _should_accept_action_source(mode=mode, side="BUY", source_target=source_target, preferred_source=preferred_source)
+
+
+def _should_accept_action_source(
+    mode: str,
+    side: str,
+    source_target: str,
+    preferred_source: str,
+) -> bool:
+    """Filter signal source for a specific action side in multi-target mode."""
     mode_norm = str(mode or "all").strip().lower()
     if mode_norm in ("position_source", "position_source_consistent"):
         if preferred_source and source_target and source_target != preferred_source:
@@ -1010,6 +1073,7 @@ def _collect_target_sell_token_ids(
     data_client: Any,
     target_addresses: List[str],
     logger: logging.Logger,
+    target_ratios: Dict[str, float] | None = None,
 ) -> set[str]:
     now_ms = int(time.time() * 1000)
     window_sec = max(60, int(cfg.get("hemostasis_recovery_window_sec") or 86400))
@@ -1025,6 +1089,7 @@ def _collect_target_sell_token_ids(
     actions_list, actions_info = _fetch_all_target_actions(
         data_client=data_client,
         target_addresses=target_addresses,
+        target_ratios=target_ratios,
         cursor_ms=cursor_ms,
         use_trades_api=use_trades_api,
         page_size=page_size,
@@ -1529,6 +1594,7 @@ def _run_hemostasis_recovery_startup(
     data_client: Any,
     account_contexts: List[AccountContext],
     target_addresses: List[str],
+    target_ratios: Dict[str, float],
     logger: logging.Logger,
     dry_run: bool = False,
 ) -> None:
@@ -1537,7 +1603,13 @@ def _run_hemostasis_recovery_startup(
     if not account_contexts:
         return
     try:
-        sell_token_ids = _collect_target_sell_token_ids(cfg, data_client, target_addresses, logger)
+        sell_token_ids = _collect_target_sell_token_ids(
+            cfg,
+            data_client,
+            target_addresses,
+            logger,
+            target_ratios=target_ratios,
+        )
     except Exception as exc:
         logger.warning("[HEMOSTASIS] scan failed, skip recovery: %s", exc)
         return
@@ -2567,211 +2639,8 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Force HTTP direct fetch for my positions (override config).",
     )
-    parser.add_argument("--worker-index", type=int, dest="worker_index", default=0)
-    parser.add_argument("--worker-count", type=int, dest="worker_count", default=1)
-    parser.add_argument(
-        "--worker-supervised",
-        action="store_true",
-        dest="worker_supervised",
-        help="Internal flag used by worker supervisor.",
-    )
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
-
-
-def _to_int(value: Any, default: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _to_float(value: Any, default: float) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
-def _configure_global_api_rate_limits(
-    cfg: Dict[str, Any],
-    *,
-    worker_count: int,
-    logger: logging.Logger,
-) -> None:
-    total_data_rps = max(0.2, _to_float(cfg.get("global_data_api_rps"), 2.0))
-    total_data_http_rps = max(0.2, _to_float(cfg.get("global_data_http_rps"), 4.0))
-    total_clob_rps = max(0.2, _to_float(cfg.get("global_clob_api_rps"), 8.0))
-    wc = max(1, int(worker_count))
-
-    per_worker_data_rps = max(0.2, total_data_rps / wc)
-    per_worker_data_http_rps = max(0.2, total_data_http_rps / wc)
-    per_worker_clob_rps = max(0.2, total_clob_rps / wc)
-
-    try:
-        from smartmoney_query.poly_martmoney_query import api_client as data_api_mod
-
-        if hasattr(data_api_mod, "RateLimiter"):
-            data_api_mod._GLOBAL_LIMITER = data_api_mod.RateLimiter(per_worker_data_rps)
-            data_api_mod.MAX_REQUESTS_PER_SECOND = per_worker_data_rps
-    except Exception as exc:
-        logger.warning("[RATE_LIMIT] failed to set data-api limiter: %s", exc)
-
-    try:
-        configure_data_http_rate_limit(per_worker_data_http_rps)
-    except Exception as exc:
-        logger.warning("[RATE_LIMIT] failed to set data-http limiter: %s", exc)
-
-    try:
-        configure_clob_rate_limit(per_worker_clob_rps)
-    except Exception as exc:
-        logger.warning("[RATE_LIMIT] failed to set clob limiter: %s", exc)
-
-    logger.info(
-        "[RATE_LIMIT] workers=%s data_rps(total=%.3f per_worker=%.3f) "
-        "data_http_rps(total=%.3f per_worker=%.3f) "
-        "clob_rps(total=%.3f per_worker=%.3f)",
-        wc,
-        total_data_rps,
-        per_worker_data_rps,
-        total_data_http_rps,
-        per_worker_data_http_rps,
-        total_clob_rps,
-        per_worker_clob_rps,
-    )
-
-
-def _build_worker_cmd(
-    args: argparse.Namespace,
-    *,
-    worker_index: int,
-    worker_count: int,
-) -> List[str]:
-    cmd: List[str] = [
-        sys.executable,
-        str(Path(__file__).resolve()),
-        "--config",
-        str(args.config),
-        "--state",
-        str(args.state),
-        "--worker-index",
-        str(worker_index),
-        "--worker-count",
-        str(worker_count),
-        "--worker-supervised",
-    ]
-    if args.target_address:
-        cmd.extend(["--target", str(args.target_address)])
-    if args.my_address:
-        cmd.extend(["--my", str(args.my_address)])
-    if args.follow_ratio is not None:
-        cmd.extend(["--ratio", str(args.follow_ratio)])
-    if args.poll_interval_sec is not None:
-        cmd.extend(["--poll", str(args.poll_interval_sec)])
-    if args.poll_interval_sec_exiting is not None:
-        cmd.extend(["--poll-exit", str(args.poll_interval_sec_exiting)])
-    if args.my_positions_force_http:
-        cmd.append("--my-positions-force-http")
-    if args.dry_run:
-        cmd.append("--dry-run")
-    return cmd
-
-
-def _run_worker_supervisor_if_needed(
-    *,
-    args: argparse.Namespace,
-    cfg: Dict[str, Any],
-    base_dir: Path,
-    logger: logging.Logger,
-) -> bool:
-    configured_workers = max(1, _to_int(cfg.get("account_workers"), 1))
-    if args.worker_supervised or configured_workers <= 1:
-        return False
-
-    logger.info("[WORKER] supervisor starting %s worker processes", configured_workers)
-
-    total_data_rps = max(0.2, _to_float(cfg.get("global_data_api_rps"), 2.0))
-    total_data_http_rps = max(0.2, _to_float(cfg.get("global_data_http_rps"), 4.0))
-    total_clob_rps = max(0.2, _to_float(cfg.get("global_clob_api_rps"), 8.0))
-
-    per_worker_data_rps = max(0.2, total_data_rps / configured_workers)
-    per_worker_data_http_rps = max(0.2, total_data_http_rps / configured_workers)
-    per_worker_clob_rps = max(0.2, total_clob_rps / configured_workers)
-
-    children: List[tuple[int, subprocess.Popen[Any]]] = []
-    try:
-        for worker_index in range(configured_workers):
-            cmd = _build_worker_cmd(
-                args,
-                worker_index=worker_index,
-                worker_count=configured_workers,
-            )
-            env = os.environ.copy()
-            env["SMART_QUERY_MAX_RPS"] = str(per_worker_data_rps)
-            env["CT_DATA_HTTP_MAX_RPS"] = str(per_worker_data_http_rps)
-            env["CT_CLOB_MAX_RPS"] = str(per_worker_clob_rps)
-            proc = subprocess.Popen(cmd, cwd=str(base_dir), env=env)
-            children.append((worker_index, proc))
-            logger.info(
-                "[WORKER] started worker=%s/%s pid=%s",
-                worker_index + 1,
-                configured_workers,
-                proc.pid,
-            )
-
-        while True:
-            for worker_index, proc in children:
-                rc = proc.poll()
-                if rc is not None:
-                    raise RuntimeError(
-                        f"worker {worker_index + 1}/{configured_workers} exited with code {rc}"
-                    )
-            time.sleep(1.0)
-    finally:
-        for _, proc in children:
-            if proc.poll() is None:
-                try:
-                    proc.terminate()
-                except Exception:
-                    pass
-        deadline = time.time() + 5.0
-        for _, proc in children:
-            if proc.poll() is None:
-                timeout = max(0.0, deadline - time.time())
-                try:
-                    proc.wait(timeout=timeout)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
-    return True
-
-
-def _apply_worker_shard(
-    account_contexts: List[AccountContext],
-    *,
-    worker_index: int,
-    worker_count: int,
-    logger: logging.Logger,
-) -> List[AccountContext]:
-    wc = max(1, int(worker_count))
-    wi = int(worker_index)
-    if wc <= 1:
-        return account_contexts
-    if wi < 0 or wi >= wc:
-        raise ValueError(f"Invalid worker_index={wi} for worker_count={wc}")
-    sharded = [acct for idx, acct in enumerate(account_contexts) if (idx % wc) == wi]
-    if not sharded:
-        raise ValueError(f"Worker shard empty: worker_index={wi}, worker_count={wc}")
-    logger.info(
-        "[WORKER] shard worker=%s/%s accounts=%s/%s",
-        wi + 1,
-        wc,
-        len(sharded),
-        len(account_contexts),
-    )
-    return sharded
 
 
 def _state_path_for_account(base_dir: Path, target_address: str, my_address: str) -> Path:
@@ -2797,7 +2666,6 @@ def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> Lis
         raise FileNotFoundError(f"Accounts file not found: {accounts_file}")
 
     try:
-        # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
         content = accounts_file.read_text(encoding="utf-8-sig")
         data = json.loads(content)
     except json.JSONDecodeError as e:
@@ -3043,23 +2911,6 @@ def main() -> None:
     logger = _setup_logging(cfg, cfg["target_address"], base_dir)
     target_level_skip_log_path = _resolve_target_level_skip_log_path(cfg, base_dir)
 
-    # Optional process-level worker supervisor: spawn N worker subprocesses,
-    # each handling a disjoint account shard.
-    _run_worker_supervisor_if_needed(
-        args=args,
-        cfg=cfg,
-        base_dir=base_dir,
-        logger=logger,
-    )
-
-    effective_worker_count = max(1, _to_int(args.worker_count, 1))
-    effective_worker_index = max(0, _to_int(args.worker_index, 0))
-    _configure_global_api_rate_limits(
-        cfg,
-        worker_count=effective_worker_count,
-        logger=logger,
-    )
-
     # Log resolved targets
     logger.info(
         "[MULTI-TARGET] Resolved %d target address(es): %s",
@@ -3079,12 +2930,6 @@ def main() -> None:
     # MULTI-ACCOUNT INITIALIZATION
     # ============================================================
     account_contexts = _init_account_contexts(cfg, base_dir, logger)
-    account_contexts = _apply_worker_shard(
-        account_contexts,
-        worker_index=effective_worker_index,
-        worker_count=effective_worker_count,
-        logger=logger,
-    )
     current_account_idx = 0  # Used for round-robin account selection
     all_account_ids: List[str] = [
         str(acct.my_address or "").strip().lower()
@@ -3135,10 +2980,11 @@ def main() -> None:
         state["seen_action_ids"] = []
         state["target_actions_cursor_ms"] = 0
         state["target_trades_cursor_ms"] = 0
-    state.pop("cumulative_buy_usd_total", None)
-    state.pop("cumulative_buy_usd_by_token", None)
     run_start_ms = int(time.time() * 1000)
-    state["run_start_ms"] = run_start_ms
+    for acct in account_contexts:
+        acct.state.pop("cumulative_buy_usd_total", None)
+        acct.state.pop("cumulative_buy_usd_by_token", None)
+        _prepare_sell_health_monitor_for_run(acct.state, run_start_ms)
     logger.info("[STATE] path=%s run_start_ms=%s", args.state, run_start_ms)
     state.setdefault("sizing", {})
     state["sizing"].setdefault("ema_delta_usd", None)
@@ -3496,22 +3342,12 @@ def main() -> None:
         data_client=data_client,
         account_contexts=account_contexts,
         target_addresses=target_addresses,
+        target_ratios=target_ratios,
         logger=logger,
         dry_run=bool(args.dry_run),
     )
 
-    if effective_worker_count > 1:
-        logger.info(
-            "[MULTI] Starting main loop worker=%s/%s with %d account(s) in round-robin mode",
-            effective_worker_index + 1,
-            effective_worker_count,
-            len(account_contexts),
-        )
-    else:
-        logger.info(
-            "[MULTI] Starting main loop with %d account(s) in round-robin mode",
-            len(account_contexts),
-        )
+    logger.info("[MULTI] Starting main loop with %d account(s) in round-robin mode", len(account_contexts))
 
     # Shared cross-account cache for target data
     shared_target_cache: Dict[str, Any] = {}
@@ -3595,6 +3431,7 @@ def main() -> None:
                     data_client,
                     target_addresses,
                     min_cursor_ms,
+                    target_ratios=target_ratios,
                     use_trades_api=use_trades_api_cache,
                     page_size=actions_page_size,
                     max_offset=actions_max_offset,
@@ -3937,7 +3774,6 @@ def main() -> None:
             elif side == "SELL":
                 has_sell_by_token[token_id] = True
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
-                sell_health_round["signals"] = int(sell_health_round.get("signals") or 0) + 1
                 if action_ms > 0:
                     prev_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
                     if action_ms > prev_ms:
@@ -4007,15 +3843,15 @@ def main() -> None:
             )
             if token_id:
                 tid = str(token_id)
-                if side == "BUY":
-                    preferred_source = str(position_source.get(tid) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                preferred_source = str(position_source.get(tid) or "").strip().lower()
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    preferred_source,
+                ):
+                    buy_source_filtered += 1
+                    continue
                 action["token_id"] = tid
                 _record_action(tid, side, size, action_ms)
                 if side == "BUY":
@@ -4623,15 +4459,20 @@ def main() -> None:
             if token_id:
                 token_key_by_token_id.setdefault(str(token_id), str(token_key or ""))
                 side = str(action.get("side") or "").upper()
-                if side == "BUY":
-                    preferred_source = str(position_source.get(str(token_id)) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                preferred_source = str(position_source.get(str(token_id)) or "").strip().lower()
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    preferred_source,
+                ):
+                    buy_source_filtered += 1
+                    continue
+                _record_action(
+                    token_id=str(token_id),
+                    side=side,
+                    size=float(action.get("size") or 0.0),
+                )
                 continue
             if not token_key:
                 continue
@@ -4641,15 +4482,15 @@ def main() -> None:
                 token_map[str(token_key)] = tid
                 token_key_by_token_id.setdefault(tid, str(token_key))
                 side = str(action.get("side") or "").upper()
-                if side == "BUY":
-                    preferred_source = str(position_source.get(tid) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                preferred_source = str(position_source.get(tid) or "").strip().lower()
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    preferred_source,
+                ):
+                    buy_source_filtered += 1
+                    continue
                 size = float(action.get("size") or 0.0)
                 _record_action(tid, side, size)
                 continue
@@ -4682,15 +4523,15 @@ def main() -> None:
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             tid = str(token_id)
-            if side == "BUY":
-                preferred_source = str(position_source.get(tid) or "").strip().lower()
-                if not _should_accept_buy_action_source(
-                    buy_actions_source_mode,
-                    source_target,
-                    preferred_source,
-                ):
-                    buy_source_filtered += 1
-                    continue
+            preferred_source = str(position_source.get(tid) or "").strip().lower()
+            if not _should_accept_action_source(
+                buy_actions_source_mode,
+                side,
+                source_target,
+                preferred_source,
+            ):
+                buy_source_filtered += 1
+                continue
             token_map[str(token_key)] = tid
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
@@ -5529,16 +5370,40 @@ def main() -> None:
                 state.setdefault("topic_unfilled_attempts", {}).pop(token_id, None)
                 last_nonzero_my_shares[token_id] = {"shares": float(my_shares), "ts": int(now_ts)}
             open_orders_count = len(open_orders)
+            open_sell_orders_count = sum(
+                1 for order in open_orders if str(order.get("side") or "").upper() == "SELL"
+            )
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             has_buy = bool(has_buy_by_token.get(token_id))
             has_sell = bool(has_sell_by_token.get(token_id))
             buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
             sell_sum = float(sell_sum_by_token.get(token_id, 0.0))
-            action_seen = has_buy or has_sell
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
+            has_buy, buy_sum, has_sell, sell_sum, conflict_resolution = _normalize_idle_conflicting_actions(
+                phase=phase,
+                my_shares=my_shares,
+                open_orders_count=open_orders_count,
+                has_buy=has_buy,
+                buy_sum=buy_sum,
+                has_sell=has_sell,
+                sell_sum=sell_sum,
+                eps=eps,
+            )
+            if conflict_resolution:
+                logger.info(
+                    "[ACTION_CONFLICT] token_id=%s phase=%s my_shares=%s orders=%s buy_sum=%.6f sell_sum=%.6f resolution=%s",
+                    token_id,
+                    phase,
+                    my_shares,
+                    open_orders_count,
+                    float(buy_sum_by_token.get(token_id, 0.0)),
+                    float(sell_sum_by_token.get(token_id, 0.0)),
+                    conflict_resolution,
+                )
+            action_seen = has_buy or has_sell
             base_deadband_shares = float(cfg.get("deadband_shares") or 0.0)
             token_deadband_shares = base_deadband_shares
             token_reentry_cooldown_sec = reentry_cooldown_sec
@@ -5779,6 +5644,14 @@ def main() -> None:
                     last_exit_ts_by_token[token_id] = int(now_ts)
                     phase = "IDLE"
                     logger.info("[TOPIC] RESET token_id=%s", token_id)
+
+            if _should_count_sell_health_signal(
+                has_sell=has_sell,
+                my_shares=my_shares,
+                open_sell_orders_count=open_sell_orders_count,
+                eps=eps,
+            ):
+                sell_health_round["signals"] = int(sell_health_round.get("signals") or 0) + 1
 
             is_exiting = phase == "EXITING"
             topic_active = topic_mode and phase in ("LONG", "EXITING")
@@ -8318,7 +8191,6 @@ if __name__ == "__main__":
             base_dir = os.path.dirname(os.path.abspath(__file__))
             cfg_path = config_path or os.path.join(base_dir, "copytrade_config.json")
             try:
-                # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
                 with open(cfg_path, "r", encoding="utf-8-sig") as f:
                     cfg = json.load(f)
                 log_dir = str(cfg.get("log_dir") or "logs")
@@ -8334,7 +8206,7 @@ if __name__ == "__main__":
         fatal_path = os.path.join(log_dir, "fatal_error.log")
         with open(fatal_path, "a", encoding="utf-8") as f:
             f.write("\n=== FATAL ERROR ===\n")
-            f.write(f"time_utc={datetime.utcnow().isoformat()}Z\n")
+            f.write(f"time_utc={datetime.now(timezone.utc).isoformat()}\n")
             f.write("argv=" + " ".join(sys.argv) + "\n")
             f.write(traceback.format_exc())
         raise
