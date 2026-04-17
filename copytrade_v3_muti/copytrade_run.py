@@ -144,8 +144,7 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
 def _load_config(path: Path) -> Dict[str, Any]:
     if not path.exists():
         raise FileNotFoundError(f"閰嶇疆鏂囦欢涓嶅瓨鍦? {path}")
-    # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
-    payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    payload = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("閰嶇疆鏂囦欢蹇呴』涓?JSON dict")
     return payload
@@ -563,6 +562,7 @@ def _fetch_all_target_actions(
     max_offset: int,
     taker_only: bool,
     logger: logging.Logger,
+    target_ratios: Dict[str, float] | None = None,
     target_blacklists: Dict[str, List[str]] | None = None,
 ) -> tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
@@ -577,6 +577,7 @@ def _fetch_all_target_actions(
     from ct_data import fetch_target_actions_since, fetch_target_trades_since
 
     all_actions: List[Dict[str, Any]] = []
+    target_ratios = target_ratios or {}
     any_ok = False
     any_incomplete = False
     max_latest_ms = 0  # Track latest timestamp across all targets
@@ -614,9 +615,13 @@ def _fetch_all_target_actions(
             # Add source target to each action (with per-target blacklist filter on BUY only)
             blacklist = (target_blacklists or {}).get(target_addr.lower(), [])
             skipped_blacklist = 0
+            source_ratio = float(target_ratios.get(target_addr.lower(), 1.0))
             for action in actions:
                 action_copy = dict(action)
                 action_copy["_source_target"] = target_addr
+                action_copy["_source_target_ratio"] = source_ratio
+                raw_size = float(action_copy.get("size") or 0.0)
+                action_copy["size"] = raw_size * source_ratio
                 side = str(action_copy.get("side") or "").upper()
                 if blacklist and side == "BUY":
                     title_l = str(
@@ -691,7 +696,17 @@ def _should_accept_buy_action_source(
     source_target: str,
     preferred_source: str,
 ) -> bool:
-    """Filter BUY signal source in multi-target mode."""
+    """Backward-compatible BUY-only signal source filter."""
+    return _should_accept_action_source(mode=mode, side="BUY", source_target=source_target, preferred_source=preferred_source)
+
+
+def _should_accept_action_source(
+    mode: str,
+    side: str,
+    source_target: str,
+    preferred_source: str,
+) -> bool:
+    """Filter signal source for a specific action side in multi-target mode."""
     mode_norm = str(mode or "all").strip().lower()
     if mode_norm in ("position_source", "position_source_consistent"):
         if preferred_source and source_target and source_target != preferred_source:
@@ -812,6 +827,7 @@ def _collect_target_sell_token_ids(
     data_client: Any,
     target_addresses: List[str],
     logger: logging.Logger,
+    target_ratios: Dict[str, float] | None = None,
 ) -> set[str]:
     now_ms = int(time.time() * 1000)
     window_sec = max(60, int(cfg.get("hemostasis_recovery_window_sec") or 86400))
@@ -827,6 +843,7 @@ def _collect_target_sell_token_ids(
     actions_list, actions_info = _fetch_all_target_actions(
         data_client=data_client,
         target_addresses=target_addresses,
+        target_ratios=target_ratios,
         cursor_ms=cursor_ms,
         use_trades_api=use_trades_api,
         page_size=page_size,
@@ -1332,6 +1349,7 @@ def _run_hemostasis_recovery_startup(
     account_contexts: List[AccountContext],
     target_addresses: List[str],
     logger: logging.Logger,
+    target_ratios: Dict[str, float] | None = None,
     dry_run: bool = False,
 ) -> None:
     if not _cfg_bool(cfg.get("hemostasis_recovery_enabled"), False):
@@ -1339,7 +1357,13 @@ def _run_hemostasis_recovery_startup(
     if not account_contexts:
         return
     try:
-        sell_token_ids = _collect_target_sell_token_ids(cfg, data_client, target_addresses, logger)
+        sell_token_ids = _collect_target_sell_token_ids(
+            cfg,
+            data_client,
+            target_addresses,
+            logger,
+            target_ratios=target_ratios,
+        )
     except Exception as exc:
         logger.warning("[HEMOSTASIS] scan failed, skip recovery: %s", exc)
         return
@@ -2396,8 +2420,7 @@ def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> Lis
         raise FileNotFoundError(f"Accounts file not found: {accounts_file}")
 
     try:
-        # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
-        content = accounts_file.read_text(encoding="utf-8-sig")
+        content = accounts_file.read_text(encoding="utf-8")
         data = json.loads(content)
     except json.JSONDecodeError as e:
         raise ValueError(f"Invalid JSON in accounts file: {e}")
@@ -3039,6 +3062,7 @@ def main() -> None:
         data_client=data_client,
         account_contexts=account_contexts,
         target_addresses=target_addresses,
+        target_ratios=target_ratios,
         logger=logger,
         dry_run=bool(args.dry_run),
     )
@@ -3126,6 +3150,7 @@ def main() -> None:
                     taker_only=bool(cfg.get("actions_taker_only", False)),
                     logger=logger,
                     target_blacklists=target_blacklists,
+                    target_ratios=target_ratios,
                 )
             except Exception as exc:
                 logger.warning("[SHARED_CACHE] fetch target actions failed: %s", exc)
@@ -3428,6 +3453,9 @@ def main() -> None:
         must_exit_clear_on_buy_min_target_shares = max(
             0.0, float(cfg.get("must_exit_clear_on_buy_min_target_shares") or 1.0)
         )
+        first_seen_probe_action_window_sec = max(
+            300, int(cfg.get("first_seen_probe_action_window_sec") or 300)
+        )
         buy_actions_source_mode = str(cfg.get("buy_actions_source_mode") or "all").strip().lower()
         lag_ms = 0
         now_ms = int(now_ts * 1000)
@@ -3446,6 +3474,10 @@ def main() -> None:
         last_target_sell_action_ts_by_token = state.setdefault(
             "last_target_sell_action_ts_by_token", {}
         )
+        last_target_action_ts_by_token = state.setdefault(
+            "last_target_action_ts_by_token",
+            state.get("last_target_action_ts_by_token", {}),
+        )
         last_exit_ts_by_token = state.setdefault("last_exit_ts_by_token", {})
         position_source = dict(cached_position_source)
         buy_source_filtered = 0
@@ -3453,6 +3485,10 @@ def main() -> None:
         def _record_action(token_id: str, side: str, size: float, action_ms: int = 0) -> None:
             if not token_id or size <= 0:
                 return
+            if action_ms > 0:
+                prev_action_ms = int(last_target_action_ts_by_token.get(token_id) or 0)
+                if action_ms > prev_action_ms:
+                    last_target_action_ts_by_token[token_id] = int(action_ms)
             if side == "BUY":
                 has_buy_by_token[token_id] = True
                 buy_sum_by_token[token_id] = buy_sum_by_token.get(token_id, 0.0) + size
@@ -3523,21 +3559,19 @@ def main() -> None:
             size = float(action.get("size") or 0.0)
             action_ms = _action_ms(action)
             source_target = str(action.get("_source_target") or "").strip().lower()
-
             token_id = action.get("token_id") or _extract_token_id_from_raw(
                 action.get("raw") or {}
             )
             if token_id:
                 tid = str(token_id)
-                if side == "BUY":
-                    preferred_source = str(position_source.get(tid) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    str(position_source.get(tid) or "").strip().lower(),
+                ):
+                    buy_source_filtered += 1
+                    continue
                 action["token_id"] = tid
                 _record_action(tid, side, size, action_ms)
             else:
@@ -4137,15 +4171,14 @@ def main() -> None:
             if token_id:
                 token_key_by_token_id.setdefault(str(token_id), str(token_key or ""))
                 side = str(action.get("side") or "").upper()
-                if side == "BUY":
-                    preferred_source = str(position_source.get(str(token_id)) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    str(position_source.get(str(token_id)) or "").strip().lower(),
+                ):
+                    buy_source_filtered += 1
+                    continue
                 continue
             if not token_key:
                 continue
@@ -4155,15 +4188,14 @@ def main() -> None:
                 token_map[str(token_key)] = tid
                 token_key_by_token_id.setdefault(tid, str(token_key))
                 side = str(action.get("side") or "").upper()
-                if side == "BUY":
-                    preferred_source = str(position_source.get(tid) or "").strip().lower()
-                    if not _should_accept_buy_action_source(
-                        buy_actions_source_mode,
-                        source_target,
-                        preferred_source,
-                    ):
-                        buy_source_filtered += 1
-                        continue
+                if not _should_accept_action_source(
+                    buy_actions_source_mode,
+                    side,
+                    source_target,
+                    str(position_source.get(tid) or "").strip().lower(),
+                ):
+                    buy_source_filtered += 1
+                    continue
                 size = float(action.get("size") or 0.0)
                 _record_action(tid, side, size)
                 continue
@@ -4196,15 +4228,14 @@ def main() -> None:
             side = str(action.get("side") or "").upper()
             size = float(action.get("size") or 0.0)
             tid = str(token_id)
-            if side == "BUY":
-                preferred_source = str(position_source.get(tid) or "").strip().lower()
-                if not _should_accept_buy_action_source(
-                    buy_actions_source_mode,
-                    source_target,
-                    preferred_source,
-                ):
-                    buy_source_filtered += 1
-                    continue
+            if not _should_accept_action_source(
+                buy_actions_source_mode,
+                side,
+                source_target,
+                str(position_source.get(tid) or "").strip().lower(),
+            ):
+                buy_source_filtered += 1
+                continue
             token_map[str(token_key)] = tid
             _record_action(tid, side, size)
             token_key_by_token_id.setdefault(tid, str(token_key))
@@ -5469,12 +5500,18 @@ def main() -> None:
             should_update_last = t_now_present
             if t_last is None and (not action_seen) and (not topic_active):
                 _maybe_update_target_last(state, token_id, t_now, should_update_last)
+                last_target_action_ms = int(last_target_action_ts_by_token.get(token_id) or 0)
+                has_recent_target_action = (
+                    last_target_action_ms > 0
+                    and (now_ms - last_target_action_ms) <= first_seen_probe_action_window_sec * 1000
+                )
                 should_probe = (
                     bool(state.get("bootstrapped"))
                     and (not probe_blocked_by_boot)
                     and bool(cfg.get("probe_buy_on_first_seen", True))
                     and t_now is not None
                     and float(t_now) > 0
+                    and has_recent_target_action
                     and token_id not in set(state.get("probed_token_ids", []))
                     and my_shares <= 0
                 )
@@ -6471,6 +6508,11 @@ def main() -> None:
             actions_unreliable_until = int(state.get("actions_unreliable_until") or 0)
             actions_unreliable = actions_unreliable_until > now_ts
             force_exit_by_confirm_drop = False
+            topic_has_fresh_signal = (
+                abs(d_target) > eps
+                or bool(has_buy)
+                or bool(has_sell)
+            )
             if has_sell and d_target >= -eps:
                 d_target = -max(sell_sum, eps)
                 logger.info(
@@ -6802,7 +6844,12 @@ def main() -> None:
                                 boot_scope,
                             )
 
-                    if (not buy_blocked_by_boot) and (not st.get("did_probe")) and my_shares <= eps:
+                    if (
+                        (not buy_blocked_by_boot)
+                        and topic_has_fresh_signal
+                        and (not st.get("did_probe"))
+                        and my_shares <= eps
+                    ):
                         my_target = min(cap_shares, cap_shares_notional, my_shares + probe_shares)
                         probe_attempted = True
                         dedup_key = f"TOPIC_PROBE:{token_id}"
@@ -6816,7 +6863,11 @@ def main() -> None:
                             else:
                                 logger.info("[TOPIC] PROBE token_id=%s target=%s", token_id, my_target)
 
-                    if (not buy_blocked_by_boot) and (not st.get("entry_sized")):
+                    if (
+                        (not buy_blocked_by_boot)
+                        and (not st.get("entry_sized"))
+                        and topic_has_fresh_signal
+                    ):
                         first_buy_ts = int(st.get("first_buy_ts") or now_ts)
                         if now_ts - first_buy_ts >= entry_settle_sec:
                             base = float(t_now) if t_now is not None else float(
@@ -7756,8 +7807,7 @@ if __name__ == "__main__":
             base_dir = os.path.dirname(os.path.abspath(__file__))
             cfg_path = config_path or os.path.join(base_dir, "copytrade_config.json")
             try:
-                # Use utf-8-sig to tolerate BOM-prefixed JSON from Windows editors.
-                with open(cfg_path, "r", encoding="utf-8-sig") as f:
+                with open(cfg_path, "r", encoding="utf-8") as f:
                     cfg = json.load(f)
                 log_dir = str(cfg.get("log_dir") or "logs")
             except Exception:
@@ -7776,5 +7826,3 @@ if __name__ == "__main__":
             f.write("argv=" + " ".join(sys.argv) + "\n")
             f.write(traceback.format_exc())
         raise
-
-
