@@ -166,6 +166,7 @@
   "ignore_boot_tokens": false,
   "ignore_boot_tokens_scope": "probe_only",
   "probe_order_usd": 1,
+  "first_seen_probe_action_window_sec": 300,
   "follow_new_topics_only": false,
   "adopt_existing_orders_on_boot": true,
   "maker_only": true,
