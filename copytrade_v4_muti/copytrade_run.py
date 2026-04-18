@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import glob
 import logging
@@ -463,6 +464,88 @@ def _pick_target_level_skipped_accounts(
         "skipped_accounts": list(picked),
     }
     return [str(item).strip().lower() for item in picked if str(item).strip()]
+
+
+def _normalize_account_ids(account_ids: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in account_ids:
+        acct_id = str(item or "").strip().lower()
+        if not acct_id or acct_id in seen:
+            continue
+        seen.add(acct_id)
+        normalized.append(acct_id)
+    normalized.sort()
+    return normalized
+
+
+def _normalize_account_ids_keep_order(account_ids: List[str]) -> List[str]:
+    normalized: List[str] = []
+    seen: Set[str] = set()
+    for item in account_ids:
+        acct_id = str(item or "").strip().lower()
+        if not acct_id or acct_id in seen:
+            continue
+        seen.add(acct_id)
+        normalized.append(acct_id)
+    return normalized
+
+
+def _resolve_target_level_seed(cfg: Dict[str, Any]) -> str:
+    seed = str(cfg.get("target_level_seed") or "").strip()
+    return seed or "token_sticky_v1"
+
+
+def _pick_token_sticky_follow_accounts(
+    token_id: str,
+    all_account_ids: List[str],
+    skip_ratio: float,
+    now_ts: int,
+    decision_cache: Dict[str, Dict[str, Any]],
+    seed: str,
+    assigned_level: str = "",
+) -> List[str]:
+    token_key = str(token_id or "").strip()
+    normalized_accounts = _normalize_account_ids(all_account_ids)
+    total_accounts = len(normalized_accounts)
+    skip_count = _calc_skip_count(total_accounts, skip_ratio)
+    follow_count = max(0, total_accounts - skip_count)
+    if total_accounts <= 0:
+        return []
+
+    entry = decision_cache.get(token_key) or {}
+    cached_follow = entry.get("follow_accounts")
+    if (
+        entry
+        and int(entry.get("total_accounts") or 0) == total_accounts
+        and isinstance(cached_follow, list)
+        and str(entry.get("seed") or "") == str(seed or "")
+    ):
+        entry["ts"] = int(now_ts)
+        decision_cache[token_key] = entry
+        return [acct for acct in _normalize_account_ids_keep_order(cached_follow) if acct]
+
+    ranked_accounts = sorted(
+        normalized_accounts,
+        key=lambda acct_id: hashlib.sha256(
+            f"{seed}|{token_key}|{acct_id}".encode("utf-8")
+        ).hexdigest(),
+    )
+    follow_accounts = ranked_accounts[:follow_count]
+    follow_set = set(follow_accounts)
+    skipped_accounts = [acct_id for acct_id in normalized_accounts if acct_id not in follow_set]
+    decision_cache[token_key] = {
+        "ts": int(now_ts),
+        "seed": str(seed or ""),
+        "skip_count": int(skip_count),
+        "follow_count": int(follow_count),
+        "total_accounts": int(total_accounts),
+        "skip_ratio": float(skip_ratio),
+        "assigned_level": str(assigned_level or ""),
+        "follow_accounts": list(follow_accounts),
+        "skipped_accounts": list(skipped_accounts),
+    }
+    return list(follow_accounts)
 
 
 def _shorten_address(address: str) -> str:
@@ -1440,6 +1523,8 @@ def _run_hemostasis_recovery_for_account(
                     "size": float(sell_shares),
                     "_taker": True,
                     "_available_shares": float(shares),
+                    "_exit_flow": True,
+                    "_exit_stage": 3,
                 }
             )
             placed = summary.get("placed_tokens")
@@ -2247,6 +2332,10 @@ def _mark_must_exit_token(
     token_id = str(token_id or "").strip()
     if not token_id:
         return
+    if source in {"target_sell_action", "reconcile_loop"} and _is_exit_finalization_active(
+        state, token_id, now_ts
+    ):
+        return
     must_exit = state.setdefault("must_exit_tokens", {})
     if not isinstance(must_exit, dict):
         must_exit = {}
@@ -2351,6 +2440,87 @@ def _should_clear_must_exit_without_inventory(
         and now_ts - int(last_ts) <= cache_hold_sec
     )
     return acc_usd <= 0.01 and (not cache_active)
+
+
+def _prune_exit_finalization(state: Dict[str, Any], now_ts: int) -> None:
+    bucket = state.get("exit_finalization")
+    if not isinstance(bucket, dict):
+        state["exit_finalization"] = {}
+        return
+    for token_id, meta in list(bucket.items()):
+        if not isinstance(meta, dict):
+            bucket.pop(token_id, None)
+            continue
+        until_ts = int(meta.get("until") or 0)
+        if until_ts <= 0 or now_ts >= until_ts:
+            bucket.pop(token_id, None)
+
+
+def _clear_exit_finalization_on_exposure(
+    state: Dict[str, Any],
+    token_id: str,
+    my_shares: float,
+    open_orders: List[Dict[str, Any]],
+    eps: float,
+) -> None:
+    if float(my_shares or 0.0) <= max(0.0, float(eps or 0.0)) and not open_orders:
+        return
+    bucket = state.get("exit_finalization")
+    if isinstance(bucket, dict):
+        bucket.pop(str(token_id or "").strip(), None)
+
+
+def _is_exit_finalization_active(state: Dict[str, Any], token_id: str, now_ts: int) -> bool:
+    bucket = state.get("exit_finalization")
+    if not isinstance(bucket, dict):
+        return False
+    meta = bucket.get(str(token_id or "").strip())
+    if not isinstance(meta, dict):
+        return False
+    return int(meta.get("until") or 0) > int(now_ts or 0)
+
+
+def _finalize_exited_token_state(
+    state: Dict[str, Any],
+    token_id: str,
+    now_ts: int,
+    cfg: Dict[str, Any],
+    logger: logging.Logger,
+    reason: str,
+) -> None:
+    token_id = str(token_id or "").strip()
+    if not token_id:
+        return
+    hold_sec = max(0, int(cfg.get("exit_finalization_hold_sec") or 180))
+    bucket = state.setdefault("exit_finalization", {})
+    if not isinstance(bucket, dict):
+        state["exit_finalization"] = {}
+        bucket = state["exit_finalization"]
+    until_ts = int(now_ts) + hold_sec
+    bucket[token_id] = {"ts": int(now_ts), "until": until_ts, "reason": str(reason or "")}
+
+    for key in (
+        "must_exit_tokens",
+        "last_nonzero_my_shares",
+        "sell_shares_accumulator",
+        "exit_sell_state",
+        "intent_keys",
+        "topic_unfilled_attempts",
+    ):
+        container = state.get(key)
+        if isinstance(container, dict):
+            container.pop(token_id, None)
+
+    last_exit = state.setdefault("last_exit_ts_by_token", {})
+    if isinstance(last_exit, dict):
+        last_exit[token_id] = int(now_ts)
+
+    logger.info(
+        "[EXIT_FINALIZED] token_id=%s reason=%s hold_until=%s",
+        token_id,
+        reason or "exit_complete",
+        until_ts,
+    )
 
 
 def _intent_key(phase: str, desired_side: str, desired_shares: float) -> Dict[str, Any]:
@@ -2697,34 +2867,84 @@ def _run_worker_supervisor_if_needed(
     per_worker_data_rps = max(0.2, total_data_rps / configured_workers)
     per_worker_data_http_rps = max(0.2, total_data_http_rps / configured_workers)
     per_worker_clob_rps = max(0.2, total_clob_rps / configured_workers)
+    worker_restart_limit = max(0, _to_int(cfg.get("worker_restart_limit"), 2))
+    worker_restart_window_sec = max(
+        60, _to_int(cfg.get("worker_restart_window_sec"), 900)
+    )
 
     children: List[tuple[int, subprocess.Popen[Any]]] = []
-    try:
-        for worker_index in range(configured_workers):
-            cmd = _build_worker_cmd(
-                args,
-                worker_index=worker_index,
-                worker_count=configured_workers,
+    restart_history: Dict[int, List[float]] = {}
+
+    def _spawn_worker(
+        worker_index: int,
+        *,
+        restart_count: int = 0,
+    ) -> subprocess.Popen[Any]:
+        cmd = _build_worker_cmd(
+            args,
+            worker_index=worker_index,
+            worker_count=configured_workers,
+        )
+        env = os.environ.copy()
+        env["SMART_QUERY_MAX_RPS"] = str(per_worker_data_rps)
+        env["CT_DATA_HTTP_MAX_RPS"] = str(per_worker_data_http_rps)
+        env["CT_CLOB_MAX_RPS"] = str(per_worker_clob_rps)
+        proc = subprocess.Popen(cmd, cwd=str(base_dir), env=env)
+        if restart_count > 0:
+            logger.warning(
+                "[WORKER] restarted worker=%s/%s pid=%s restart=%s/%s window=%ss",
+                worker_index + 1,
+                configured_workers,
+                proc.pid,
+                restart_count,
+                worker_restart_limit,
+                worker_restart_window_sec,
             )
-            env = os.environ.copy()
-            env["SMART_QUERY_MAX_RPS"] = str(per_worker_data_rps)
-            env["CT_DATA_HTTP_MAX_RPS"] = str(per_worker_data_http_rps)
-            env["CT_CLOB_MAX_RPS"] = str(per_worker_clob_rps)
-            proc = subprocess.Popen(cmd, cwd=str(base_dir), env=env)
-            children.append((worker_index, proc))
+        else:
             logger.info(
                 "[WORKER] started worker=%s/%s pid=%s",
                 worker_index + 1,
                 configured_workers,
                 proc.pid,
             )
+        return proc
+
+    try:
+        for worker_index in range(configured_workers):
+            proc = _spawn_worker(worker_index)
+            children.append((worker_index, proc))
 
         while True:
-            for worker_index, proc in children:
+            for idx, (worker_index, proc) in enumerate(children):
                 rc = proc.poll()
                 if rc is not None:
-                    raise RuntimeError(
-                        f"worker {worker_index + 1}/{configured_workers} exited with code {rc}"
+                    now_monotonic = time.time()
+                    history = restart_history.setdefault(worker_index, [])
+                    history[:] = [
+                        ts
+                        for ts in history
+                        if now_monotonic - ts <= worker_restart_window_sec
+                    ]
+                    if len(history) >= worker_restart_limit:
+                        raise RuntimeError(
+                            f"worker {worker_index + 1}/{configured_workers} exited "
+                            f"with code {rc} after {len(history)} restarts "
+                            f"within {worker_restart_window_sec}s"
+                        )
+                    history.append(now_monotonic)
+                    logger.warning(
+                        "[WORKER] worker=%s/%s pid=%s exited rc=%s; "
+                        "attempting restart %s/%s",
+                        worker_index + 1,
+                        configured_workers,
+                        proc.pid,
+                        rc,
+                        len(history),
+                        worker_restart_limit,
+                    )
+                    children[idx] = (
+                        worker_index,
+                        _spawn_worker(worker_index, restart_count=len(history)),
                     )
             time.sleep(1.0)
     finally:
@@ -2922,12 +3142,28 @@ def _init_account_contexts(
         state.setdefault("seen_action_ids", [])
         state.setdefault("last_reprice_ts_by_token", {})
         state.setdefault("place_fail_until", {})
+        state.setdefault("exit_sell_state", {})
+        state.setdefault("exit_finalization", {})
         state.setdefault("sell_reconcile_lock_until", {})
         state.setdefault("missing_data_freeze", {})
         state.setdefault("resolver_fail_cache", {})
         state.setdefault("closed_token_keys", {})
         state.setdefault("must_exit_tokens", {})
         state.setdefault("last_nonzero_my_shares", {})
+        if isinstance(state.get("exit_sell_state"), dict) and state["exit_sell_state"]:
+            logger.info(
+                "[STATE] account=%s clearing stale exit_sell_state entries=%s",
+                acct_name,
+                len(state["exit_sell_state"]),
+            )
+            state["exit_sell_state"] = {}
+        if isinstance(state.get("exit_finalization"), dict) and state["exit_finalization"]:
+            logger.info(
+                "[STATE] account=%s clearing stale exit_finalization entries=%s",
+                acct_name,
+                len(state["exit_finalization"]),
+            )
+            state["exit_finalization"] = {}
 
         ctx = AccountContext(
             name=acct_name,
@@ -3078,9 +3314,18 @@ def main() -> None:
     # ============================================================
     # MULTI-ACCOUNT INITIALIZATION
     # ============================================================
-    account_contexts = _init_account_contexts(cfg, base_dir, logger)
+    all_account_contexts = _init_account_contexts(cfg, base_dir, logger)
+    all_enabled_account_ids_global: List[str] = [
+        str(acct.my_address or "").strip().lower()
+        for acct in all_account_contexts
+        if str(acct.my_address or "").strip()
+    ]
+    all_account_name_by_id: Dict[str, str] = {
+        str(acct.my_address or "").strip().lower(): str(acct.name or _shorten_address(acct.my_address))
+        for acct in all_account_contexts
+    }
     account_contexts = _apply_worker_shard(
-        account_contexts,
+        all_account_contexts,
         worker_index=effective_worker_index,
         worker_count=effective_worker_count,
         logger=logger,
@@ -3091,13 +3336,9 @@ def main() -> None:
         for acct in account_contexts
         if str(acct.my_address or "").strip()
     ]
-    all_account_name_by_id: Dict[str, str] = {
-        str(acct.my_address or "").strip().lower(): str(acct.name or _shorten_address(acct.my_address))
-        for acct in account_contexts
-    }
-    target_level_signal_decisions: Dict[str, Dict[str, Any]] = {}
-    target_level_logged_signals: set[str] = set()
-    target_level_signal_cache_ttl_sec = int(cfg.get("target_level_signal_cache_ttl_sec") or 3600)
+    target_level_token_decisions: Dict[str, Dict[str, Any]] = {}
+    target_level_logged_tokens: set[str] = set()
+    target_level_seed = _resolve_target_level_seed(cfg)
 
     logger.info(
         "[MULTI] Initialized %d follower account(s) for %d target(s)",
@@ -3185,6 +3426,8 @@ def main() -> None:
     state.setdefault("last_reprice_ts_by_token", {})
     state.setdefault("adopted_existing_orders", False)
     state.setdefault("place_fail_until", {})
+    state.setdefault("exit_sell_state", {})
+    state.setdefault("exit_finalization", {})
     state.setdefault("sell_reconcile_lock_until", {})
     state.setdefault("missing_data_freeze", {})
     state.setdefault("resolver_fail_cache", {})
@@ -3214,6 +3457,8 @@ def main() -> None:
         state["boot_run_start_ms"] = 0
     if not isinstance(state.get("probed_token_ids"), list):
         state["probed_token_ids"] = []
+    if not isinstance(state.get("exit_finalization"), dict):
+        state["exit_finalization"] = {}
     if not isinstance(state.get("ignored_tokens"), dict):
         state["ignored_tokens"] = {}
     if not isinstance(state.get("market_status_cache"), dict):
@@ -3250,6 +3495,8 @@ def main() -> None:
         state["adopted_existing_orders"] = False
     if not isinstance(state.get("place_fail_until"), dict):
         state["place_fail_until"] = {}
+    if not isinstance(state.get("exit_sell_state"), dict):
+        state["exit_sell_state"] = {}
     if not isinstance(state.get("sell_reconcile_lock_until"), dict):
         state["sell_reconcile_lock_until"] = {}
     if not isinstance(state.get("target_positions_nonce_last_ts"), (int, float)):
@@ -3323,7 +3570,6 @@ def main() -> None:
         nonlocal config_reload_sec
         nonlocal max_resolve_target_positions_per_loop
         nonlocal risk_summary_interval_sec
-        nonlocal target_level_signal_cache_ttl_sec
         poll_interval = int(cfg.get("poll_interval_sec") or 20)
         poll_interval_exiting = int(cfg.get("poll_interval_sec_exiting") or poll_interval)
         size_threshold = float(cfg.get("size_threshold") or 0)
@@ -3352,7 +3598,6 @@ def main() -> None:
             cfg.get("max_resolve_target_positions_per_loop") or 20
         )
         risk_summary_interval_sec = int(cfg.get("risk_summary_interval_sec") or 120)
-        target_level_signal_cache_ttl_sec = int(cfg.get("target_level_signal_cache_ttl_sec") or 3600)
         # Log deduplication: suppress repetitive logs within this window (0 = disabled)
         log_dedup_window = float(cfg.get("log_dedup_window_sec") or 300.0)
         _log_dedup.set_window(log_dedup_window)
@@ -3371,7 +3616,7 @@ def main() -> None:
         nonlocal cfg, last_config_reload_ts, last_config_mtime
         nonlocal target_levels, target_level_skip_ratios
         nonlocal target_level_skip_log_path
-        nonlocal target_level_signal_decisions, target_level_logged_signals
+        nonlocal target_level_seed
         try:
             new_cfg = _load_config(Path(args.config))
         except Exception as exc:
@@ -3403,8 +3648,7 @@ def main() -> None:
         target_levels = _resolve_target_level_map(cfg, target_addresses)
         target_level_skip_ratios = _resolve_target_level_skip_ratios(cfg)
         target_level_skip_log_path = _resolve_target_level_skip_log_path(cfg, base_dir)
-        target_level_signal_decisions.clear()
-        target_level_logged_signals.clear()
+        target_level_seed = _resolve_target_level_seed(cfg)
         state["follow_ratio"] = cfg.get("follow_ratio")
         _apply_cfg_settings()
         _refresh_log_level()
@@ -3526,13 +3770,8 @@ def main() -> None:
 
         now_ts = int(time.time())
         now_wall = time.time()
-        _prune_target_level_decisions(
-            target_level_signal_decisions,
-            now_ts=now_ts,
-            ttl_sec=target_level_signal_cache_ttl_sec,
-        )
-        if len(target_level_logged_signals) > 6000:
-            target_level_logged_signals.intersection_update(target_level_signal_decisions.keys())
+        for acct_ctx_tmp in account_contexts:
+            _prune_exit_finalization(acct_ctx_tmp.state, now_ts)
 
         # ============================================================
         # SHARED TARGET DATA CACHE (cross-account)
@@ -3921,6 +4160,7 @@ def main() -> None:
             "seen_trade_ids" if actions_source in ("trade", "trades") else "seen_action_ids"
         )
         sell_health_round = {"signals": 0, "actions": 0}
+        sell_signal_count_by_token: Dict[str, int] = {}
         last_target_sell_action_ts_by_token = state.setdefault(
             "last_target_sell_action_ts_by_token", {}
         )
@@ -3937,7 +4177,9 @@ def main() -> None:
             elif side == "SELL":
                 has_sell_by_token[token_id] = True
                 sell_sum_by_token[token_id] = sell_sum_by_token.get(token_id, 0.0) + size
-                sell_health_round["signals"] = int(sell_health_round.get("signals") or 0) + 1
+                sell_signal_count_by_token[token_id] = int(
+                    sell_signal_count_by_token.get(token_id) or 0
+                ) + 1
                 if action_ms > 0:
                     prev_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
                     if action_ms > prev_ms:
@@ -5149,6 +5391,14 @@ def main() -> None:
                         # Hard confirmed after quarantine
                         topic_state.pop(tid, None)
                         state.setdefault("sell_shares_accumulator", {}).pop(tid, None)
+                        _finalize_exited_token_state(
+                            state=state,
+                            token_id=tid,
+                            now_ts=now_ts,
+                            cfg=cfg,
+                            logger=logger,
+                            reason="zero_position_no_orders",
+                        )
                         logger.info(
                             "[TOPIC] CLEANUP_CONFIRMED token_id=%s reason=zero_position_no_orders quarantine=%s",
                             tid,
@@ -5529,6 +5779,13 @@ def main() -> None:
                 state.setdefault("topic_unfilled_attempts", {}).pop(token_id, None)
                 last_nonzero_my_shares[token_id] = {"shares": float(my_shares), "ts": int(now_ts)}
             open_orders_count = len(open_orders)
+            open_sell_orders_count = sum(
+                1 for order in open_orders if str(order.get("side") or "").upper() == "SELL"
+            )
+            _clear_exit_finalization_on_exposure(state, token_id, my_shares, open_orders, eps)
+            sell_signal_count = int(sell_signal_count_by_token.get(token_id) or 0)
+            if sell_signal_count > 0 and (my_shares > eps or open_sell_orders_count > 0):
+                sell_health_round["signals"] = int(sell_health_round.get("signals") or 0) + sell_signal_count
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             has_buy = bool(has_buy_by_token.get(token_id))
@@ -5604,9 +5861,14 @@ def main() -> None:
                     and (not action_seen)
                     and _should_clear_must_exit_without_inventory(state, token_id, now_ts, eps, cfg)
                 ):
-                    must_exit_tokens.pop(token_id, None)
-                    last_nonzero_my_shares.pop(token_id, None)
-                    last_exit_ts_by_token[token_id] = int(now_ts)
+                    _finalize_exited_token_state(
+                        state=state,
+                        token_id=token_id,
+                        now_ts=now_ts,
+                        cfg=cfg,
+                        logger=logger,
+                        reason="no_inventory_no_orders",
+                    )
                     must_exit_active = False
                     logger.info(
                         "[MUST_EXIT] token_id=%s clear reason=no_inventory_no_orders",
@@ -6828,9 +7090,15 @@ def main() -> None:
                         and str(act.get("side") or "").upper() == "SELL"
                         for act in actions
                     ) and is_exiting
+                    has_exit_flow_sell_place = any(
+                        act.get("type") == "place"
+                        and str(act.get("side") or "").upper() == "SELL"
+                        and bool(act.get("_exit_flow"))
+                        for act in actions
+                    ) and is_exiting
                     ignore_place_backoff = bool(
                         cfg.get("exit_ignore_place_backoff", True)
-                    ) and has_exit_sell_place and ((not sell_reconcile_lock_active) or must_exit_active)
+                    ) and has_exit_sell_place and (not has_exit_flow_sell_place) and ((not sell_reconcile_lock_active) or must_exit_active)
                     if (
                         place_backoff_active
                         and any(act.get("type") == "place" for act in actions)
@@ -8021,28 +8289,38 @@ def main() -> None:
                         blocked_reasons.add(reason2 or reason or "risk_check")
                         continue
 
-                if side == "BUY" and signal_skip_ratio > 0 and all_account_ids:
-                    skipped_account_ids = _pick_target_level_skipped_accounts(
-                        signal_id=signal_id,
-                        all_account_ids=all_account_ids,
+                if side == "BUY" and signal_skip_ratio > 0 and all_enabled_account_ids_global:
+                    follow_ids = _pick_token_sticky_follow_accounts(
+                        token_id=token_id,
+                        all_account_ids=all_enabled_account_ids_global,
                         skip_ratio=signal_skip_ratio,
                         now_ts=now_ts,
-                        decision_cache=target_level_signal_decisions,
+                        decision_cache=target_level_token_decisions,
+                        seed=target_level_seed,
+                        assigned_level=signal_target_level,
                     )
-                    skipped_set = set(skipped_account_ids)
-                    follow_ids = [acct_id for acct_id in all_account_ids if acct_id not in skipped_set]
+                    follow_set = set(follow_ids)
+                    skipped_account_ids = [
+                        acct_id
+                        for acct_id in _normalize_account_ids(all_enabled_account_ids_global)
+                        if acct_id not in follow_set
+                    ]
                     skip_count = len(skipped_account_ids)
-                    if signal_id not in target_level_logged_signals and skip_count > 0:
+                    decision_entry = target_level_token_decisions.get(str(token_id)) or {}
+                    if token_id not in target_level_logged_tokens and skip_count > 0:
                         skip_payload = {
                             "ts": int(now_ts),
                             "time_utc": datetime.now(timezone.utc).isoformat(),
+                            "assignment_mode": "token_sticky",
                             "token_id": token_id,
                             "token_key": token_key,
+                            "cohort_key": token_id,
                             "source_target": signal_source_target,
                             "source_target_short": _shorten_address(signal_source_target),
-                            "target_level": signal_target_level,
-                            "skip_ratio": float(signal_skip_ratio),
-                            "total_accounts": len(all_account_ids),
+                            "target_level": str(decision_entry.get("assigned_level") or signal_target_level),
+                            "skip_ratio": float(decision_entry.get("skip_ratio") or signal_skip_ratio),
+                            "seed": target_level_seed,
+                            "total_accounts": len(all_enabled_account_ids_global),
                             "skip_count": skip_count,
                             "skipped_accounts": [
                                 {
@@ -8067,18 +8345,18 @@ def main() -> None:
                             skip_payload,
                             logger,
                         )
-                        target_level_logged_signals.add(signal_id)
-                    if current_account_id in skipped_set:
-                        blocked_reasons.add(f"target_level_{signal_target_level}_random_skip")
+                        target_level_logged_tokens.add(token_id)
+                    if current_account_id not in follow_set:
+                        blocked_reasons.add(f"target_level_{signal_target_level}_token_skip")
                         logger.info(
-                            "[TARGET_LEVEL_SKIP] token_id=%s level=%s source=%s signal_id=%s account=%s skip_count=%s/%s",
+                            "[TARGET_LEVEL_SKIP] token_id=%s level=%s source=%s cohort_key=%s account=%s skip_count=%s/%s mode=token_sticky",
                             token_id,
-                            signal_target_level,
+                            str(decision_entry.get("assigned_level") or signal_target_level),
                             _shorten_address(signal_source_target),
-                            signal_id,
+                            token_id,
                             _shorten_address(current_account_id),
                             skip_count,
-                            len(all_account_ids),
+                            len(all_enabled_account_ids_global),
                         )
                         continue
 
@@ -8134,9 +8412,16 @@ def main() -> None:
                 and str(act.get("side") or "").upper() == "SELL"
                 for act in actions
             ) and is_exiting
+            has_exit_flow_sell_place = any(
+                act.get("type") == "place"
+                and str(act.get("side") or "").upper() == "SELL"
+                and bool(act.get("_exit_flow"))
+                for act in actions
+            ) and is_exiting
             ignore_place_backoff = (
                 bool(cfg.get("exit_ignore_place_backoff", True))
                 and has_exit_sell_place
+                and (not has_exit_flow_sell_place)
                 and ((not sell_reconcile_lock_active) or must_exit_active)
             )
             if (
@@ -8305,7 +8590,7 @@ if __name__ == "__main__":
         import os
         import sys
         import traceback
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         def _find_config_path(argv: list[str]) -> str | None:
             for idx, item in enumerate(argv):
@@ -8334,7 +8619,9 @@ if __name__ == "__main__":
         fatal_path = os.path.join(log_dir, "fatal_error.log")
         with open(fatal_path, "a", encoding="utf-8") as f:
             f.write("\n=== FATAL ERROR ===\n")
-            f.write(f"time_utc={datetime.utcnow().isoformat()}Z\n")
+            f.write(
+                f"time_utc={datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')}\n"
+            )
             f.write("argv=" + " ".join(sys.argv) + "\n")
             f.write(traceback.format_exc())
         raise
