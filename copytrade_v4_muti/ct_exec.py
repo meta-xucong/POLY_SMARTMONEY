@@ -126,6 +126,152 @@ def _is_fak_no_match(exc: Exception) -> bool:
     return ("no orders found to match" in text) and ("fak" in text)
 
 
+def _effective_buy_min_usd(
+    cfg: Optional[Dict[str, Any]],
+    price: float,
+    *,
+    is_taker: bool,
+    maker_min_shares: float = 0.0,
+) -> float:
+    if price <= 0:
+        return 1.0
+    if not isinstance(cfg, dict):
+        return 1.0
+    if is_taker:
+        min_order_usd = float(cfg.get("taker_min_order_usd_buy") or 0.0)
+        min_order_shares = float(cfg.get("taker_min_order_shares_buy") or 0.0)
+        effective_min_usd = max(1.0, min_order_usd)
+        if min_order_shares > 0:
+            effective_min_usd = max(effective_min_usd, min_order_shares * price)
+        return effective_min_usd
+    min_order_usd = float(cfg.get("min_order_usd") or 0.0)
+    min_order_shares = float(cfg.get("min_order_shares") or 0.0)
+    effective_min_usd = max(1.0, min_order_usd)
+    if maker_min_shares > 0:
+        effective_min_usd = max(effective_min_usd, maker_min_shares * price)
+    if min_order_shares > 0:
+        effective_min_usd = max(effective_min_usd, min_order_shares * price)
+    return effective_min_usd
+
+
+def _exit_sell_state_bucket(state: Optional[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    if not isinstance(state, dict):
+        return {}
+    bucket = state.setdefault("exit_sell_state", {})
+    if not isinstance(bucket, dict):
+        state["exit_sell_state"] = {}
+        bucket = state["exit_sell_state"]
+    return bucket
+
+
+def _clear_exit_sell_state(state: Optional[Dict[str, Any]], token_id: str) -> None:
+    if not token_id:
+        return
+    bucket = _exit_sell_state_bucket(state)
+    bucket.pop(str(token_id), None)
+
+
+def _get_or_create_exit_sell_entry(
+    state: Optional[Dict[str, Any]],
+    token_id: str,
+    now_ts: int,
+    my_shares: Optional[float] = None,
+) -> Dict[str, Any]:
+    bucket = _exit_sell_state_bucket(state)
+    entry = bucket.get(str(token_id))
+    if not isinstance(entry, dict):
+        shares = float(my_shares or 0.0)
+        entry = {
+            "stage": 1,
+            "enter_ts": int(now_ts),
+            "stage_since_ts": int(now_ts),
+            "last_progress_ts": int(now_ts),
+            "progress_ref_shares": shares,
+            "last_seen_shares": shares,
+            "no_match_count": 0,
+            "no_bid_count": 0,
+            "pause_until": 0,
+            "pause_reason": "",
+        }
+        bucket[str(token_id)] = entry
+    return entry
+
+
+def _set_exit_sell_stage(
+    token_id: str,
+    entry: Dict[str, Any],
+    stage: int,
+    now_ts: int,
+    reason: str,
+) -> None:
+    prev_stage = int(entry.get("stage") or 0)
+    if prev_stage == int(stage):
+        return
+    entry["stage"] = int(stage)
+    entry["stage_since_ts"] = int(now_ts)
+    logger.info(
+        "[EXIT_STAGE] token_id=%s stage=%s prev_stage=%s reason=%s",
+        token_id,
+        stage,
+        prev_stage,
+        reason,
+    )
+
+
+def _set_exit_sell_pause(
+    token_id: str,
+    entry: Dict[str, Any],
+    now_ts: int,
+    pause_sec: int,
+    reason: str,
+) -> None:
+    until = int(now_ts) + max(0, int(pause_sec))
+    entry["pause_until"] = until
+    entry["pause_reason"] = str(reason or "")
+    entry["no_match_count"] = 0
+    entry["no_bid_count"] = 0
+    _set_exit_sell_stage(token_id, entry, 4, now_ts, reason)
+    logger.info(
+        "[EXIT_PAUSE] token_id=%s reason=%s pause_sec=%s until=%s",
+        token_id,
+        reason,
+        pause_sec,
+        until,
+    )
+
+
+def _record_exit_sell_no_match(
+    state: Optional[Dict[str, Any]],
+    token_id: str,
+    now_ts: int,
+    cfg: Optional[Dict[str, Any]],
+) -> None:
+    if not token_id or not isinstance(state, dict):
+        return
+    entry = _get_or_create_exit_sell_entry(state, token_id, now_ts)
+    count = int(entry.get("no_match_count") or 0) + 1
+    entry["no_match_count"] = count
+    pause_after = 2
+    pause_sec = 90
+    if isinstance(cfg, dict):
+        try:
+            pause_after = max(1, int(cfg.get("exit_no_match_pause_after") or 2))
+        except Exception:
+            pause_after = 2
+        try:
+            pause_sec = max(0, int(cfg.get("exit_no_match_pause_sec") or 90))
+        except Exception:
+            pause_sec = 90
+    logger.info(
+        "[EXIT_NO_MATCH] token_id=%s count=%s threshold=%s",
+        token_id,
+        count,
+        pause_after,
+    )
+    if count >= pause_after:
+        _set_exit_sell_pause(token_id, entry, now_ts, pause_sec, "no_match")
+
+
 def _post_order_with_retry(
     client: Any,
     signed_order: Any,
@@ -276,6 +422,7 @@ def reconcile_one(
     deadband = float(cfg.get("deadband_shares") or 0)
     delta = desired_shares - my_shares
     if abs(delta) <= deadband and not open_orders:
+        _clear_exit_sell_state(state, token_id)
         return actions
 
     abs_delta = abs(delta)
@@ -321,6 +468,7 @@ def reconcile_one(
             size = slice_min
 
     side = "BUY" if delta > 0 else "SELL"
+    is_exit_sell = bool(is_exiting and side == "SELL" and my_shares > 1e-12)
     price: Optional[float] = None
     best_bid = orderbook.get("best_bid")
     best_ask = orderbook.get("best_ask")
@@ -344,6 +492,91 @@ def reconcile_one(
             tick_size = market_tick_size
     taker_spread_thr = float(cfg.get("taker_spread_threshold") or 0.01)
     taker_enabled = bool(cfg.get("taker_enabled", True))
+    exit_stage1_wait = max(0, int(cfg.get("exit_stage1_wait_sec") or 45))
+    exit_stage2_wait = max(0, int(cfg.get("exit_stage2_wait_sec") or 120))
+    exit_stage3_taker_max_spread = float(cfg.get("exit_stage3_taker_max_spread") or 0.05)
+    exit_stage3_slice_ratio = float(cfg.get("exit_stage3_slice_ratio") or 0.5)
+    exit_stage3_maker_hold_sec = max(0, int(cfg.get("exit_stage3_maker_hold_sec") or 180))
+    exit_progress_min_shares = float(
+        cfg.get("exit_progress_min_shares")
+        or max(float(cfg.get("min_order_shares") or 0.0) / 2.0, 0.5)
+    )
+    exit_no_bid_pause_rounds = max(1, int(cfg.get("exit_no_bid_pause_rounds") or 3))
+    exit_dead_book_pause_sec = max(0, int(cfg.get("exit_dead_book_pause_sec") or 300))
+    exit_stage = 0
+    exit_entry: Optional[Dict[str, Any]] = None
+    exit_force_near_bid = False
+    exit_force_taker = False
+
+    if is_exit_sell:
+        exit_entry = _get_or_create_exit_sell_entry(state, token_id, now_ts, my_shares=my_shares)
+        progress_ref_shares = float(exit_entry.get("progress_ref_shares") or my_shares)
+        if progress_ref_shares - float(my_shares) >= exit_progress_min_shares - 1e-12:
+            exit_entry["last_progress_ts"] = int(now_ts)
+            exit_entry["progress_ref_shares"] = float(my_shares)
+            exit_entry["last_seen_shares"] = float(my_shares)
+            exit_entry["pause_until"] = 0
+            exit_entry["pause_reason"] = ""
+            exit_entry["no_match_count"] = 0
+            exit_entry["no_bid_count"] = 0
+            _set_exit_sell_stage(token_id, exit_entry, 1, now_ts, "progress")
+        else:
+            exit_entry["last_seen_shares"] = float(my_shares)
+        if best_bid is None or float(best_bid) <= 0:
+            no_bid_count = int(exit_entry.get("no_bid_count") or 0) + 1
+            exit_entry["no_bid_count"] = no_bid_count
+            if no_bid_count >= exit_no_bid_pause_rounds:
+                _set_exit_sell_pause(
+                    token_id,
+                    exit_entry,
+                    now_ts,
+                    exit_dead_book_pause_sec,
+                    "dead_book",
+                )
+        else:
+            exit_entry["no_bid_count"] = 0
+        pause_until = int(exit_entry.get("pause_until") or 0)
+        if pause_until > now_ts:
+            cancel_actions: List[Dict[str, Any]] = []
+            for order in open_orders:
+                order_id = order.get("order_id") or order.get("id")
+                if order_id:
+                    cancel_actions.append(
+                        {
+                            "type": "cancel",
+                            "order_id": order_id,
+                            "token_id": token_id,
+                            "ts": now_ts,
+                        }
+                    )
+            if cancel_actions:
+                logger.info(
+                    "[EXIT_PAUSE_CANCEL] token_id=%s reason=%s open_orders=%s until=%s",
+                    token_id,
+                    exit_entry.get("pause_reason") or "paused",
+                    len(cancel_actions),
+                    pause_until,
+                )
+                return cancel_actions
+            logger.info(
+                "[EXIT_PAUSE_HOLD] token_id=%s reason=%s until=%s",
+                token_id,
+                exit_entry.get("pause_reason") or "paused",
+                pause_until,
+            )
+            return actions
+        since_progress = max(0, now_ts - int(exit_entry.get("last_progress_ts") or now_ts))
+        if since_progress < exit_stage1_wait:
+            exit_stage = 1
+        elif since_progress < (exit_stage1_wait + exit_stage2_wait):
+            exit_stage = 2
+        else:
+            exit_stage = 3
+        _set_exit_sell_stage(token_id, exit_entry, exit_stage, now_ts, "elapsed_no_progress")
+        exit_force_near_bid = exit_stage >= 2 and best_bid is not None
+        exit_force_taker = exit_stage >= 3 and best_bid is not None
+    else:
+        _clear_exit_sell_state(state, token_id)
 
     spread: Optional[float] = None
     if best_bid is not None and best_ask is not None:
@@ -357,6 +590,58 @@ def reconcile_one(
         and spread is not None
         and spread <= (taker_spread_thr + 1e-12)
     )
+    if exit_force_taker:
+        spread_ok_for_exit = (
+            spread is None
+            or exit_stage3_taker_max_spread <= 0
+            or spread <= (exit_stage3_taker_max_spread + 1e-12)
+        )
+        if spread_ok_for_exit:
+            use_taker = True
+        else:
+            exit_force_taker = False
+            if (
+                is_exit_sell
+                and exit_entry is not None
+                and exit_stage >= 3
+                and exit_stage3_maker_hold_sec > 0
+            ):
+                stage_since = int(exit_entry.get("stage_since_ts") or now_ts)
+                stalled_sec = max(0, now_ts - stage_since)
+                if stalled_sec >= exit_stage3_maker_hold_sec:
+                    _set_exit_sell_pause(
+                        token_id,
+                        exit_entry,
+                        now_ts,
+                        exit_dead_book_pause_sec,
+                        "stage3_stalled",
+                    )
+                    cancel_actions: List[Dict[str, Any]] = []
+                    for order in open_orders:
+                        order_id = order.get("order_id") or order.get("id")
+                        if order_id:
+                            cancel_actions.append(
+                                {
+                                    "type": "cancel",
+                                    "order_id": order_id,
+                                    "token_id": token_id,
+                                    "ts": now_ts,
+                                }
+                            )
+                    if cancel_actions:
+                        logger.info(
+                            "[EXIT_STAGE3_PAUSE_CANCEL] token_id=%s stalled_sec=%s open_orders=%s",
+                            token_id,
+                            stalled_sec,
+                            len(cancel_actions),
+                        )
+                        return cancel_actions
+                    logger.info(
+                        "[EXIT_STAGE3_PAUSE_HOLD] token_id=%s stalled_sec=%s",
+                        token_id,
+                        stalled_sec,
+                    )
+                    return actions
     logger.debug(
         "[TAKER_CHECK] token_id=%s side=%s best_bid=%s best_ask=%s spread=%s thr=%s "
         "taker_enabled=%s use_taker=%s open_orders=%s",
@@ -371,7 +656,9 @@ def reconcile_one(
         len(open_orders),
     )
 
-    if use_taker:
+    if exit_force_taker:
+        price = round_to_tick(float(best_bid), tick_size, direction="down")
+    elif use_taker:
         if side == "BUY":
             if best_ask is None:
                 use_taker = False
@@ -384,7 +671,15 @@ def reconcile_one(
                 price = round_to_tick(float(best_bid), tick_size, direction="down")
 
     if not use_taker:
-        if side == "BUY":
+        if exit_force_near_bid and side == "SELL":
+            if best_bid is not None:
+                price = float(best_bid) + (tick_size if tick_size > 0 else 0.0)
+                if best_ask is not None:
+                    price = min(float(best_ask), price)
+                price = round_to_tick(price, tick_size, direction="up")
+            elif best_ask is not None:
+                price = round_to_tick(float(best_ask), tick_size, direction="up")
+        elif side == "BUY":
             if best_bid is not None:
                 price = best_bid
             elif best_ask is not None:
@@ -454,6 +749,11 @@ def reconcile_one(
         ) or 0.0
     effective_min_shares = max(min_shares, api_min_shares)
     size_step = api_min_shares if api_min_shares > 0 else 0.0
+    if is_exit_sell and exit_stage >= 3 and 0 < exit_stage3_slice_ratio < 1:
+        stage3_size = abs_delta * exit_stage3_slice_ratio
+        if effective_min_shares > 0 and abs_delta > effective_min_shares + 1e-12:
+            stage3_size = max(stage3_size, effective_min_shares)
+        size = min(abs_delta, max(0.0, stage3_size))
     if side == "BUY" and desired_shares <= 0:
         return actions
     if side == "BUY" and my_shares >= desired_shares - deadband:
@@ -505,9 +805,18 @@ def reconcile_one(
             if tick_size > 0:
                 price = round_to_tick(price, tick_size, direction="up")
         size = abs_delta
-        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-        if min_order_usd > 0 and price > 0:
-            size = max(size, min_order_usd / price)
+        taker_min_usd = _effective_buy_min_usd(cfg, price, is_taker=True)
+        if taker_min_usd > 0 and price > 0:
+            bumped_size = max(size, taker_min_usd / price)
+            if bumped_size > size + 1e-12:
+                logger.info(
+                    "[MIN_TAKER_BUMP] token_id=%s old_size=%s bumped_size=%s min_usd=%s",
+                    token_id,
+                    size,
+                    bumped_size,
+                    taker_min_usd,
+                )
+            size = bumped_size
         if open_orders:
             for order in open_orders:
                 order_id = order.get("order_id") or order.get("id")
@@ -569,15 +878,17 @@ def reconcile_one(
         and size < effective_min_shares
         and side == "BUY"
         and not small_taker_override
+        and not use_taker
     ):
         if abs_delta + 1e-12 < effective_min_shares:
             # Completion tolerance: allow final top-up if overshoot <= 0.3 USD.
             completion_tol_usd = 0.3
-            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-            effective_min_usd = max(1.0, min_order_usd, effective_min_shares * price)
-            if min_order_shares > 0:
-                effective_min_usd = max(effective_min_usd, min_order_shares * price)
+            effective_min_usd = _effective_buy_min_usd(
+                cfg,
+                price,
+                is_taker=False,
+                maker_min_shares=effective_min_shares,
+            )
             gap_usd = abs_delta * price
             overshoot = effective_min_usd - gap_usd
             if gap_usd <= completion_tol_usd + 1e-9:
@@ -661,6 +972,41 @@ def reconcile_one(
             cap_shares_remaining,
         )
         size = bumped_size
+    taker_min_shares = 0.0
+    if side == "BUY" and use_taker and price > 0:
+        taker_min_usd = _effective_buy_min_usd(cfg, price, is_taker=True)
+        taker_min_shares = taker_min_usd / price
+        if size + 1e-12 < taker_min_shares and not small_taker_override:
+            bumped_size = taker_min_shares
+            if cap_shares_remaining is not None:
+                if cap_shares_remaining <= 0:
+                    logger.info(
+                        "[MIN_TAKER_SKIP] token_id=%s no_remaining cap_shares_remaining=%s "
+                        "planned_notional=%s my_shares=%s price=%s",
+                        token_id,
+                        cap_shares_remaining,
+                        planned_token_notional,
+                        my_shares,
+                        price,
+                    )
+                    return actions
+                bumped_size = min(bumped_size, cap_shares_remaining)
+            if bumped_size + 1e-12 < taker_min_shares:
+                logger.info(
+                    "[MIN_TAKER_SKIP] token_id=%s bumped_below_min bumped=%s min=%s",
+                    token_id,
+                    bumped_size,
+                    taker_min_shares,
+                )
+                return actions
+            logger.info(
+                "[MIN_TAKER_BUMP] token_id=%s old_size=%s bumped_size=%s min_usd=%s",
+                token_id,
+                size,
+                bumped_size,
+                taker_min_usd,
+            )
+            size = bumped_size
     if open_orders:
         total_open = 0.0
         for order in open_orders:
@@ -670,6 +1016,16 @@ def reconcile_one(
                 continue
         if (
             use_taker
+            and side == "BUY"
+            and taker_min_shares > 0
+            and size < taker_min_shares
+            and not small_taker_override
+            and not small_exit_taker_override
+        ):
+            size = max(size, taker_min_shares, total_open)
+        elif (
+            use_taker
+            and side != "BUY"
             and effective_min_shares > 0
             and size < effective_min_shares
             and not small_taker_override
@@ -703,8 +1059,10 @@ def reconcile_one(
     sell_size_before_step = size if side == "SELL" else 0.0
     if size_step > 0 and not small_taker_override and not small_exit_taker_override:
         size = round_to_step(size, size_step, direction="down")
-        if side == "BUY" and size + 1e-12 < effective_min_shares:
-            size = round_to_step(effective_min_shares, size_step, direction="up")
+        if side == "BUY":
+            min_shares_after_step = taker_min_shares if use_taker else effective_min_shares
+            if min_shares_after_step > 0 and size + 1e-12 < min_shares_after_step:
+                size = round_to_step(min_shares_after_step, size_step, direction="up")
         if size > max_shares_cap:
             size = max_shares_cap
         if side == "SELL" and not allow_short:
@@ -909,6 +1267,14 @@ def reconcile_one(
                         "_taker": True,
                         "_taker_spread": spread,
                         "_taker_thr": taker_spread_thr,
+                        **(
+                            {
+                                "_exit_flow": True,
+                                "_exit_stage": exit_stage,
+                            }
+                            if is_exit_sell
+                            else {}
+                        ),
                     }
                 )
             if force_taker_for_timeout:
@@ -959,6 +1325,8 @@ def reconcile_one(
                         "ts": now_ts,
                         "_available_shares": sellable_shares,
                         "_exit_consolidate": True,
+                        "_exit_flow": True,
+                        "_exit_stage": exit_stage,
                     }
                 )
                 state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
@@ -1021,6 +1389,14 @@ def reconcile_one(
                             "size": size,
                             "ts": now_ts,
                             "_reprice": True,
+                            **(
+                                {
+                                    "_exit_flow": True,
+                                    "_exit_stage": exit_stage,
+                                }
+                                if is_exit_sell
+                                else {}
+                            ),
                         }
                     )
                     state.setdefault("last_reprice_ts_by_token", {})[token_id] = now_ts
@@ -1047,6 +1423,14 @@ def reconcile_one(
                     "_taker_thr": taker_spread_thr,
                 }
                 if use_taker
+                else {}
+            ),
+            **(
+                {
+                    "_exit_flow": True,
+                    "_exit_stage": exit_stage,
+                }
+                if is_exit_sell
                 else {}
             ),
         }
@@ -1370,6 +1754,10 @@ def apply_actions(
         if action.get("type") != "place":
             continue
         is_taker = bool(action.get("_taker"))
+        token_id_action = str(action.get("token_id") or "")
+        side_u = str(action.get("side") or "").upper()
+        exit_stage_flag = int(action.get("_exit_stage") or 0)
+        is_exit_flow = bool(action.get("_exit_flow")) and side_u == "SELL"
         if dry_run:
             if not is_taker:
                 updated.append(
@@ -1448,24 +1836,24 @@ def apply_actions(
             except Exception:
                 taker_fak_retry_delay_sec = 0.5
             taker_fak_fallback_to_maker = bool(cfg.get("taker_fak_fallback_to_maker", True))
+        if side_u == "BUY":
+            taker_fak_fallback_to_maker = False
+        if is_exit_flow:
+            taker_fak_fallback_to_maker = False
         executed_as_taker = is_taker
         size_for_record = float(action.get("size") or 0.0)
-        side_u = str(action.get("side") or "").upper()
         price = float(action.get("price") or 0.0)
         size = float(action.get("size") or 0.0)
         # Ensure minimum buy notional (avoid exchange rejection like "min size: $1").
         if side_u == "BUY" and cfg is not None and price > 0 and size > 0:
-            min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-            min_order_shares = float(cfg.get("min_order_shares") or 0.0)
             max_order_usd = float(cfg.get("max_order_usd") or 0.0)
-            effective_min_usd = max(1.0, min_order_usd)
-            if min_order_shares > 0:
-                effective_min_usd = max(effective_min_usd, min_order_shares * price)
+            effective_min_usd = _effective_buy_min_usd(cfg, price, is_taker=is_taker)
             order_usd = abs(size) * price
             if order_usd < effective_min_usd:
                 if max_order_usd > 0 and effective_min_usd > max_order_usd + 1e-9:
                     logger.warning(
-                        "[MIN_BUY_SKIP] token_id=%s order_usd=%s min_usd=%s max_usd=%s",
+                        "[%s] token_id=%s order_usd=%s min_usd=%s max_usd=%s",
+                        "MIN_TAKER_SKIP" if is_taker else "MIN_BUY_SKIP",
                         action.get("token_id"),
                         order_usd,
                         effective_min_usd,
@@ -1477,7 +1865,8 @@ def apply_actions(
                 size_for_record = new_size
                 action["size"] = new_size
                 logger.info(
-                    "[MIN_BUY_BUMP] token_id=%s old_usd=%s new_usd=%s",
+                    "[%s] token_id=%s old_usd=%s new_usd=%s",
+                    "MIN_TAKER_BUMP" if is_taker else "MIN_BUY_BUMP",
                     action.get("token_id"),
                     order_usd,
                     effective_min_usd,
@@ -1507,11 +1896,9 @@ def apply_actions(
                     amount = abs(size) * price
                     # Enforce min notional right before sending to avoid rounding drift.
                     if cfg is not None and price > 0:
-                        min_order_usd = float(cfg.get("min_order_usd") or 0.0)
-                        min_order_shares = float(cfg.get("min_order_shares") or 0.0)
-                        effective_min_usd = max(1.0, min_order_usd)
-                        if min_order_shares > 0:
-                            effective_min_usd = max(effective_min_usd, min_order_shares * price)
+                        effective_min_usd = _effective_buy_min_usd(
+                            cfg, price, is_taker=True
+                        )
                         if amount < effective_min_usd:
                             amount = effective_min_usd
                             size_for_record = amount / price
@@ -1574,6 +1961,13 @@ def apply_actions(
                                 retry_exc,
                             )
                     if response is None:
+                        if is_exit_flow:
+                            _record_exit_sell_no_match(
+                                state,
+                                token_id_action,
+                                now_ts,
+                                cfg,
+                            )
                         if taker_fak_fallback_to_maker:
                             logger.warning(
                                 "[TAKER_FAK_FALLBACK] token_id=%s side=%s retries=%s -> maker GTC",
@@ -1592,6 +1986,19 @@ def apply_actions(
                             )
                             executed_as_taker = False
                         else:
+                            if side_u == "BUY":
+                                logger.info(
+                                    "[BUY_TAKER_HOLD] token_id=%s retries=%s reason=no_match",
+                                    token_id_action,
+                                    taker_fak_retry_max,
+                                )
+                            else:
+                                logger.info(
+                                    "[EXIT_TAKER_HOLD] token_id=%s side=%s stage=%s reason=no_match",
+                                    token_id_action,
+                                    side_u,
+                                    exit_stage_flag,
+                                )
                             raise last_fak_exc
             else:
                 if side_u == "BUY" and cfg is not None and price > 0:
