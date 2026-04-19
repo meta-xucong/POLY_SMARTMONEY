@@ -147,6 +147,7 @@ def load_state(path: str) -> Dict[str, Any]:
 
 def save_state(path: str, state: Dict[str, Any]) -> None:
     file_path = Path(path)
+    file_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
     tmp_path.write_text(
         json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),

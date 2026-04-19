@@ -70,7 +70,9 @@ from ct_state import load_state, save_state
 
 
 DEFAULT_CONFIG_PATH = Path(__file__).with_name("copytrade_config.json")
-DEFAULT_STATE_PATH = Path(__file__).with_name("state.json")
+DEFAULT_LOG_DIR = Path(__file__).with_name("logs")
+DEFAULT_STATE_DIR = DEFAULT_LOG_DIR / "state"
+DEFAULT_STATE_PATH = DEFAULT_STATE_DIR / "state.json"
 
 
 class LogDeduplicator:
@@ -142,6 +144,12 @@ def _state_path_for_target(state_path: Path, target_address: str) -> Path:
         safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", addr)[:32] or "unknown"
         fname = f"state_{safe}.json"
     return state_path.with_name(fname)
+
+
+def _state_dir_for_base(base_dir: Path) -> Path:
+    state_dir = base_dir / "logs" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir
 
 
 def _load_config(path: Path) -> Dict[str, Any]:
@@ -1012,6 +1020,93 @@ def _should_hold_reentry_buy(
     if strong_by_shares or strong_by_usd:
         return False, "force_override"
     return True, "cooldown_hold"
+
+
+def _should_execute_sell_source_signal(
+    *,
+    state: Dict[str, Any],
+    token_id: str,
+    now_ts: int,
+    current_sell_sources: Dict[str, int],
+    primary_entry_source: str,
+    enabled: bool,
+    secondary_consensus_count: int,
+    secondary_window_sec: int,
+    primary_immediate: bool = True,
+) -> tuple[bool, str, List[str]]:
+    """
+    Source-aware SELL gating.
+
+    - Primary entry source SELL can exit immediately.
+    - Secondary sources must form a small recent consensus.
+    - If the primary source is unknown, fall back to the legacy immediate path
+      so older positions do not get stranded.
+    """
+    token = str(token_id or "").strip()
+    if not token:
+        return True, "missing_token", []
+    if not enabled:
+        return True, "disabled", sorted(
+            str(src or "").strip().lower()
+            for src in (current_sell_sources or {}).keys()
+            if str(src or "").strip()
+        )
+
+    primary = str(primary_entry_source or "").strip().lower()
+    vote_bucket = state.setdefault("sell_source_votes", {})
+    if not isinstance(vote_bucket, dict):
+        vote_bucket = {}
+        state["sell_source_votes"] = vote_bucket
+    raw_votes = vote_bucket.get(token)
+    token_votes: Dict[str, int] = {}
+    if isinstance(raw_votes, dict):
+        cutoff = int(now_ts) - max(1, int(secondary_window_sec or 0))
+        for src, ts in raw_votes.items():
+            src_norm = str(src or "").strip().lower()
+            if not src_norm:
+                continue
+            try:
+                ts_i = int(ts or 0)
+            except Exception:
+                continue
+            if secondary_window_sec <= 0 or ts_i >= cutoff:
+                token_votes[src_norm] = ts_i
+
+    current_norm: Dict[str, int] = {}
+    for src, ts in (current_sell_sources or {}).items():
+        src_norm = str(src or "").strip().lower()
+        if not src_norm:
+            continue
+        try:
+            ts_i = int(ts or 0)
+        except Exception:
+            ts_i = 0
+        if ts_i <= 0:
+            ts_i = int(now_ts)
+        current_norm[src_norm] = max(current_norm.get(src_norm, 0), ts_i)
+        token_votes[src_norm] = max(token_votes.get(src_norm, 0), ts_i)
+
+    if token_votes:
+        vote_bucket[token] = token_votes
+    else:
+        vote_bucket.pop(token, None)
+
+    sellers = sorted(token_votes)
+    if not current_norm:
+        return True, "no_source_fallback", sellers
+    if not primary:
+        vote_bucket.pop(token, None)
+        return True, "missing_primary_source_fallback", sorted(current_norm)
+    if primary_immediate and primary in current_norm:
+        vote_bucket.pop(token, None)
+        return True, "primary_source_sell", sorted(current_norm)
+
+    secondary_sources = sorted(src for src in token_votes if src != primary)
+    needed = max(1, int(secondary_consensus_count or 0))
+    if len(secondary_sources) >= needed:
+        vote_bucket.pop(token, None)
+        return True, "secondary_source_consensus", secondary_sources
+    return False, "secondary_source_consensus_wait", secondary_sources
 
 
 def _topic_risk_decay_score(score: float, elapsed_sec: int, window_sec: int) -> float:
@@ -2502,7 +2597,9 @@ def _finalize_exited_token_state(
     for key in (
         "must_exit_tokens",
         "last_nonzero_my_shares",
+        "last_allowed_target_sell_action_ts_by_token",
         "sell_shares_accumulator",
+        "sell_source_votes",
         "exit_sell_state",
         "intent_keys",
         "topic_unfilled_attempts",
@@ -3008,7 +3105,7 @@ def _state_path_for_account(base_dir: Path, target_address: str, my_address: str
     else:
         my_part = re.sub(r"[^a-zA-Z0-9_-]+", "_", my_short)[:16] or "unknown"
 
-    return base_dir / f"state_{target_part}_{my_part}.json"
+    return _state_dir_for_base(base_dir) / f"state_{target_part}_{my_part}.json"
 
 
 def _load_accounts_from_file(accounts_file: Path, logger: logging.Logger) -> List[Dict[str, Any]]:
@@ -4096,7 +4193,9 @@ def main() -> None:
         buy_sum_by_token: Dict[str, float] = {}
         sell_sum_by_token: Dict[str, float] = {}
         buy_signal_source_by_token: Dict[str, str] = {}
+        sell_signal_sources_by_token: Dict[str, Dict[str, int]] = {}
         buy_signal_ms_by_token: Dict[str, int] = {}
+        sell_signal_ms_by_token: Dict[str, int] = {}
         actions_info: Dict[str, object] = {"ok": True, "incomplete": False}
         actions_list: list[Dict[str, object]] = []
         actions_source = str(cfg.get("actions_source") or "trades").lower()
@@ -4168,7 +4267,13 @@ def main() -> None:
         position_source = dict(cached_position_source)
         buy_source_filtered = 0
 
-        def _record_action(token_id: str, side: str, size: float, action_ms: int = 0) -> None:
+        def _record_action(
+            token_id: str,
+            side: str,
+            size: float,
+            action_ms: int = 0,
+            source_target: str = "",
+        ) -> None:
             if not token_id or size <= 0:
                 return
             if side == "BUY":
@@ -4184,13 +4289,13 @@ def main() -> None:
                     prev_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
                     if action_ms > prev_ms:
                         last_target_sell_action_ts_by_token[token_id] = int(action_ms)
-                _mark_must_exit_token(
-                    state,
-                    token_id,
-                    now_ts,
-                    source="target_sell_action",
-                    target_sell_ms=action_ms,
-                )
+                    prev_signal_ms = int(sell_signal_ms_by_token.get(token_id) or 0)
+                    if action_ms > prev_signal_ms:
+                        sell_signal_ms_by_token[token_id] = int(action_ms)
+                src = str(source_target or "").strip().lower()
+                if src:
+                    token_sources = sell_signal_sources_by_token.setdefault(token_id, {})
+                    token_sources[src] = max(int(token_sources.get(src) or 0), int(now_ts))
 
         # Use shared cached target actions (filtered by per-account cursor)
         actions_list = [dict(a) for a in cached_actions]
@@ -4259,7 +4364,7 @@ def main() -> None:
                         buy_source_filtered += 1
                         continue
                 action["token_id"] = tid
-                _record_action(tid, side, size, action_ms)
+                _record_action(tid, side, size, action_ms, source_target)
                 if side == "BUY":
                     prev_action_ms = int(buy_signal_ms_by_token.get(tid) or 0)
                     if action_ms > 0 and action_ms >= prev_action_ms:
@@ -5440,10 +5545,21 @@ def main() -> None:
             must_exit_meta = must_exit_tokens.get(token_id)
             must_exit_active = isinstance(must_exit_meta, dict)
             last_target_sell_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
+            last_allowed_target_sell_action_ts_by_token = state.setdefault(
+                "last_allowed_target_sell_action_ts_by_token", {}
+            )
+            if not isinstance(last_allowed_target_sell_action_ts_by_token, dict):
+                last_allowed_target_sell_action_ts_by_token = {}
+                state["last_allowed_target_sell_action_ts_by_token"] = (
+                    last_allowed_target_sell_action_ts_by_token
+                )
+            last_allowed_target_sell_ms = int(
+                last_allowed_target_sell_action_ts_by_token.get(token_id) or 0
+            )
             must_exit_fresh = (
                 _is_must_exit_fresh(
                     meta=must_exit_meta,
-                    last_target_sell_ms=last_target_sell_ms,
+                    last_target_sell_ms=last_allowed_target_sell_ms,
                     now_ms=now_ms,
                     fresh_window_sec=must_exit_fresh_sell_window_sec,
                 )
@@ -5789,13 +5905,64 @@ def main() -> None:
             missing_streak = int(state.get("target_missing_streak", {}).get(token_id) or 0)
             last_seen_ts = int(state.get("target_last_seen_ts", {}).get(token_id) or 0)
             has_buy = bool(has_buy_by_token.get(token_id))
-            has_sell = bool(has_sell_by_token.get(token_id))
+            raw_has_sell = bool(has_sell_by_token.get(token_id))
             buy_sum = float(buy_sum_by_token.get(token_id, 0.0))
             sell_sum = float(sell_sum_by_token.get(token_id, 0.0))
-            action_seen = has_buy or has_sell
+            action_seen = has_buy or raw_has_sell
             topic_state = state.setdefault("topic_state", {})
             st = topic_state.get(token_id) or {"phase": "IDLE"}
             phase = st.get("phase", "IDLE")
+            primary_entry_source = str(
+                st.get("primary_entry_source") or signal_source_target or ""
+            ).strip().lower()
+            if has_buy and primary_entry_source and not str(st.get("primary_entry_source") or "").strip():
+                st["primary_entry_source"] = primary_entry_source
+                topic_state[token_id] = st
+            sell_signal_allowed = True
+            sell_signal_reason = "no_sell_action"
+            sell_signal_sellers: List[str] = []
+            if raw_has_sell:
+                sell_signal_allowed, sell_signal_reason, sell_signal_sellers = (
+                    _should_execute_sell_source_signal(
+                        state=state,
+                        token_id=token_id,
+                        now_ts=now_ts,
+                        current_sell_sources=sell_signal_sources_by_token.get(token_id) or {},
+                        primary_entry_source=primary_entry_source,
+                        enabled=_cfg_bool(cfg.get("sell_source_consensus_enabled"), True),
+                        secondary_consensus_count=int(
+                            cfg.get("sell_secondary_consensus_count") or 2
+                        ),
+                        secondary_window_sec=int(
+                            cfg.get("sell_secondary_consensus_window_sec") or 900
+                        ),
+                        primary_immediate=_cfg_bool(
+                            cfg.get("sell_primary_source_immediate_exit"), True
+                        ),
+                    )
+                )
+                if sell_signal_allowed:
+                    allowed_sell_ms = int(sell_signal_ms_by_token.get(token_id) or 0)
+                    if allowed_sell_ms <= 0:
+                        allowed_sell_ms = int(now_ms)
+                    prev_allowed_sell_ms = int(
+                        last_allowed_target_sell_action_ts_by_token.get(token_id) or 0
+                    )
+                    if allowed_sell_ms > prev_allowed_sell_ms:
+                        last_allowed_target_sell_action_ts_by_token[token_id] = int(
+                            allowed_sell_ms
+                        )
+                        last_allowed_target_sell_ms = int(allowed_sell_ms)
+                else:
+                    logger.info(
+                        "[HOLD] token_id=%s reason=%s primary=%s sellers=%s need=%s",
+                        token_id,
+                        sell_signal_reason,
+                        primary_entry_source or "",
+                        ",".join(sell_signal_sellers),
+                        int(cfg.get("sell_secondary_consensus_count") or 2),
+                    )
+            has_sell = raw_has_sell and sell_signal_allowed
             base_deadband_shares = float(cfg.get("deadband_shares") or 0.0)
             token_deadband_shares = base_deadband_shares
             token_reentry_cooldown_sec = reentry_cooldown_sec
@@ -5834,7 +6001,7 @@ def main() -> None:
                     token_id,
                     now_ts,
                     source="reconcile_loop",
-                    target_sell_ms=last_target_sell_ms,
+                    target_sell_ms=last_allowed_target_sell_ms,
                 )
                 if phase != "EXITING" and (my_shares > eps or open_orders_count > 0):
                     st = {
@@ -5845,6 +6012,9 @@ def main() -> None:
                         "did_probe": bool(st.get("did_probe")),
                         "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
                         "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
+                        "primary_entry_source": str(
+                            st.get("primary_entry_source") or primary_entry_source or ""
+                        ).strip().lower(),
                         "desired_shares": 0.0,
                     }
                     topic_state[token_id] = st
@@ -5918,6 +6088,7 @@ def main() -> None:
                         "did_probe": False,
                         "target_peak": float(t_now or 0.0),
                         "entry_buy_accum": 0.0,
+                        "primary_entry_source": primary_entry_source,
                         "desired_shares": 0.0,
                     }
                     topic_state[token_id] = st
@@ -5927,18 +6098,19 @@ def main() -> None:
                 # If topic state was cleaned to IDLE but a fresh SELL arrives while we still
                 # hold shares/open orders, recover EXITING immediately instead of treating it
                 # as non-topic SELL (which can be throttled by normal cooldown/accumulator).
-                last_target_sell_ms = int(last_target_sell_action_ts_by_token.get(token_id) or 0)
                 recent_target_sell = (
-                    last_target_sell_ms > 0
-                    and (now_ms - last_target_sell_ms) <= online_sell_recover_window_sec * 1000
+                    last_allowed_target_sell_ms > 0
+                    and (now_ms - last_allowed_target_sell_ms)
+                    <= online_sell_recover_window_sec * 1000
                 )
                 recover_by_recent_target_sell = (
                     phase == "IDLE"
-                    and (not has_sell)
+                    and (not raw_has_sell)
                     and recent_target_sell
                     and (my_shares > eps or open_orders_count > 0)
                     and (not t_now_present)
-                    and (now_ms - last_target_sell_ms) >= online_sell_recover_grace_sec * 1000
+                    and (now_ms - last_allowed_target_sell_ms)
+                    >= online_sell_recover_grace_sec * 1000
                 )
                 if (
                     phase == "IDLE"
@@ -5953,6 +6125,9 @@ def main() -> None:
                         "did_probe": bool(st.get("did_probe")),
                         "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
                         "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
+                        "primary_entry_source": str(
+                            st.get("primary_entry_source") or primary_entry_source or ""
+                        ).strip().lower(),
                         "desired_shares": 0.0,
                     }
                     topic_state[token_id] = st
@@ -5962,7 +6137,7 @@ def main() -> None:
                         token_id,
                         now_ts,
                         source="topic_exit_recover",
-                        target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
+                        target_sell_ms=last_allowed_target_sell_ms,
                     )
                     logger.info(
                         "[TOPIC] EXIT_RECOVER token_id=%s reason=%s my_shares=%s orders=%s",
@@ -6001,7 +6176,7 @@ def main() -> None:
                         token_id,
                         now_ts,
                         source="topic_exit_signal",
-                        target_sell_ms=int(last_target_sell_action_ts_by_token.get(token_id) or 0),
+                        target_sell_ms=last_allowed_target_sell_ms,
                     )
                     logger.info("[TOPIC] EXIT token_id=%s first_sell_ts=%s", token_id, now_ts)
 
@@ -7356,6 +7531,9 @@ def main() -> None:
                     "did_probe": bool(st.get("did_probe")),
                     "target_peak": float(st.get("target_peak") or float(t_now or 0.0)),
                     "entry_buy_accum": float(st.get("entry_buy_accum") or 0.0),
+                    "primary_entry_source": str(
+                        st.get("primary_entry_source") or primary_entry_source or ""
+                    ).strip().lower(),
                     "desired_shares": 0.0,
                 }
                 topic_state[token_id] = st
