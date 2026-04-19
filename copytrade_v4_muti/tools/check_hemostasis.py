@@ -1,9 +1,16 @@
 import json
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR if (SCRIPT_DIR / "logs").exists() else SCRIPT_DIR.parent
+STATE_DIR = ROOT / "logs" / "state"
 
 # Read state files to find hemostasis candidates from the latest scan
-for sf in ['state_d748_2125_0369_2a12.json', 'state_d748_2125_0862_8403.json']:
-    print(f"\n=== {sf} ===")
-    with open(sf, 'r', encoding='utf-8') as f:
+for state_name in ['state_d748_2125_0369_2a12.json', 'state_d748_2125_0862_8403.json']:
+    state_file = STATE_DIR / state_name
+    print(f"\n=== {state_file.name} ===")
+    with open(state_file, 'r', encoding='utf-8') as f:
         s = json.load(f)
     
     my_pos = s.get('my_positions', [])

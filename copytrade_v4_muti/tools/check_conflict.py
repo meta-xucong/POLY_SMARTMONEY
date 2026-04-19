@@ -1,12 +1,19 @@
 import json
+from pathlib import Path
+
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+ROOT = SCRIPT_DIR if (SCRIPT_DIR / "logs").exists() else SCRIPT_DIR.parent
+STATE_DIR = ROOT / "logs" / "state"
 
 tokens_of_interest = [
     '96397081496122471303936256377287180706458717603115171106140126963333785784378',
     '21743669032210695168079601505378236205866986767926346409604806906483294819314',
 ]
 
-for state_file in ['state_d748_2125_0369_2a12.json', 'state_d748_2125_0862_8403.json']:
-    print(f"\n=== {state_file} ===")
+for state_name in ['state_d748_2125_0369_2a12.json', 'state_d748_2125_0862_8403.json']:
+    state_file = STATE_DIR / state_name
+    print(f"\n=== {state_file.name} ===")
     with open(state_file, 'r', encoding='utf-8') as f:
         s = json.load(f)
     
