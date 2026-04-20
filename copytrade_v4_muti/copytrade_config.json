@@ -1,4 +1,4 @@
-{
+﻿{
     "target_addresses":  [
                              {
                                  "address":  "0xd748c701ad93cfec32a3420e10f3b08e68612125",
@@ -8,7 +8,7 @@
                              {
                                  "address":  "0x39d0f1dca6fb7e5514858c1a337724a426764fe8",
                                  "ratio":  0.6,
-                                 "level":  "A",
+                                 "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "forces enter",
                                                               "us forces enter",
@@ -101,8 +101,8 @@
                              },
                              {
                                  "address":  "0x712433f69c169ebaaa67ce13f3f66f54575e70c1",
-                                 "ratio":  0.7875,
-                                 "level":  "A",
+                                 "ratio":  0.67,
+                                 "level":  "C",
                                  "blacklist_token_keys":  [
                                                               "end",
                                                               "march",
@@ -113,45 +113,33 @@
                                                               "high",
                                                               "ceasefire",
                                                               "april",
-                                                              "military",
                                                               "trump",
-                                                              "operations"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x226bf1220731af372b1e7d572959414f31b4cad6",
-                                 "ratio":  0.7743,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "blue",
-                                                              "devils",
-                                                              "duke",
-                                                              "state",
-                                                              "siena",
-                                                              "saints",
-                                                              "texas",
-                                                              "longhorns",
-                                                              "north",
-                                                              "carolina",
-                                                              "wolfpack",
-                                                              "huskies"
+                                                              "announces",
+                                                              "military"
                                                           ]
                              },
                              {
                                  "address":  "0x993f451b6d5c21996b1bf688493cea9c4c823ee3",
-                                 "ratio":  0.7448,
-                                 "level":  "B",
+                                 "ratio":  0.66,
+                                 "level":  "A",
                                  "blacklist_token_keys":  [
                                                               "iran",
                                                               "forces",
                                                               "enter",
-                                                              "march"
+                                                              "march",
+                                                              "trump",
+                                                              "monday",
+                                                              "china",
+                                                              "conference",
+                                                              "say",
+                                                              "during",
+                                                              "news"
                                                           ]
                              },
                              {
                                  "address":  "0xbb8e6477bcb4d0a79449507c607d36fd228fb243",
-                                 "ratio":  0.7418,
-                                 "level":  "B",
+                                 "ratio":  0.62,
+                                 "level":  "C",
                                  "blacklist_token_keys":  [
                                                               "iran",
                                                               "april",
@@ -159,100 +147,26 @@
                                                               "announces",
                                                               "trump",
                                                               "operations",
+                                                              "military",
                                                               "end",
-                                                              "against",
-                                                              "military"
+                                                              "against"
                                                           ]
-                             },
-                             {
-                                 "address":  "0xeafc14c8639ef6fbf882b74c3e6de2fe72d10d5c",
-                                 "ratio":  0.7337,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "iran",
-                                                              "march",
-                                                              "april",
-                                                              "ceasefire",
-                                                              "trump",
-                                                              "forces",
-                                                              "enter",
-                                                              "china",
-                                                              "visit",
-                                                              "meeting",
-                                                              "week",
-                                                              "say"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xbf2c878cd5d6043697b32067be141647deeb097c",
-                                 "ratio":  0.7254,
-                                 "level":  "B"
                              },
                              {
                                  "address":  "0x8c818a866e6a4e5821a4faac8418903e33e3dcd3",
-                                 "ratio":  0.7208,
-                                 "level":  "B",
+                                 "ratio":  0.71,
+                                 "level":  "A",
                                  "blacklist_token_keys":  [
                                                               "win",
                                                               "real",
-                                                              "betis",
                                                               "balompi",
+                                                              "betis",
                                                               "manchester"
                                                           ]
                              },
                              {
-                                 "address":  "0x0441a78d2fbc0b55b1d0141a7aa6054d724ab3aa",
-                                 "ratio":  0.7149,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "jazz",
-                                                              "blazers",
-                                                              "trail",
-                                                              "hawks",
-                                                              "grizzlies"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x52a17584eab3c45ad73c15d271b600a3cb9a7833",
-                                 "ratio":  0.7085,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "bitcoin",
-                                                              "march",
-                                                              "down",
-                                                              "am-11",
-                                                              "pm-2",
-                                                              "pm-12",
-                                                              "am-10"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xc86ada240605f98e885b8aaaf591fa56d6ddbcab",
-                                 "ratio":  0.7085,
-                                 "level":  "B"
-                             },
-                             {
-                                 "address":  "0x0dedae6a02ea2ff8018ba5f277632919ed1c9025",
-                                 "ratio":  0.6889,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "say",
-                                                              "during",
-                                                              "april",
-                                                              "median",
-                                                              "home",
-                                                              "value",
-                                                              "week",
-                                                              "between",
-                                                              "conference",
-                                                              "house",
-                                                              "white",
-                                                              "press"
-                                                          ]
-                             },
-                             {
                                  "address":  "0x5e73afb20c2b27caccdaad9e49b97fd336576697",
-                                 "ratio":  0.6851,
+                                 "ratio":  0.56,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "iran",
@@ -266,12 +180,16 @@
                                                               "april",
                                                               "ceasefire",
                                                               "trump",
-                                                              "forces"
+                                                              "forces",
+                                                              "israel",
+                                                              "deal",
+                                                              "new",
+                                                              "nato"
                                                           ]
                              },
                              {
                                  "address":  "0x2d40ca3ab44c1cf56677c85919a815bbf59cec52",
-                                 "ratio":  0.6732,
+                                 "ratio":  0.5,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "playoffs",
@@ -279,132 +197,30 @@
                                                               "bo5",
                                                               "vincere",
                                                               "natus",
+                                                              "blast",
                                                               "vitality",
                                                               "rotterdam",
                                                               "open",
-                                                              "blast",
                                                               "esports",
                                                               "fut",
-                                                              "pgl"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xf9b71663d723d28fa455db659098e1dacde860a4",
-                                 "ratio":  0.6677,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "iran",
-                                                              "march",
-                                                              "december",
-                                                              "enter",
-                                                              "forces",
-                                                              "april",
-                                                              "israel",
-                                                              "ceasefire",
-                                                              "kharg",
-                                                              "island",
-                                                              "iranian",
-                                                              "longer"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x1f6b85cb85876df272199039207b33166757267e",
-                                 "ratio":  0.6646,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "march",
-                                                              "bitcoin",
-                                                              "price",
-                                                              "above",
-                                                              "down",
-                                                              "ethereum",
-                                                              "april",
-                                                              "am-10",
-                                                              "pm-12",
-                                                              "pm-3",
-                                                              "pm-2",
-                                                              "am-12"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x75acf1aa88a3f5c613f2214486b91fa9fc1f33d7",
-                                 "ratio":  0.6491,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "trump",
-                                                              "say",
-                                                              "during",
-                                                              "iran",
-                                                              "march",
-                                                              "israel",
-                                                              "april",
-                                                              "times",
-                                                              "announces",
-                                                              "end",
-                                                              "military",
-                                                              "against"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x206b8801df5436eaa98362ec407873ece99b7d6a",
-                                 "ratio":  0.6466,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "march",
-                                                              "bitcoin",
-                                                              "down",
-                                                              "april",
-                                                              "pm-7",
-                                                              "elon",
-                                                              "musk",
-                                                              "post",
-                                                              "tweets",
-                                                              "pm-11",
-                                                              "pm-10",
-                                                              "am-12"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x05374492e37f036fb751d708fe487aeca60b5b0f",
-                                 "ratio":  0.6443,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "crude",
-                                                              "high",
-                                                              "hit",
-                                                              "oil",
-                                                              "march",
-                                                              "end",
-                                                              "one",
-                                                              "launch",
-                                                              "above",
-                                                              "fdv",
-                                                              "day",
-                                                              "april"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xffb0b9b292e406fd250854a35a0c9bd5612afa37",
-                                 "ratio":  0.6224,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "iran",
-                                                              "march",
-                                                              "april",
-                                                              "ceasefire",
-                                                              "enter",
-                                                              "forces",
-                                                              "israel",
-                                                              "strike",
-                                                              "iranian",
-                                                              "trump",
-                                                              "military",
-                                                              "may"
+                                                              "pgl",
+                                                              "next",
+                                                              "orb",
+                                                              "viktor",
+                                                              "prime",
+                                                              "minister",
+                                                              "hungary",
+                                                              "aurora",
+                                                              "gaming",
+                                                              "themongolz",
+                                                              "bo3",
+                                                              "astralis",
+                                                              "mibr"
                                                           ]
                              },
                              {
                                  "address":  "0x92d0cb81e6c891b835c8e0272e8c323095bd269e",
-                                 "ratio":  0.6219,
+                                 "ratio":  0.52,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "april",
@@ -418,57 +234,20 @@
                                                               "opposition",
                                                               "meeting",
                                                               "hormuz",
-                                                              "strait"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xdbade4c82fb72780a0db9a38f821d8671aba9c95",
-                                 "ratio":  0.6188,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "iran",
-                                                              "april",
-                                                              "december",
-                                                              "forces",
-                                                              "enter",
-                                                              "ceasefire",
-                                                              "march",
-                                                              "end",
-                                                              "against",
-                                                              "military",
-                                                              "hormuz",
-                                                              "trump"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x9199ba070c49a78d7b1eb029b5c03d0b2972dd2d",
-                                 "ratio":  0.6168,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "weekend",
-                                                              "box",
-                                                              "office",
-                                                              "opening",
-                                                              "less",
-                                                              "between",
-                                                              "you",
-                                                              "kill",
-                                                              "they",
-                                                              "hail",
-                                                              "mary",
-                                                              "project"
+                                                              "strait",
+                                                              "lebanon"
                                                           ]
                              },
                              {
                                  "address":  "0xd2678dc3b152a54900f28b0e849afe2049df9dc6",
-                                 "ratio":  0.6162,
+                                 "ratio":  0.62,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "win",
                                                               "arsenal",
                                                               "united",
-                                                              "nchen",
                                                               "bayern",
+                                                              "nchen",
                                                               "newcastle",
                                                               "pelicans",
                                                               "clippers",
@@ -479,27 +258,8 @@
                                                           ]
                              },
                              {
-                                 "address":  "0x9e7e57fbc4dd03dc7b0eea98f1f01bc100083e1d",
-                                 "ratio":  0.6103,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "fed",
-                                                              "happen",
-                                                              "cuts",
-                                                              "rate",
-                                                              "there",
-                                                              "meeting",
-                                                              "interest",
-                                                              "change",
-                                                              "rates",
-                                                              "june",
-                                                              "win",
-                                                              "election"
-                                                          ]
-                             },
-                             {
                                  "address":  "0x16bd7cc71f6da1e77d1d8255677abc75b9bae288",
-                                 "ratio":  0.5889,
+                                 "ratio":  0.47,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "april",
@@ -511,29 +271,18 @@
                                                               "nomination",
                                                               "netanyahu",
                                                               "out",
-                                                              "democratic",
+                                                              "alexandria",
                                                               "ocasio-cortez",
-                                                              "alexandria"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x7a2180022d383bd514276b7a2083a97e51e6ac9c",
-                                 "ratio":  0.5887,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "oil",
-                                                              "hit",
-                                                              "high",
-                                                              "crude",
-                                                              "april",
-                                                              "wti",
-                                                              "end",
-                                                              "march"
+                                                              "democratic",
+                                                              "republican",
+                                                              "vance",
+                                                              "duke",
+                                                              "blue"
                                                           ]
                              },
                              {
                                  "address":  "0xb4f2592e67c333e73c923547cfe05e768180e5fa",
-                                 "ratio":  0.5847,
+                                 "ratio":  0.59,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "april",
@@ -547,12 +296,13 @@
                                                               "yemen",
                                                               "trump",
                                                               "oil",
-                                                              "netanyahu"
+                                                              "netanyahu",
+                                                              "vance"
                                                           ]
                              },
                              {
                                  "address":  "0x098eddabb2d388f31e79aaf525e49588f22a6fa2",
-                                 "ratio":  0.5824,
+                                 "ratio":  0.5,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "fed",
@@ -566,40 +316,24 @@
                                                               "devils",
                                                               "duke",
                                                               "blue",
-                                                              "scorer"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x2c41d0ca2b4b2344912eead711f28cd4dcff133e",
-                                 "ratio":  0.5694,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "trump",
-                                                              "march",
-                                                              "visit",
-                                                              "april",
-                                                              "china",
-                                                              "may",
-                                                              "gabbard",
-                                                              "tulsi",
-                                                              "out",
-                                                              "transit",
-                                                              "between",
-                                                              "ships"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x18c465b7c1682655231a535faa692a8f7321f6dc",
-                                 "ratio":  0.5588,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "sweden",
-                                                              "poland"
+                                                              "scorer",
+                                                              "presidential",
+                                                              "nomination",
+                                                              "republican",
+                                                              "tucker",
+                                                              "carlson",
+                                                              "democratic",
+                                                              "gavin",
+                                                              "newsom",
+                                                              "cuts",
+                                                              "rate",
+                                                              "happen",
+                                                              "eurovision"
                                                           ]
                              },
                              {
                                  "address":  "0x31c518f864d1394361fec967b3daa9093a86ede4",
-                                 "ratio":  0.5554,
+                                 "ratio":  0.47,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "march",
@@ -610,16 +344,25 @@
                                                               "enter",
                                                               "iranian",
                                                               "ceasefire",
-                                                              "regime",
                                                               "fall",
+                                                              "regime",
                                                               "out",
-                                                              "netanyahu"
+                                                              "netanyahu",
+                                                              "win",
+                                                              "election",
+                                                              "harris",
+                                                              "kamala",
+                                                              "presidential",
+                                                              "elections",
+                                                              "launch",
+                                                              "tournament",
+                                                              "between"
                                                           ]
                              },
                              {
                                  "address":  "0x96bc505d7778e13148ceff384527aa0a9d1a7fb4",
-                                 "ratio":  0.5518,
-                                 "level":  "B",
+                                 "ratio":  0.42,
+                                 "level":  "C",
                                  "blacklist_token_keys":  [
                                                               "lol",
                                                               "winner",
@@ -627,8 +370,8 @@
                                                               "group",
                                                               "bo5",
                                                               "game",
-                                                              "stand",
                                                               "first",
+                                                              "stand",
                                                               "bilibili",
                                                               "lyon",
                                                               "esports",
@@ -637,7 +380,7 @@
                              },
                              {
                                  "address":  "0x7e35a2a8cfd1eb1e69dacd043206db5a787f1a6c",
-                                 "ratio":  0.5439,
+                                 "ratio":  0.55,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "april",
@@ -651,31 +394,24 @@
                                                               "talk",
                                                               "end",
                                                               "corina",
-                                                              "machado"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x6d9fc316c3b8377060a44b852ba664adbfd59790",
-                                 "ratio":  0.5362,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "iran",
-                                                              "march",
-                                                              "ceasefire",
-                                                              "may",
-                                                              "military",
-                                                              "end",
-                                                              "announces",
-                                                              "trump",
-                                                              "against",
-                                                              "operations",
-                                                              "forces",
-                                                              "enter"
+                                                              "machado",
+                                                              "top",
+                                                              "presidential",
+                                                              "mario",
+                                                              "galaxy",
+                                                              "super",
+                                                              "movie",
+                                                              "grossing",
+                                                              "philippe",
+                                                              "french",
+                                                              "douard",
+                                                              "apple",
+                                                              "app"
                                                           ]
                              },
                              {
                                  "address":  "0xd426adbc3c4461c86099c26221c877f20e42334a",
-                                 "ratio":  0.517,
+                                 "ratio":  0.52,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "iran",
@@ -689,12 +425,24 @@
                                                               "israel",
                                                               "action",
                                                               "announces",
-                                                              "nato"
+                                                              "nato",
+                                                              "win",
+                                                              "nba",
+                                                              "days",
+                                                              "last",
+                                                              "more",
+                                                              "luka",
+                                                              "mvp",
+                                                              "doncic",
+                                                              "finals",
+                                                              "knicks",
+                                                              "new",
+                                                              "york"
                                                           ]
                              },
                              {
                                  "address":  "0xd44e974a3edb232aa4aedbdcc59792b76a5f67e2",
-                                 "ratio":  0.5037,
+                                 "ratio":  0.51,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "iran",
@@ -712,122 +460,8 @@
                                                           ]
                              },
                              {
-                                 "address":  "0xcbbc5e035504421b084ad9248b660f6e9618b5d0",
-                                 "ratio":  0.5011,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "highest",
-                                                              "temperature",
-                                                              "march",
-                                                              "april",
-                                                              "between",
-                                                              "higher",
-                                                              "seoul",
-                                                              "shanghai",
-                                                              "city",
-                                                              "new",
-                                                              "york",
-                                                              "toronto"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xd0394bd0de8d901c3fde039a86bf08e6aa4a2532",
-                                 "ratio":  0.496,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "march",
-                                                              "netanyahu",
-                                                              "out",
-                                                              "iran",
-                                                              "april",
-                                                              "enter",
-                                                              "forces",
-                                                              "ceasefire",
-                                                              "trump",
-                                                              "win",
-                                                              "texas",
-                                                              "republican"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xf2f6af4f27ec2dcf4072095ab804016e14cd5817",
-                                 "ratio":  0.4901,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "march",
-                                                              "out",
-                                                              "netanyahu",
-                                                              "dip",
-                                                              "bitcoin",
-                                                              "seats",
-                                                              "parliamentary",
-                                                              "election",
-                                                              "most",
-                                                              "win",
-                                                              "april",
-                                                              "slovenian"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x0f9bf99cb7f86d70704edab6c7a234bc09bf7829",
-                                 "ratio":  0.4801,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "lol",
-                                                              "esports",
-                                                              "bo5",
-                                                              "first",
-                                                              "stand",
-                                                              "bnk",
-                                                              "fearx",
-                                                              "group",
-                                                              "bilibili",
-                                                              "game",
-                                                              "gaming",
-                                                              "winner"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xbe8b476070be7214c04e2b73ef56ad933157d14d",
-                                 "ratio":  0.4567,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "march",
-                                                              "down",
-                                                              "bitcoin",
-                                                              "ethereum",
-                                                              "am-12",
-                                                              "shanghai",
-                                                              "temperature",
-                                                              "highest",
-                                                              "pm-12",
-                                                              "am-10",
-                                                              "am-11",
-                                                              "am-6"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x67bb64fac5252df3f61ee2d91a4b1350e40eb6ef",
-                                 "ratio":  0.4535,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "counter-strike",
-                                                              "map",
-                                                              "winner",
-                                                              "bo3",
-                                                              "themongolz",
-                                                              "parivision",
-                                                              "vincere",
-                                                              "natus",
-                                                              "esports",
-                                                              "aurora",
-                                                              "gaming",
-                                                              "bucharest"
-                                                          ]
-                             },
-                             {
                                  "address":  "0xff165cf8eb75ee77933a7544d7cd600ccb2c7511",
-                                 "ratio":  0.4487,
+                                 "ratio":  0.45,
                                  "level":  "B",
                                  "blacklist_token_keys":  [
                                                               "hit",
@@ -839,103 +473,25 @@
                                                               "win",
                                                               "raiders",
                                                               "masters",
-                                                              "dechambeau",
                                                               "bryson",
-                                                              "tournament"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xed61f86bb5298d2f27c21c433ce58d80b88a9aa3",
-                                 "ratio":  0.4482,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "win",
-                                                              "end",
-                                                              "draw",
-                                                              "real",
-                                                              "madrid",
-                                                              "paris",
-                                                              "both",
-                                                              "score",
-                                                              "teams",
-                                                              "senators",
-                                                              "city",
-                                                              "united"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x7ac83882979ccb5665cea83cb269e558b55077cd",
-                                 "ratio":  0.4354,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "election",
-                                                              "win",
-                                                              "governor",
-                                                              "democratic",
-                                                              "primary",
-                                                              "paris",
-                                                              "municipal",
-                                                              "senate",
-                                                              "round",
-                                                              "mayor",
-                                                              "alaska",
-                                                              "oklahoma"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xe6535d86446728d567f4929557c2c4eb3cdbc4a7",
-                                 "ratio":  0.4252,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "rockets",
-                                                              "pacers",
-                                                              "lakers",
-                                                              "magic",
-                                                              "knicks",
-                                                              "warriors"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0xecb14ac6e9ca447ce2f2912e6217b43d7b655da3",
-                                 "ratio":  0.4209,
-                                 "level":  "B",
-                                 "blacklist_token_keys":  [
-                                                              "miami",
-                                                              "march",
-                                                              "iran",
-                                                              "forces",
-                                                              "enter",
-                                                              "michigan",
-                                                              "wolverines",
-                                                              "state",
-                                                              "connecticut",
-                                                              "huskies",
-                                                              "hurricanes",
-                                                              "redhawks"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x66c1a6fe836ff555ca32848646acedbbe93bfa3f",
-                                 "ratio":  0.404,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "trump",
-                                                              "say",
-                                                              "march",
-                                                              "during",
-                                                              "visit",
-                                                              "china",
-                                                              "white",
-                                                              "house",
-                                                              "iran",
-                                                              "april",
-                                                              "week",
-                                                              "events"
+                                                              "tournament",
+                                                              "dechambeau",
+                                                              "world",
+                                                              "championship",
+                                                              "nfl",
+                                                              "league",
+                                                              "vikings",
+                                                              "minnesota",
+                                                              "nba",
+                                                              "classic",
+                                                              "baseball",
+                                                              "series",
+                                                              "new"
                                                           ]
                              },
                              {
                                  "address":  "0x9c95df82fe2f55f522cee739cefb08f528dded41",
-                                 "ratio":  0.3759,
+                                 "ratio":  0.32,
                                  "level":  "C",
                                  "blacklist_token_keys":  [
                                                               "win",
@@ -946,48 +502,39 @@
                                                               "warriors",
                                                               "real",
                                                               "timberwolves",
-                                                              "nuggets",
                                                               "spurs",
+                                                              "nuggets",
                                                               "pistons",
-                                                              "hawks"
+                                                              "hawks",
+                                                              "bayern",
+                                                              "nchen"
                                                           ]
                              },
                              {
                                  "address":  "0x80a4552cdcde3b861b8adc146ab1fbd4711022cc",
-                                 "ratio":  0.3561,
+                                 "ratio":  0.36,
                                  "level":  "C",
                                  "blacklist_token_keys":  [
                                                               "iran",
                                                               "april",
                                                               "ceasefire",
                                                               "december",
-                                                              "forces",
                                                               "enter",
+                                                              "forces",
                                                               "fed",
                                                               "spread",
                                                               "bound",
                                                               "parliamentary",
                                                               "duke",
-                                                              "blue"
-                                                          ]
-                             },
-                             {
-                                 "address":  "0x9ba43501360dcacaca09caa523401c7447d8f8c2",
-                                 "ratio":  0.3092,
-                                 "level":  "C",
-                                 "blacklist_token_keys":  [
-                                                              "say",
+                                                              "devils",
+                                                              "world",
+                                                              "cup",
+                                                              "fifa",
+                                                              "brazil",
                                                               "trump",
-                                                              "during",
-                                                              "march",
-                                                              "week",
-                                                              "fury",
-                                                              "epic",
-                                                              "times",
-                                                              "press",
-                                                              "next",
-                                                              "house",
-                                                              "white"
+                                                              "inflation",
+                                                              "increase",
+                                                              "july"
                                                           ]
                              }
                          ],
