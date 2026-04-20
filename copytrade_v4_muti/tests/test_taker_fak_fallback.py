@@ -18,6 +18,7 @@ def test_apply_actions_taker_buy_no_match_does_not_fallback_to_maker(monkeypatch
 
     monkeypatch.setattr(ct_exec, "place_market_order", fake_place_market_order)
     monkeypatch.setattr(ct_exec, "place_order", fake_place_order)
+    monkeypatch.setattr(ct_exec, "_resolve_order_fee_rate_bps", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(ct_exec.time, "sleep", lambda *_args, **_kwargs: None)
 
     state = {}
@@ -68,6 +69,7 @@ def test_apply_actions_taker_sell_non_exit_can_still_fallback_to_maker(monkeypat
 
     monkeypatch.setattr(ct_exec, "place_market_order", fake_place_market_order)
     monkeypatch.setattr(ct_exec, "place_order", fake_place_order)
+    monkeypatch.setattr(ct_exec, "_resolve_order_fee_rate_bps", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(ct_exec.time, "sleep", lambda *_args, **_kwargs: None)
 
     state = {}
@@ -117,6 +119,7 @@ def test_apply_actions_exit_sell_no_match_pauses_without_fallback(monkeypatch):
 
     monkeypatch.setattr(ct_exec, "place_market_order", fake_place_market_order)
     monkeypatch.setattr(ct_exec, "place_order", fake_place_order)
+    monkeypatch.setattr(ct_exec, "_resolve_order_fee_rate_bps", lambda *_args, **_kwargs: 0)
     monkeypatch.setattr(ct_exec.time, "sleep", lambda *_args, **_kwargs: None)
 
     state = {
@@ -186,6 +189,7 @@ def test_apply_actions_taker_buy_uses_taker_specific_min_bump(monkeypatch):
 
     monkeypatch.setattr(ct_exec, "place_market_order", fake_place_market_order)
     monkeypatch.setattr(ct_exec, "place_order", fake_place_order)
+    monkeypatch.setattr(ct_exec, "_resolve_order_fee_rate_bps", lambda *_args, **_kwargs: 0)
 
     state = {}
     cfg = {
