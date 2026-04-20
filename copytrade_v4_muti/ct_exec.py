@@ -7,6 +7,8 @@ import threading
 import time
 from typing import Any, Dict, Iterable, List, Mapping, Optional
 
+import requests
+
 from ct_utils import round_to_step, round_to_tick, safe_float
 
 
@@ -37,6 +39,11 @@ class _SimpleRateLimiter:
 
 _DEFAULT_CLOB_MAX_RPS = float(os.getenv("CT_CLOB_MAX_RPS", "8"))
 _CLOB_LIMITER = _SimpleRateLimiter(_DEFAULT_CLOB_MAX_RPS)
+_DEFAULT_FEE_RATE_CACHE_TTL_SEC = max(
+    0.0, float(os.getenv("CT_FEE_RATE_CACHE_TTL_SEC", "300"))
+)
+_FEE_RATE_CACHE_LOCK = threading.Lock()
+_FEE_RATE_CACHE: Dict[str, Dict[str, Any]] = {}
 
 
 def configure_clob_rate_limit(rps: float) -> None:
@@ -124,6 +131,153 @@ def _is_engine_restarting(exc: Exception) -> bool:
 def _is_fak_no_match(exc: Exception) -> bool:
     text = _exc_text(exc).lower()
     return ("no orders found to match" in text) and ("fak" in text)
+
+
+def _normalize_fee_rate_bps(value: object) -> Optional[int]:
+    try:
+        if value is None:
+            return None
+        if isinstance(value, str) and not value.strip():
+            return None
+        fee_rate = int(float(value))
+    except (TypeError, ValueError):
+        return None
+    return max(0, fee_rate)
+
+
+def _extract_fee_rate_bps_from_meta(meta: object) -> Optional[int]:
+    if not isinstance(meta, Mapping):
+        return None
+    for key in (
+        "base_fee",
+        "baseFee",
+        "fee_rate_bps",
+        "feeRateBps",
+        "feeRate",
+        "fee_rate",
+    ):
+        fee_rate = _normalize_fee_rate_bps(meta.get(key))
+        if fee_rate is not None:
+            return fee_rate
+    return None
+
+
+def _extract_market_meta(
+    state: Optional[Dict[str, Any]], token_id: str
+) -> Optional[Dict[str, Any]]:
+    if not isinstance(state, dict) or not token_id:
+        return None
+    status_cache = state.get("market_status_cache")
+    if not isinstance(status_cache, dict):
+        return None
+    cached = status_cache.get(str(token_id))
+    if not isinstance(cached, dict):
+        return None
+    meta = cached.get("meta")
+    return meta if isinstance(meta, dict) else None
+
+
+def _fee_cache_key(host: str, token_id: str) -> str:
+    return f"{host.strip().rstrip('/') or 'https://clob.polymarket.com'}::{str(token_id)}"
+
+
+def _get_cached_fee_rate_bps(host: str, token_id: str) -> Optional[int]:
+    cache_key = _fee_cache_key(host, token_id)
+    with _FEE_RATE_CACHE_LOCK:
+        cached = _FEE_RATE_CACHE.get(cache_key)
+        if not isinstance(cached, dict):
+            return None
+        ts = float(cached.get("ts") or 0.0)
+        if (
+            _DEFAULT_FEE_RATE_CACHE_TTL_SEC > 0
+            and time.monotonic() - ts > _DEFAULT_FEE_RATE_CACHE_TTL_SEC
+        ):
+            return None
+        return _normalize_fee_rate_bps(cached.get("value"))
+
+
+def _get_stale_cached_fee_rate_bps(host: str, token_id: str) -> Optional[int]:
+    cache_key = _fee_cache_key(host, token_id)
+    with _FEE_RATE_CACHE_LOCK:
+        cached = _FEE_RATE_CACHE.get(cache_key)
+        if not isinstance(cached, dict):
+            return None
+        return _normalize_fee_rate_bps(cached.get("value"))
+
+
+def _set_cached_fee_rate_bps(host: str, token_id: str, fee_rate_bps: int) -> None:
+    cache_key = _fee_cache_key(host, token_id)
+    with _FEE_RATE_CACHE_LOCK:
+        _FEE_RATE_CACHE[cache_key] = {
+            "value": int(max(0, fee_rate_bps)),
+            "ts": time.monotonic(),
+        }
+
+
+def _get_client_host(client: Any) -> str:
+    for attr in ("host", "_host", "base_url", "endpoint"):
+        value = getattr(client, attr, None)
+        if value:
+            return str(value).rstrip("/")
+    return "https://clob.polymarket.com"
+
+
+def _resolve_order_fee_rate_bps(
+    client: Any,
+    token_id: str,
+    *,
+    state: Optional[Dict[str, Any]] = None,
+    timeout: Optional[float] = None,
+) -> int:
+    token_id = str(token_id or "").strip()
+    if not token_id:
+        raise ValueError("token_id is required to resolve fee rate")
+
+    meta = _extract_market_meta(state, token_id)
+    cached_meta_fee = _extract_fee_rate_bps_from_meta(meta)
+    if cached_meta_fee is not None:
+        return cached_meta_fee
+
+    fees_enabled = None
+    if isinstance(meta, Mapping):
+        fees_enabled = meta.get("feesEnabled")
+        if fees_enabled is None:
+            fees_enabled = meta.get("fees_enabled")
+    if fees_enabled is False:
+        return 0
+
+    host = _get_client_host(client)
+    cached_fee = _get_cached_fee_rate_bps(host, token_id)
+    if cached_fee is not None:
+        return cached_fee
+
+    url = f"{host}/fee-rate"
+    try:
+        resp = _call_with_timeout(requests.get, timeout, url, params={"token_id": token_id})
+        if resp.status_code == 404:
+            raise RuntimeError(f"fee-rate endpoint returned 404 for token_id={token_id}")
+        resp.raise_for_status()
+        payload = resp.json()
+        fee_rate = _extract_fee_rate_bps_from_meta(payload)
+        if fee_rate is None:
+            raise RuntimeError(
+                f"fee-rate endpoint returned no base_fee for token_id={token_id}: {payload}"
+            )
+        _set_cached_fee_rate_bps(host, token_id, fee_rate)
+        return fee_rate
+    except Exception as exc:
+        stale_fee = _get_stale_cached_fee_rate_bps(host, token_id)
+        if stale_fee is not None:
+            logger.warning(
+                "[FEE_RATE_STALE] token_id=%s fee_rate_bps=%s reason=%s",
+                token_id,
+                stale_fee,
+                exc,
+            )
+            return stale_fee
+        if fees_enabled is False:
+            return 0
+        raise RuntimeError(f"failed to resolve fee rate for token_id={token_id}: {exc}") from exc
 
 
 def _effective_buy_min_usd(
@@ -1545,6 +1699,7 @@ def place_order(
     side: str,
     price: float,
     size: float,
+    fee_rate_bps: Optional[int] = None,
     allow_partial: bool = True,
     timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -1575,6 +1730,8 @@ def place_order(
         allow_partial_key = "allowPartial"
     if allow_partial_key:
         order_kwargs[allow_partial_key] = allow_partial
+    if "fee_rate_bps" in params and fee_rate_bps is not None:
+        order_kwargs["fee_rate_bps"] = int(max(0, fee_rate_bps))
 
     order_args = OrderArgs(**order_kwargs)
     signed = client.create_order(order_args)
@@ -1604,6 +1761,7 @@ def place_market_order(
     side: str,
     amount: float,
     price: Optional[float] = None,
+    fee_rate_bps: Optional[int] = None,
     order_type: str = "FAK",
     timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -1638,6 +1796,8 @@ def place_market_order(
     if price is not None and float(price) > 0:
         if "price" in params:
             kwargs["price"] = float(price)
+    if "fee_rate_bps" in params and fee_rate_bps is not None:
+        kwargs["fee_rate_bps"] = int(max(0, fee_rate_bps))
 
     order_args = MarketOrderArgs(**kwargs)
 
@@ -1872,6 +2032,12 @@ def apply_actions(
                     effective_min_usd,
                 )
         try:
+            fee_rate_bps = _resolve_order_fee_rate_bps(
+                client,
+                token_id_action,
+                state=state,
+                timeout=api_timeout_sec,
+            )
             if is_taker:
                 if side_u == "BUY" and cfg is not None and planned_by_token_usd is not None:
                     max_per_token = float(cfg.get("max_notional_per_token") or 0.0)
@@ -1920,6 +2086,7 @@ def apply_actions(
                         side=side_u,
                         amount=amount,
                         price=price,
+                        fee_rate_bps=fee_rate_bps,
                         order_type=taker_order_type,
                         timeout=api_timeout_sec,
                     )
@@ -1937,6 +2104,7 @@ def apply_actions(
                                 side=side_u,
                                 amount=amount,
                                 price=price,
+                                fee_rate_bps=fee_rate_bps,
                                 order_type=taker_order_type,
                                 timeout=api_timeout_sec,
                             )
@@ -1981,6 +2149,7 @@ def apply_actions(
                                 side=side_u,
                                 price=price,
                                 size=size_for_record,
+                                fee_rate_bps=fee_rate_bps,
                                 allow_partial=allow_partial,
                                 timeout=api_timeout_sec,
                             )
@@ -2016,6 +2185,7 @@ def apply_actions(
                     side=side_u,
                     price=price,
                     size=size_for_record,
+                    fee_rate_bps=fee_rate_bps,
                     allow_partial=allow_partial,
                     timeout=api_timeout_sec,
                 )
@@ -2058,6 +2228,7 @@ def apply_actions(
                                         side=side_u,
                                         amount=abs(new_size),
                                         price=price,
+                                        fee_rate_bps=fee_rate_bps,
                                         order_type="FAK" if allow_partial else "FOK",
                                         timeout=api_timeout_sec,
                                     )
@@ -2068,6 +2239,7 @@ def apply_actions(
                                         side=side_u,
                                         price=price,
                                         size=new_size,
+                                        fee_rate_bps=fee_rate_bps,
                                         allow_partial=allow_partial,
                                         timeout=api_timeout_sec,
                                     )
@@ -2142,6 +2314,7 @@ def apply_actions(
                         side=side_u,
                         amount=abs(new_size) * price,
                         price=price,
+                        fee_rate_bps=fee_rate_bps,
                         order_type="FAK" if allow_partial else "FOK",
                         timeout=api_timeout_sec,
                     )
@@ -2152,6 +2325,7 @@ def apply_actions(
                         side=side_u,
                         price=price,
                         size=new_size,
+                        fee_rate_bps=fee_rate_bps,
                         allow_partial=allow_partial,
                         timeout=api_timeout_sec,
                     )
