@@ -72,7 +72,9 @@ if ($deleteResult.ExitCode -eq 0) {
     Write-Host "Task name: $taskName"
 } else {
     $deleteText = $deleteResult.Output
-    if ($deleteText -match "ERROR:" -or $deleteText -match "cannot find") {
+    $queryResult = Invoke-NativeCapture -FileName "schtasks.exe" -Arguments @("/Query", "/TN", $taskName)
+    $taskMissing = ($queryResult.ExitCode -ne 0)
+    if ($taskMissing) {
         Write-Host "Scheduled task was already absent." -ForegroundColor Yellow
         Write-Host "Task name: $taskName"
     } else {
